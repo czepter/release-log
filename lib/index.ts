@@ -159,11 +159,20 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     // unchanged file — for a good release and for a broken one alike. Both
     // states are already recorded; skip the fetch.
     if (indexed?.blobSha === entry.sha) continue;
-    if (failed !== null && indexed === null && failed.message.startsWith('sha:' + entry.sha)) continue;
+    if (failed !== null && indexed === null && failed.message.startsWith('sha:' + entry.sha)) {
+      // The file is still the same known-broken blob. No fetch, but it is
+      // still an error outstanding against this sync (spec: SyncOutcome.errors
+      // must reflect every error row, not just the ones re-checked this run).
+      errors += 1;
+      continue;
+    }
 
     const bytes = await gh.blob(ref, entry.sha);
     fetched += 1;
     if (bytes === null) {
+      // A file that used to parse and now doesn't must not go on serving
+      // its stale release row forever — drop it before recording the error.
+      db.delete(release).where(and(eq(release.logId, config.id), eq(release.path, entry.path))).run();
       const message = `sha:${entry.sha} blob not found`;
       writeSyncError(db, config.id, entry.path, message);
       errors += 1;
@@ -176,7 +185,10 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
       parsed = { ok: false as const, errors: [(err as Error).message] };
     }
     if (!parsed.ok) {
-      // A hand edit must never take the whole log down (spec §10).
+      // A hand edit must never take the whole log down (spec §10). But it
+      // must also not keep serving the old, now-stale content forever —
+      // the design is "an error row and no release row" for a broken path.
+      db.delete(release).where(and(eq(release.logId, config.id), eq(release.path, entry.path))).run();
       const message = `sha:${entry.sha} ${parsed.errors.join('; ')}`;
       writeSyncError(db, config.id, entry.path, message);
       errors += 1;
