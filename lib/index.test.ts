@@ -204,6 +204,30 @@ test('a second sync with no changes fetches nothing', async () => {
   });
 });
 
+test('a sync that throws partway through leaves head_sha at the previous value', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    const before = db.select().from(log).all()[0];
+
+    // A new release file moves the head and needs a blob fetch; make that
+    // fetch reject, the way a rate limit or a network error would.
+    const second = JSON.stringify({ ...JSON.parse(RELEASE), version: '2.0.0', date: '2026-02-01' });
+    const changed = { ...files, 'releases/2.0.0.json': second };
+    const base = fakeGitHub({ 'o/r': changed });
+    const failing: GitHub = {
+      head: (ref) => base.head(ref),
+      tree: (ref, commit) => base.tree(ref, commit),
+      blob: async () => { throw new Error('rate limited'); },
+    };
+
+    await assert.rejects(() => syncLog(db, failing, REF));
+
+    const after = db.select().from(log).all()[0];
+    assert.equal(after.headSha, before.headSha, 'head_sha must not move until the content it names has landed');
+  });
+});
+
 test('only the changed file is fetched', async () => {
   await withDb(async (db) => {
     const second = JSON.stringify({ ...JSON.parse(RELEASE), version: '2.0.0', date: '2026-02-01' });

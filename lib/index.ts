@@ -127,6 +127,8 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // The repo parses, so any earlier complaint about it is stale.
   db.delete(problem).where(eq(problem.path, repoPath)).run();
 
+  // head_sha and indexed_at are deliberately not written here — see the
+  // update after the release and media sweeps below.
   db.insert(log).values({
     publicId: config.id,
     repoOwner: ref.owner,
@@ -137,9 +139,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     visibility: config.visibility,
     curationNotes: config.curation_notes,
     state: 'active',
-    headSha: head,
     configBlobSha: configEntry.sha,
-    indexedAt: now(),
   }).onConflictDoUpdate({
     target: log.publicId,
     set: {
@@ -150,9 +150,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
       visibility: config.visibility,
       curationNotes: config.curation_notes,
       state: 'active',
-      headSha: head,
       configBlobSha: configEntry.sha,
-      indexedAt: now(),
     },
   }).run();
 
@@ -289,6 +287,13 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
       db.delete(syncError).where(and(eq(syncError.logId, config.id), eq(syncError.path, row.path))).run();
     }
   }
+
+  // head_sha must not name a commit until the content it names has fully
+  // landed: a crash or a thrown error partway through the loops above must
+  // leave the previous head_sha in place, not claim the new one over
+  // incomplete content (spec: the ETag derived from head_sha must never
+  // point at a partial sync).
+  db.update(log).set({ headSha: head, indexedAt: now() }).where(eq(log.publicId, config.id)).run();
 
   return { logId: config.id, fetched, errors, frozen: false };
 }
