@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileReader } from './store.ts';
 
 function fixture(): string {
@@ -95,15 +95,14 @@ test('fileReader skips a dangling symlink under root instead of throwing', () =>
 
 test('fileReader resolves a relative root so media requests are not silently denied', () => {
   const root = fixture();
-  const cwd = process.cwd();
-  process.chdir(root);
-  try {
-    const r = fileReader('.');
-    const blob = r.media('abc123', 'media/shot.png');
-    assert.equal(blob?.type, 'image/png');
-  } finally {
-    process.chdir(cwd);
-  }
+  // Build a path relative to cwd, not by mutating process.chdir.
+  // fileReader(rootInput) calls resolve(rootInput), so a relative root is
+  // resolved relative to cwd and becomes absolute. This test confirms it works
+  // end-to-end: a relative path both serves logs and media successfully.
+  const relativeRoot = relative(process.cwd(), root);
+  const r = fileReader(relativeRoot);
+  const blob = r.media('abc123', 'media/shot.png');
+  assert.equal(blob?.type, 'image/png');
 });
 
 test('a second directory declaring an already-taken id is not registered', () => {
@@ -116,6 +115,7 @@ test('a second directory declaring an already-taken id is not registered', () =>
     }));
   }
   const r = fileReader(root);
-  const product = r.config('dup')?.product;
-  assert.ok(product === 'first' || product === 'second');
+  // Directory entries are scanned in sorted order (lexicographic),
+  // so 'first' (alphabetically before 'second') is the first claimant.
+  assert.equal(r.config('dup')?.product, 'first');
 });
