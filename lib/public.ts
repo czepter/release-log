@@ -16,13 +16,22 @@ function visible(releases: ReleaseDoc[], viewer: Viewer): ReleaseDoc[] {
   return viewer === 'member' ? releases : releases.filter((r) => r.published_at !== null);
 }
 
+// image.src is a repo-relative path (e.g. "media/my file.png") and can
+// contain characters a URL can't carry raw. Encode each segment so the
+// emitted URL is re-requestable and decodes back to the original path;
+// encoding the whole string in one call would also escape the "/" and
+// break the route match on the way back in.
+function encodePath(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
 // covered is the agent's bookkeeping, not part of the feed (spec §7).
 function detail(release: ReleaseDoc, config: LogConfig): Record<string, unknown> {
   const { changes, covered, image, ...rest } = release;
   return {
     ...rest,
     url: `/l/${config.id}/releases/${release.version}`,
-    image: image === null ? null : { src: `/l/${config.id}/media/${image.src}`, alt: image.alt },
+    image: image === null ? null : { src: `/l/${config.id}/media/${encodePath(image.src)}`, alt: image.alt },
     sections: sectionsOf(changes),
   };
 }
