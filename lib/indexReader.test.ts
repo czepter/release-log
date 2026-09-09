@@ -8,6 +8,8 @@ import type { Db } from './db/client.ts';
 import { fakeGitHub } from './github.ts';
 import { syncLog } from './index.ts';
 import { indexReader } from './indexReader.ts';
+import { syncError } from './db/schema.ts';
+import { eq } from 'drizzle-orm';
 
 const REF = { owner: 'o', repo: 'r' };
 const CONFIG = JSON.stringify({ id: 'abc123', product: 'Demo', view: 'full', visibility: 'public' });
@@ -107,6 +109,60 @@ test('a frozen log is still served', async () => {
     const reader = indexReader(db);
     assert.equal(reader.config('abc123')?.product, 'Demo');
     assert.equal(reader.releases('abc123').length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stripSha passes through a message without the sha prefix', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rlh-rd-'));
+  try {
+    const db = openDb(join(dir, 'i.sqlite'));
+    await syncLog(db, fakeGitHub({ 'o/r': {
+      'release-log.json': CONFIG,
+    } }), REF);
+
+    // Insert a syncError row directly without the sha: prefix
+    const messageWithoutPrefix = 'File is not valid JSON';
+    db.insert(syncError).values({
+      logId: 'abc123',
+      path: 'releases/broken.json',
+      message: messageWithoutPrefix,
+      at: new Date().toISOString(),
+    }).run();
+
+    const reader = indexReader(db);
+    const errors = reader.errors('abc123');
+    const found = errors.find((e) => e.path.includes('broken.json'));
+    assert.ok(found, 'should find the directly-inserted error');
+    assert.equal(found.message, messageWithoutPrefix, 'message without prefix should pass through unchanged');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stripSha passes through a message with sha: in the middle', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rlh-rd-'));
+  try {
+    const db = openDb(join(dir, 'i.sqlite'));
+    await syncLog(db, fakeGitHub({ 'o/r': {
+      'release-log.json': CONFIG,
+    } }), REF);
+
+    // Insert a syncError row with sha: in the middle, not at the start
+    const messageWithShaInMiddle = 'Error processing file: sha: not at start of line';
+    db.insert(syncError).values({
+      logId: 'abc123',
+      path: 'releases/other.json',
+      message: messageWithShaInMiddle,
+      at: new Date().toISOString(),
+    }).run();
+
+    const reader = indexReader(db);
+    const errors = reader.errors('abc123');
+    const found = errors.find((e) => e.path.includes('other.json'));
+    assert.ok(found, 'should find the error with sha: in the middle');
+    assert.equal(found.message, messageWithShaInMiddle, 'message with sha: in the middle should pass through unchanged');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
