@@ -277,3 +277,21 @@ test('a stale If-None-Match still gets the body', async () => {
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test('a private log returns 404 with no ETag header even when the reader has one', async () => {
+  const taggedPrivateReader: Reader = { ...privateReader, etag: () => 'abc0000000000000000000000000000000000def' };
+  await withServer(taggedPrivateReader, async (base) => {
+    const res = await fetch(`${base}/l/abc123/versions`);
+    assert.equal(res.status, 404);
+    assert.equal(res.headers.get('etag'), null);
+  });
+});
+
+test('a non-existent log returns 404 with no ETag header even when the reader has one', async () => {
+  const tagged: Reader = { ...reader, etag: () => 'abc0000000000000000000000000000000000def' };
+  await withServer(tagged, async (base) => {
+    const res = await fetch(`${base}/l/nonexistent/versions`);
+    assert.equal(res.status, 404);
+    assert.equal(res.headers.get('etag'), null);
+  });
+});
