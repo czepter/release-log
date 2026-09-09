@@ -1,5 +1,9 @@
 # Spike: GitHub App
 
+**Erledigt am 2026-09-09. Alle acht Pruefungen bestaetigt; die Ergebnisse
+stehen in Abschnitt 14 der Spec, nicht hier.** Der Code bleibt als Beleg
+liegen und wird nicht weiterentwickelt.
+
 Wegwerfcode. Schritt 0 der Bauabfolge in
 `docs/superpowers/specs/2026-09-08-release-log-hub-design.md`.
 

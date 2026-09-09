@@ -313,6 +313,22 @@ bleibt aktiv: gespeichert wird ein kurzlebiges Token samt Refresh-Token statt
 eines unbefristeten. Benutzt wird es **ausschließlich** für `POST /user/repos`;
 jeder andere Repo-Zugriff läuft weiter über die Installation.
 
+Im Spike gemessen: das Access-Token gilt **8 Stunden**, das Refresh-Token
+**181 Tage**. Zwischen zwei Releases liegt regelmäßig mehr als acht Stunden,
+also ist der Refresh der Normalfall und nicht die Ausnahme.
+
+Ein Refresh **widerruft das alte Access-Token sofort**. Daraus folgen zwei
+Anforderungen, die man dem Ablauf nicht ansieht:
+
+- Das Ergebnis eines Refresh ersetzt beide Token **in einem Schreibvorgang**.
+  Ein halb geschriebener Datensatz lässt das alte Token widerrufen und das
+  neue ungespeichert zurück — das Konto wäre ausgesperrt.
+- Refreshes laufen **je Konto serialisiert**. Zwei gleichzeitige Refreshes
+  widerrufen einander: der zweite entwertet das Token, das der erste gerade
+  bekommen hat. Genau das passiert nach einer längeren Pause, wenn mehrere
+  Aufrufe zugleich eintreffen — der wahrscheinlichste Moment, nicht der
+  unwahrscheinlichste.
+
 Das weicht die Begründung von Entscheidung 2 auf, und das soll hier stehen: ein
 gespeichertes Nutzer-Token ist ein Angriffsziel, das der Entwurf vorher nicht
 hatte, und es geht mit der Person. Ist es abgelaufen und der Refresh
@@ -417,6 +433,16 @@ Das Nutzer-Token wird ausschließlich für `POST /user/repos` benutzt. Alles
 Weitere am neuen Repo — die erste `release-log.json`, die `README.md`, der
 Abgleich — läuft über das Installations-Token.
 
+Bei einer Installation mit `repository_selection=all` sieht das
+Installations-Token das frisch angelegte Repo sofort; das ist im Spike
+bestätigt. Für `repository_selection=selected` ist es **nicht geprüft** und
+vermutlich nicht der Fall — ein neu angelegtes Repo gehört dann noch nicht zur
+Auswahl. `create_log` prüft deshalb nach dem Anlegen, ob das
+Installations-Token das Repo erreicht, und scheitert andernfalls mit
+`repo_not_installed` samt der URL, unter der man es zur Installation
+hinzufügt. Blind weiterzuschreiben ergäbe sonst einen Log, den der Index nie
+zu sehen bekommt.
+
 `view`, `visibility` und `curation_notes` ändert nur das Dashboard. Sie sind
 Einstellungen, die ein Mensch trifft und ansieht.
 
@@ -457,8 +483,8 @@ Repo rutschen.
 ### Fehler
 
 `conflict`, `invalid_document`, `installation_inactive`, `no_installation`,
-`reauth_required`, `log_frozen`, `path_exists`, `not_found`, `forbidden`,
-`payload_too_large`, `github_unavailable`. Jeder trägt eine Meldung, die sagt, was als Nächstes zu
+`reauth_required`, `repo_not_installed`, `log_frozen`, `path_exists`,
+`not_found`, `forbidden`, `payload_too_large`, `github_unavailable`. Jeder trägt eine Meldung, die sagt, was als Nächstes zu
 tun ist.
 
 ### Instructions und Prompt
@@ -682,6 +708,16 @@ gelesen; ein abgelaufenes Token wird über den Refresh erneuert; ein
 abgewiesener Refresh ergibt `reauth_required` statt eines Serverfehlers; das
 Token wird auf keinem anderen Pfad als `create_log` angefasst.
 
+**Refresh unter Nebenläufigkeit:** zwei gleichzeitige Aufrufe auf ein
+abgelaufenes Token ergeben **einen** Refresh und ein gültiges Token für beide,
+nicht zwei Refreshes, die einander widerrufen. Dazu: ein abgebrochener
+Schreibvorgang lässt nie das alte Token widerrufen und das neue ungespeichert
+zurück.
+
+**`create_log` bei `repository_selection=selected`:** erreicht das
+Installations-Token das neue Repo nicht, kommt `repo_not_installed` mit der
+Hinzufüge-URL — kein halb angelegter Log.
+
 **Rechte:** Cache liefert innerhalb von 5 Minuten ohne GitHub-Aufruf, danach
 mit; `installation_repositories` invalidiert sofort.
 
@@ -728,25 +764,19 @@ Datenverlust. Gesichert wird täglich.
 
 `bin/reindex.ts` baut den Index neu, für einen Log oder für alle.
 
+Der Server bindet **ausdrücklich** an eine Adresse statt an die
+unspezifizierte. Ohne Host bindet Node `::` und nimmt IPv4 nur mit, solange
+dort nichts anderes hört; ist der Port auf IPv4 belegt, startet der Dienst
+still IPv6-only und meldet Erfolg. Im Spike sind so zwei Dienste auf einem
+Port gelandet, ohne dass eine Kollision gemeldet wurde.
+
 ## 13. Bauabfolge
 
-Schritt 0 geht dem Implementierungsplan voraus. Die GitHub App ist der einzige
-Teil ohne Vorerfahrung im Bestand, und in ihr stecken vier Annahmen, die die
-Schritte 3 bis 6 tragen.
+Der Spike, der dem Implementierungsplan vorausging, ist erledigt: die GitHub
+App war der einzige Teil ohne Vorerfahrung im Bestand, und ihre Annahmen tragen
+die Schritte 3 bis 6. Alle acht bestätigt, zwei neue Anforderungen dabei
+entstanden — siehe §14.
 
-0. **Spike (Wegwerfcode, Ergebnis ist eine Antwort).** Vorab aus GitHubs
-   Referenz geklärt und nicht mehr Teil des Spikes: ein Installations-Token
-   kann auf einem persönlichen Konto **kein** Repo anlegen (siehe 23).
-
-   Offen und zu beantworten: Legt ein **Nutzer-Token** mit
-   `administration: write` ein Repo auf dem persönlichen Konto an, und überlebt
-   der Refresh-Zyklus die Zeit zwischen zwei Releases? Gibt die Contents-API
-   beim Commit die Blob-SHA zurück, die der Write-Through braucht? Trägt der
-   Baum-Abgleich innerhalb der Rate-Limits einer Installation? Kommen die
-   Webhooks am Tunnel an und verifiziert die Signaturprüfung sie?
-
-   Voraussetzung: `scripts/setup-tunnel.sh`, dann `scripts/setup-github-app.sh`
-   für die „…-dev"-App — nur der Betreiber kann sie anlegen.
 1. **Dokumentmodell** — `lib/document.ts` und `lib/public.ts` gegen statische
    Dateien. Testbar ohne GitHub.
 2. **Index** — Drizzle-Schema und `syncLog` gegen das Fake-GitHub.
@@ -765,7 +795,38 @@ Das Riskanteste kommt bewusst erst, wenn alles darunter durch Tests
 abgesichert ist. Umgekehrt debuggte man Protokoll- und Datenmodellfehler
 gleichzeitig, ohne sagen zu können, welcher gerade zuschlägt.
 
-## 14. Nicht in Version 1
+## 14. Ergebnisse des Spikes
+
+Gelaufen am 2026-09-09 gegen die „…-dev"-App am Tunnel
+(`spikes/github-app/`). Acht Prüfungen, acht Mal bestätigt.
+
+| Frage | Ergebnis |
+|---|---|
+| Callback erreichbar, Nutzer-Token erhalten | ja — `expires_in=28800` (8 h), Refresh-Token vorhanden |
+| Trägt der Refresh-Zyklus | ja — `refresh_token_expires_in=15638400` (181 Tage) |
+| Legt ein Nutzer-Token ein Repo auf dem persönlichen Konto an | ja — HTTP 201 |
+| Installations-Token erhalten | ja — `repository_selection=all` |
+| Erreicht die Installation das neu angelegte Repo | ja — **nur für `all` geprüft** |
+| Gibt die Contents-API beim Commit die Blob-SHA zurück | ja — `content.sha` und `commit.sha` in derselben Antwort |
+| Trägt der Baum-Abgleich innerhalb der Rate-Limits | ja — 7647 von 7650 nach dem Lauf übrig |
+| Kommen Webhooks am Tunnel an, Signatur gültig | ja — `push`, 8510 Bytes, Signatur verifiziert |
+
+Drei Dinge, die der Lauf über die Fragen hinaus geliefert hat:
+
+**Ein Refresh widerruft das alte Access-Token.** Aufgefallen, weil ein früher
+Fehlschlag genau daran lag. Daraus die beiden Anforderungen in §5: atomar
+ersetzen, je Konto serialisieren.
+
+**`repository_selection` entscheidet über `create_log`.** Getestet ist nur
+`all`. Für `selected` bleibt offen, ob das Installations-Token ein frisch
+angelegtes Repo erreicht — deshalb die Prüfung und `repo_not_installed` in §6,
+statt sich auf den geprüften Fall zu verlassen.
+
+**Der Rate-Limit einer Installation liegt bei 7650 Anfragen pro Stunde**, und
+ein vollständiger Abgleich kostet einen Aufruf plus einen je geänderter Datei.
+Der Baum-Abgleich aus §4 ist damit nicht annähernd am Limit.
+
+## 15. Nicht in Version 1
 
 Eigene Domains je Log, Themes und Branding je Log, RSS, Statistiken,
 Teamverwaltung jenseits dessen, was GitHub regelt, Schreiben über eine
