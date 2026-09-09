@@ -86,6 +86,37 @@ test('the image URL encodes path segments and decodes back to the source path', 
   assert.equal(decodeURIComponent(body.image.src.slice(prefix.length)), 'media/my file 100%.png');
 });
 
+test('a release whose version contains a space round-trips through both emitted urls', () => {
+  const r = reader(CONFIG, [rel('r 42', '2026-01-01', true)]);
+
+  // Both emitters (detail() and the versions list) have to encode the
+  // version, not just the image path. Asserting the literal encoded string
+  // catches a missing encodeURIComponent -- a raw space would leave the
+  // url unchanged and this equality would fail.
+  const detailBody = route('GET', '/l/abc123/releases/r 42', P, r, 'public').body as
+    { url: string };
+  assert.equal(detailBody.url, '/l/abc123/releases/r%2042');
+
+  const versionsBody = route('GET', '/l/abc123/versions', P, r, 'public').body as
+    { versions: { url: string }[] };
+  assert.equal(versionsBody.versions[0].url, '/l/abc123/releases/r%2042');
+
+  // Feeding the emitted url straight back into route() proves route()
+  // decodes the captured segment: without that decode, one[1] would stay
+  // "r%2042" and never match the stored version "r 42", so this would 404.
+  const reply = route('GET', versionsBody.versions[0].url, P, r, 'public');
+  assert.equal(reply.status, 200);
+  assert.equal((reply.body as { version: string }).version, 'r 42');
+});
+
+test('a malformed escape in the version segment answers 404 instead of throwing', () => {
+  const r = reader(CONFIG, [rel('1.0.0', '2026-01-01', true)]);
+  // decodeURIComponent('%zz') throws URIError; without the try/catch this
+  // would propagate out of route() and crash the request instead of 404ing.
+  const reply = route('GET', '/l/abc123/releases/%zz', P, r, 'public');
+  assert.equal(reply.status, 404);
+});
+
 test('a draft detail is 404 for the public and 200 for a member', () => {
   const r = reader(CONFIG, [rel('1.0.0', '2026-01-01', false)]);
   assert.equal(route('GET', '/l/abc123/releases/1.0.0', P, r, 'public').status, 404);
