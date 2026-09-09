@@ -9,7 +9,6 @@ import { fakeGitHub } from './github.ts';
 import { syncLog } from './index.ts';
 import { indexReader } from './indexReader.ts';
 import { syncError } from './db/schema.ts';
-import { eq } from 'drizzle-orm';
 
 const REF = { owner: 'o', repo: 'r' };
 const CONFIG = JSON.stringify({ id: 'abc123', product: 'Demo', view: 'full', visibility: 'public' });
@@ -141,7 +140,7 @@ test('stripSha passes through a message without the sha prefix', async () => {
   }
 });
 
-test('stripSha passes through a message with sha: in the middle', async () => {
+test('stripSha leaves a message alone when the sha-shaped sequence is not at the start', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rlh-rd-'));
   try {
     const db = openDb(join(dir, 'i.sqlite'));
@@ -149,20 +148,23 @@ test('stripSha passes through a message with sha: in the middle', async () => {
       'release-log.json': CONFIG,
     } }), REF);
 
-    // Insert a syncError row with sha: in the middle, not at the start
-    const messageWithShaInMiddle = 'Error processing file: sha: not at start of line';
+    // The embedded sequence is shaped exactly like the real prefix (`sha:`
+    // plus 40 lowercase hex characters plus one space) but sits mid-message,
+    // not at the start. The anchor must keep this whole message intact.
+    const messageWithShaMidString =
+      'File processing failed. Reference commit sha:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef was already applied, so this is a duplicate.';
     db.insert(syncError).values({
       logId: 'abc123',
       path: 'releases/other.json',
-      message: messageWithShaInMiddle,
+      message: messageWithShaMidString,
       at: new Date().toISOString(),
     }).run();
 
     const reader = indexReader(db);
     const errors = reader.errors('abc123');
     const found = errors.find((e) => e.path.includes('other.json'));
-    assert.ok(found, 'should find the error with sha: in the middle');
-    assert.equal(found.message, messageWithShaInMiddle, 'message with sha: in the middle should pass through unchanged');
+    assert.ok(found, 'should find the error with the sha-shaped sequence mid-message');
+    assert.equal(found.message, messageWithShaMidString, 'message must come back byte for byte, untouched');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
