@@ -119,3 +119,37 @@ test('a second directory declaring an already-taken id is not registered', () =>
   // so 'first' (alphabetically before 'second') is the first claimant.
   assert.equal(r.config('dup')?.product, 'first');
 });
+
+test('a duplicate id produces a problem entry naming both directories and the id', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rlh-'));
+  const dirs: Record<string, string> = {};
+  for (const name of ['first', 'second']) {
+    const log = join(root, name);
+    dirs[name] = log;
+    mkdirSync(join(log, 'releases'), { recursive: true });
+    writeFileSync(join(log, 'release-log.json'), JSON.stringify({
+      id: 'dup', product: name, view: 'full', visibility: 'public',
+    }));
+  }
+  const r = fileReader(root);
+  const problems = r.problems();
+  assert.equal(problems.length, 1);
+  // Names both directories, not just the one that lost.
+  assert.ok(problems[0].path.includes(dirs.first));
+  assert.ok(problems[0].path.includes(dirs.second));
+  assert.ok(problems[0].message.includes('dup'));
+});
+
+test('an invalid release-log.json produces a problem entry instead of disappearing silently', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rlh-'));
+  const log = join(root, 'broken-log');
+  mkdirSync(log, { recursive: true });
+  writeFileSync(join(log, 'release-log.json'), '{ not json');
+  const r = fileReader(root);
+  // The log has no id (it never parsed), so this is unreachable through
+  // errors(logId) -- it has to be on the id-less problems() channel.
+  assert.equal(r.config('broken-log'), null);
+  const problems = r.problems();
+  assert.equal(problems.length, 1);
+  assert.ok(problems[0].path.includes('broken-log'));
+});

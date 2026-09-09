@@ -31,6 +31,7 @@ function reader(config: LogConfig, releases: ReleaseDoc[]): Reader {
     releases: (id) => (id === config.id ? releases : []),
     media: () => null,
     errors: () => [],
+    problems: () => [],
   };
 }
 
