@@ -20,6 +20,21 @@ const reader: Reader = {
   errors: () => [],
 };
 
+// Same shape as `reader` above but private, and media() still resolves the
+// blob -- so this test can only pass if server.ts's own visibility check
+// stops the response, not because the Reader double has nothing to serve.
+const privateReader: Reader = {
+  config: (id) => (id === 'abc123'
+    ? { id: 'abc123', product: 'Demo', view: 'full', visibility: 'private', curation_notes: null }
+    : null),
+  releases: () => [],
+  media: (id, path) =>
+    id === 'abc123' && path === 'media/x.png'
+      ? { type: 'image/png', bytes: Buffer.from([1, 2, 3]) }
+      : null,
+  errors: () => [],
+};
+
 async function withServer(reader: Reader, fn: (base: string) => Promise<void>): Promise<void> {
   const server = createApp(reader);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -113,6 +128,14 @@ test('missing media is 404 JSON', async () => {
     const res = await fetch(`${base}/l/abc123/media/media/nope.png`);
     assert.equal(res.status, 404);
     assert.deepEqual(await res.json(), { error: 'not_found' });
+  });
+});
+
+test('media for a private log is 404 with no cross-origin header, even though the reader has the blob', async () => {
+  await withServer(privateReader, async (base) => {
+    const res = await fetch(`${base}/l/abc123/media/media/x.png`);
+    assert.equal(res.status, 404);
+    assert.equal(res.headers.get('access-control-allow-origin'), null);
   });
 });
 
