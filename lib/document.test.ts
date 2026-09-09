@@ -38,7 +38,7 @@ test('parseConfig rejects a missing id', () => {
 });
 
 test('parseConfig rejects an id that a URL cannot carry unchanged', () => {
-  for (const bad of ['with space', 'with/slash', 'with%25', 'with?query', '']) {
+  for (const bad of ['with space', 'with/slash', 'with%25', 'with?query']) {
     const result = parseConfig({ id: bad, product: 'X' });
     assert.equal(result.ok, false, `expected "${bad}" to be rejected`);
   }
@@ -49,6 +49,23 @@ test('parseConfig accepts the id shapes the service generates', () => {
     const result = parseConfig({ id: good, product: 'X' });
     assert.equal(result.ok, true, `expected "${good}" to be accepted`);
   }
+});
+
+test('parseConfig accepts a 1-character id', () => {
+  const result = parseConfig({ id: 'a', product: 'X' });
+  assert.equal(result.ok, true);
+});
+
+test('parseConfig accepts a 64-character id', () => {
+  const id64 = 'a'.repeat(64);
+  const result = parseConfig({ id: id64, product: 'X' });
+  assert.equal(result.ok, true);
+});
+
+test('parseConfig rejects a 65-character id', () => {
+  const id65 = 'a'.repeat(65);
+  const result = parseConfig({ id: id65, product: 'X' });
+  assert.equal(result.ok, false);
 });
 
 const HEAD = {

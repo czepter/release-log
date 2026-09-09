@@ -33,8 +33,6 @@ export function parseConfig(input: unknown): Validated<LogConfig> {
   // the way back in, so it has to survive that round trip unchanged. This is
   // a charset rule, not a format rule: the service generates Crockford
   // base32, but a hand-written id is fine as long as a URL can carry it.
-  const ID = /^[A-Za-z0-9._~-]{1,64}$/;
-
   if (!str(input.id) || !ID.test(input.id)) {
     errors.push('config.id: required, 1-64 chars from A-Z a-z 0-9 . _ ~ -');
   }
@@ -99,6 +97,7 @@ export type Change = {
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const ID = /^[A-Za-z0-9._~-]{1,64}$/;
 const CHANGE_TYPES = ['feat', 'perf', 'fix'];
 
 function parseChange(input: unknown, i: number, errors: string[]): Change | null {
