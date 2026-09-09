@@ -72,11 +72,74 @@ export type ReleaseDoc = {
   body: string[];
   image: ReleaseImage | null;
   covered: string[];
-  changes: unknown[]; // Task 3 gives this a type
+  changes: Change[];
+};
+
+export type ChangeType = 'feat' | 'perf' | 'fix';
+
+export type Change = {
+  type: ChangeType;
+  breaking: boolean;
+  scope: string | null;
+  title: string;
+  description: string;
+  pr: number | null;
+  issues: number[];
+  commit: string;
+  date: string;
 };
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const CHANGE_TYPES = ['feat', 'perf', 'fix'];
+
+function parseChange(input: unknown, i: number, errors: string[]): Change | null {
+  const at = `release.changes[${i}]`;
+  if (!isObject(input)) {
+    errors.push(`${at}: not an object`);
+    return null;
+  }
+  const before = errors.length;
+
+  if (typeof input.type !== 'string' || !CHANGE_TYPES.includes(input.type)) {
+    errors.push(`${at}.type: must be one of feat, perf, fix`);
+  }
+  if (!str(input.title)) errors.push(`${at}.title: required, non-empty string`);
+  if (!str(input.description)) errors.push(`${at}.description: required, non-empty string`);
+  if (!str(input.commit)) errors.push(`${at}.commit: required, non-empty string`);
+  if (!str(input.date) || !DATE.test(input.date)) {
+    errors.push(`${at}.date: required, format YYYY-MM-DD`);
+  }
+
+  // breaking says what the change demands of the reader; type says what it is.
+  // Two questions, two fields (spec, decision 11).
+  const breaking = input.breaking === undefined ? false : input.breaking;
+  if (typeof breaking !== 'boolean') errors.push(`${at}.breaking: boolean`);
+
+  const scope = input.scope === undefined ? null : input.scope;
+  if (scope !== null && typeof scope !== 'string') errors.push(`${at}.scope: string or null`);
+
+  const pr = input.pr === undefined ? null : input.pr;
+  if (pr !== null && !Number.isInteger(pr)) errors.push(`${at}.pr: integer or null`);
+
+  const issues = input.issues === undefined ? [] : input.issues;
+  if (!Array.isArray(issues) || issues.some((x) => !Number.isInteger(x))) {
+    errors.push(`${at}.issues: list of integers`);
+  }
+
+  if (errors.length > before) return null;
+  return {
+    type: input.type as ChangeType,
+    breaking: breaking as boolean,
+    scope: scope as string | null,
+    title: input.title as string,
+    description: input.description as string,
+    pr: pr as number | null,
+    issues: issues as number[],
+    commit: input.commit as string,
+    date: input.date as string,
+  };
+}
 
 function stringList(v: unknown, field: string, errors: string[]): string[] {
   if (v === undefined) return [];
@@ -134,8 +197,16 @@ export function parseRelease(input: unknown, filename?: string): Validated<Relea
     }
   }
 
-  const changes = input.changes === undefined ? [] : input.changes;
-  if (!Array.isArray(changes)) errors.push('release.changes: must be a list');
+  let changes: Change[] = [];
+  if (input.changes !== undefined) {
+    if (!Array.isArray(input.changes)) {
+      errors.push('release.changes: must be a list');
+    } else {
+      changes = input.changes
+        .map((c, i) => parseChange(c, i, errors))
+        .filter((c): c is Change => c !== null);
+    }
+  }
 
   if (errors.length > 0) return { ok: false, errors };
   return {
@@ -150,7 +221,7 @@ export function parseRelease(input: unknown, filename?: string): Validated<Relea
       body,
       image,
       covered,
-      changes: changes as unknown[],
+      changes,
     },
   };
 }
