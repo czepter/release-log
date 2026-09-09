@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "lib": ["esnext"],
+    "types": ["node"]
+  },
+  "include": ["lib/**/*.ts", "bin/**/*.ts", "server.ts"]
+}
