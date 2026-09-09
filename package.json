@@ -3,14 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.2" },
+  "engines": {
+    "node": ">=24.2"
+  },
   "scripts": {
     "start": "node server.ts",
     "test": "node --test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "drizzle-orm": "^0.45.2"
   }
 }
