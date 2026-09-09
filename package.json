@@ -10,7 +10,8 @@
     "start": "node server.ts",
     "test": "node --test",
     "typecheck": "tsc --noEmit",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "reindex": "node bin/reindex.ts"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
