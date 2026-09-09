@@ -68,3 +68,15 @@ test('a duplicate publicId is rejected by the primary key', () => {
     assert.throws(() => db.insert(log).values(row).run());
   });
 });
+
+test('a second log row for the same repository is rejected by the unique index', () => {
+  withDb((db) => {
+    const base = {
+      repoOwner: 'o', repoName: 'r', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: null, configBlobSha: null, indexedAt: null,
+    };
+    db.insert(log).values({ ...base, publicId: 'first' }).run();
+    assert.throws(() => db.insert(log).values({ ...base, publicId: 'second' }).run());
+  });
+});

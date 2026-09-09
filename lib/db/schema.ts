@@ -2,7 +2,7 @@
 // whole validated document in one column; only what is sorted or filtered
 // on gets a column of its own (spec §4).
 
-import { sqliteTable, text, integer, blob, primaryKey } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, blob, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const log = sqliteTable('log', {
   publicId: text('public_id').primaryKey(),
@@ -21,7 +21,12 @@ export const log = sqliteTable('log', {
   headSha: text('head_sha'),
   configBlobSha: text('config_blob_sha'),
   indexedAt: text('indexed_at'),
-});
+}, (t) => [
+  // One log per repository (spec §4): the database enforces it rather
+  // than relying on syncLog to remember to clean up after itself when a
+  // repository's id changes.
+  uniqueIndex('log_repo_owner_repo_name_unique').on(t.repoOwner, t.repoName),
+]);
 
 export const release = sqliteTable('release', {
   logId: text('log_id').notNull(),
