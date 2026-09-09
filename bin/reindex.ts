@@ -11,8 +11,14 @@ import type { SyncOutcome } from '../lib/index.ts';
 export async function reindex(db: Db, gh: GitHub, refs: RepoRef[]): Promise<SyncOutcome[]> {
   const outcomes: SyncOutcome[] = [];
   for (const ref of refs) {
-    // One repo's failure is not the run's failure: the others still sync.
-    outcomes.push(await syncLog(db, gh, ref));
+    // One repo's failure is not the run's failure: catch it, record it,
+    // and keep going with the rest.
+    try {
+      outcomes.push(await syncLog(db, gh, ref));
+    } catch (err) {
+      console.error(`reindex: ${ref.owner}/${ref.repo} failed: ${(err as Error).message}`);
+      outcomes.push({ logId: null, fetched: 0, errors: 0, frozen: false, failed: true });
+    }
   }
   return outcomes;
 }

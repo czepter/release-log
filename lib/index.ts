@@ -28,6 +28,13 @@ export type SyncOutcome = {
   fetched: number;
   errors: number;
   frozen: boolean;
+  // Always false from syncLog itself: a thrown error propagates out of
+  // this function rather than being turned into an outcome. reindex()
+  // sets this true when it catches that throw, so a caller can tell "this
+  // repository's sync failed outright" apart from a clean "nothing to do"
+  // (logId: null, frozen: false) outcome — the two would otherwise look
+  // identical.
+  failed: boolean;
 };
 
 const CONFIG_PATH = 'release-log.json';
@@ -69,14 +76,14 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     for (const row of existing) {
       db.update(log).set({ state: 'frozen' }).where(eq(log.publicId, row.publicId)).run();
     }
-    return { logId: existing[0]?.publicId ?? null, fetched: 0, errors: 0, frozen: existing.length > 0 };
+    return { logId: existing[0]?.publicId ?? null, fetched: 0, errors: 0, frozen: existing.length > 0, failed: false };
   }
 
   const tree = await gh.tree(ref, head);
   const configEntry = tree.find((e) => e.path === CONFIG_PATH);
   if (!configEntry) {
     writeProblem(db, repoPath, `no ${CONFIG_PATH} in ${repoPath}`);
-    return { logId: null, fetched: 0, errors: 0, frozen: false };
+    return { logId: null, fetched: 0, errors: 0, frozen: false, failed: false };
   }
 
   const known = db.select().from(log)
@@ -105,7 +112,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     }
     if (!parsedConfig.ok) {
       writeProblem(db, repoPath, `invalid ${CONFIG_PATH}: ${parsedConfig.errors.join('; ')}`);
-      return { logId: null, fetched: 0, errors: 0, frozen: false };
+      return { logId: null, fetched: 0, errors: 0, frozen: false, failed: false };
     }
     config = parsedConfig.value;
   }
@@ -121,7 +128,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
       repoPath,
       `duplicate id ${config.id}: already held by ${claimantPath}, also claimed by ${repoPath}`,
     );
-    return { logId: null, fetched: 0, errors: 0, frozen: false };
+    return { logId: null, fetched: 0, errors: 0, frozen: false, failed: false };
   }
 
   // The repo parses, so any earlier complaint about it is stale.
@@ -309,5 +316,5 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // point at a partial sync).
   db.update(log).set({ headSha: head, indexedAt: now() }).where(eq(log.publicId, config.id)).run();
 
-  return { logId: config.id, fetched, errors, frozen: false };
+  return { logId: config.id, fetched, errors, frozen: false, failed: false };
 }
