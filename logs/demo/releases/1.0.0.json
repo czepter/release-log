@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "tag": "v1.0.0",
+  "date": "2026-09-09",
+  "published_at": "2026-09-09T09:00:00Z",
+  "commits": 3,
+  "headline": "Der erste Release-Log",
+  "body": ["Ein Log aus Dateien, ausgeliefert als JSON."],
+  "image": null,
+  "covered": [],
+  "changes": [
+    {
+      "type": "feat",
+      "breaking": false,
+      "scope": "api",
+      "title": "Versionen, Feed und Einzelabruf",
+      "description": "Drei Routen je Log: alle Versionen, ein paginierter Feed mit Anzahl je Abschnitt, und eine einzelne Version mit allen Einträgen.\n\nEntwurf bleiben unsichtbar, solange niemand angemeldet ist.",
+      "pr": null,
+      "issues": [],
+      "commit": "0000000",
+      "date": "2026-09-09"
+    }
+  ]
+}
