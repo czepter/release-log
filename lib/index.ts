@@ -8,12 +8,8 @@ import { log, release, syncError, problem, media } from './db/schema.ts';
 import type { GitHub, RepoRef, TreeEntry } from './github.ts';
 import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig } from './document.ts';
+import { MEDIA_TYPES } from './store.ts';
 
-const MEDIA_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.webp': 'image/webp',
-};
 const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
 
 function mediaPaths(tree: TreeEntry[]): TreeEntry[] {
