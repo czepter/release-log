@@ -27,6 +27,27 @@ function detail(release: ReleaseDoc, config: LogConfig): Record<string, unknown>
   };
 }
 
+const PER_PAGE_DEFAULT = 10;
+const PER_PAGE_MAX = 100;
+
+function intParam(params: URLSearchParams, name: string, fallback: number, max: number): number | null {
+  const raw = params.get(name);
+  if (raw === null) return fallback;
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const value = Number(raw);
+  return value <= max ? value : null;
+}
+
+// The feed carries counts, not entries: a single release can hold hundreds.
+function feedItem(release: ReleaseDoc, config: LogConfig): Record<string, unknown> {
+  const full = detail(release, config);
+  const sections = full.sections as { key: string; label: string; items: unknown[] }[];
+  return {
+    ...full,
+    sections: sections.map((s) => ({ key: s.key, label: s.label, count: s.items.length })),
+  };
+}
+
 export function route(
   method: string,
   pathname: string,
@@ -64,6 +85,26 @@ export function route(
           headline: r.headline,
           url: `/l/${logId}/releases/${r.version}`,
         })),
+      },
+    };
+  }
+
+  if (rest === 'releases') {
+    const page = intParam(params, 'page', 1, 1e6);
+    const perPage = intParam(params, 'per_page', PER_PAGE_DEFAULT, PER_PAGE_MAX);
+    if (page === null || perPage === null) return { status: 400, body: { error: 'bad_request' } };
+
+    const sorted = sortReleases(releases);
+    const offset = (page - 1) * perPage;
+    return {
+      status: 200,
+      body: {
+        product: config.product,
+        page,
+        per_page: perPage,
+        total: sorted.length,
+        total_pages: Math.max(1, Math.ceil(sorted.length / perPage)),
+        releases: sorted.slice(offset, offset + perPage).map((r) => feedItem(r, config)),
       },
     };
   }

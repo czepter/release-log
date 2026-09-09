@@ -98,3 +98,52 @@ test('health answers without a log', () => {
   assert.equal(reply.status, 200);
   assert.deepEqual(reply.body, { status: 'ok' });
 });
+
+function many(n: number): ReleaseDoc[] {
+  return Array.from({ length: n }, (_, i) =>
+    rel(`1.${i}.0`, `2026-01-${String(i + 1).padStart(2, '0')}`, true, [change('feat')]));
+}
+
+test('the feed carries counts per section, not entries', () => {
+  const r = reader(CONFIG, [rel('1.0.0', '2026-01-01', true, [change('feat'), change('fix')])]);
+  const body = route('GET', '/l/abc123/releases', P, r, 'public').body as
+    { releases: { sections: { key: string; count: number }[] }[] };
+  assert.deepEqual(body.releases[0].sections, [
+    { key: 'new', label: 'Neu', count: 1 },
+    { key: 'fixed', label: 'Behoben', count: 1 },
+  ]);
+});
+
+test('the feed defaults to ten per page', () => {
+  const body = route('GET', '/l/abc123/releases', P, reader(CONFIG, many(25)), 'public').body as
+    { page: number; per_page: number; total: number; total_pages: number; releases: unknown[] };
+  assert.equal(body.per_page, 10);
+  assert.equal(body.page, 1);
+  assert.equal(body.total, 25);
+  assert.equal(body.total_pages, 3);
+  assert.equal(body.releases.length, 10);
+});
+
+test('the feed honours page and per_page', () => {
+  const params = new URLSearchParams({ page: '2', per_page: '5' });
+  const body = route('GET', '/l/abc123/releases', params, reader(CONFIG, many(12)), 'public').body as
+    { releases: { version: string }[] };
+  assert.equal(body.releases.length, 5);
+  assert.equal(body.releases[0].version, '1.6.0');
+});
+
+test('a page beyond the end is empty, not an error', () => {
+  const params = new URLSearchParams({ page: '9' });
+  const reply = route('GET', '/l/abc123/releases', params, reader(CONFIG, many(3)), 'public');
+  assert.equal(reply.status, 200);
+  assert.deepEqual((reply.body as { releases: unknown[] }).releases, []);
+});
+
+test('bad pagination values are 400', () => {
+  const r = reader(CONFIG, many(3));
+  const bads: Record<string, string>[] = [{ page: '0' }, { page: '-1' }, { page: 'x' }, { per_page: '101' }];
+  for (const bad of bads) {
+    const reply = route('GET', '/l/abc123/releases', new URLSearchParams(bad), r, 'public');
+    assert.equal(reply.status, 400, JSON.stringify(bad));
+  }
+});
