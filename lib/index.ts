@@ -266,14 +266,20 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     }).run();
   }
 
-  for (const row of db.select().from(media).where(eq(media.logId, config.id)).all()) {
+  // Only the path is needed to diff against `seenMedia` — selecting the
+  // full row would drag every stored blob (up to 10 MB each) into memory
+  // just to compare strings.
+  for (const row of db.select({ path: media.path }).from(media).where(eq(media.logId, config.id)).all()) {
     if (!seenMedia.has(row.path)) {
       db.delete(media).where(and(eq(media.logId, config.id), eq(media.path, row.path))).run();
     }
   }
 
-  // Anything the tree no longer carries is gone from the index too.
-  for (const row of db.select().from(release).where(eq(release.logId, config.id)).all()) {
+  // Anything the tree no longer carries is gone from the index too. Same
+  // reasoning as above: pull only what the diff and the delete need, not
+  // every release's full `doc`.
+  for (const row of db.select({ path: release.path, version: release.version })
+    .from(release).where(eq(release.logId, config.id)).all()) {
     if (!seen.has(row.path)) {
       db.delete(release).where(and(eq(release.logId, config.id), eq(release.version, row.version))).run();
     }
