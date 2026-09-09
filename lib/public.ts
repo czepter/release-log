@@ -30,7 +30,7 @@ function detail(release: ReleaseDoc, config: LogConfig): Record<string, unknown>
   const { changes, covered, image, ...rest } = release;
   return {
     ...rest,
-    url: `/l/${config.id}/releases/${release.version}`,
+    url: `/l/${config.id}/releases/${encodeURIComponent(release.version)}`,
     image: image === null ? null : { src: `/l/${config.id}/media/${encodePath(image.src)}`, alt: image.alt },
     sections: sectionsOf(changes),
   };
@@ -92,7 +92,7 @@ export function route(
           version: r.version,
           date: r.date,
           headline: r.headline,
-          url: `/l/${logId}/releases/${r.version}`,
+          url: `/l/${config.id}/releases/${encodeURIComponent(r.version)}`,
         })),
       },
     };
@@ -120,7 +120,19 @@ export function route(
 
   const one = /^releases\/(.+)$/.exec(rest);
   if (one) {
-    const found = releases.find((r) => r.version === one[1]);
+    // pathname is percent-encoded (new URL never decodes it), so the version
+    // segment has to be decoded once, here, to match the raw version emitted
+    // by detail()/versions above. Exactly one decode, at the point of use —
+    // same rule server.ts follows for the media path segment; never decode
+    // twice. decodeURIComponent throws on a malformed escape like %zz; that
+    // is a 404, not a crashed request.
+    let version: string;
+    try {
+      version = decodeURIComponent(one[1]);
+    } catch {
+      return NOT_FOUND;
+    }
+    const found = releases.find((r) => r.version === version);
     return found ? { status: 200, body: detail(found, config) } : NOT_FOUND;
   }
 
