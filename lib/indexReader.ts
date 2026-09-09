@@ -51,5 +51,9 @@ export function indexReader(db: Db): Reader {
       return db.select().from(problem).all()
         .map((row) => ({ path: row.path, message: row.message }));
     },
+    etag(logId: string): string | null {
+      const row = db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+      return row?.headSha ?? null;
+    },
   };
 }

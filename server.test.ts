@@ -19,6 +19,7 @@ const reader: Reader = {
       : null,
   errors: () => [],
   problems: () => [],
+  etag: () => null,
 };
 
 // Same shape as `reader` above but private, and media() still resolves the
@@ -35,6 +36,7 @@ const privateReader: Reader = {
       : null,
   errors: () => [],
   problems: () => [],
+  etag: () => null,
 };
 
 async function withServer(reader: Reader, fn: (base: string) => Promise<void>): Promise<void> {
@@ -226,4 +228,52 @@ test('a malformed request target answers 400 and the server survives to serve th
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { status: 'ok' });
   });
+});
+
+test('a JSON response carries an ETag when the reader has one', async () => {
+  const tagged: Reader = { ...reader, etag: () => 'abc0000000000000000000000000000000000def' };
+  const server = createApp(tagged);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const res = await fetch(`${base}/l/abc123/versions`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('etag'), '"abc0000000000000000000000000000000000def"');
+
+    const again = await fetch(`${base}/l/abc123/versions`, {
+      headers: { 'if-none-match': '"abc0000000000000000000000000000000000def"' },
+    });
+    assert.equal(again.status, 304);
+    assert.equal(again.headers.get('etag'), '"abc0000000000000000000000000000000000def"');
+    assert.equal((await again.arrayBuffer()).byteLength, 0);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test('a reader without an etag answers 200 with no ETag header', async () => {
+  await withServer(reader, async (base) => {
+    const res = await fetch(`${base}/l/abc123/versions`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('etag'), null);
+  });
+});
+
+test('a stale If-None-Match still gets the body', async () => {
+  const tagged: Reader = { ...reader, etag: () => 'aaaa000000000000000000000000000000000000' };
+  const server = createApp(tagged);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  try {
+    const res = await fetch(`http://127.0.0.1:${address.port}/l/abc123/versions`, {
+      headers: { 'if-none-match': '"something-else"' },
+    });
+    assert.equal(res.status, 200);
+    assert.ok((await res.arrayBuffer()).byteLength > 0);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 });
