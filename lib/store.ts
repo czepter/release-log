@@ -84,7 +84,7 @@ export function fileReader(rootInput: string): Reader {
   const logs = new Map<string, Loaded>();
   let entries: string[] = [];
   try {
-    entries = readdirSync(root);
+    entries = readdirSync(root).sort();
   } catch {
     entries = [];
   }
