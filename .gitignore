@@ -3,3 +3,5 @@ node_modules/
 *.sqlite-journal
 .env
 .DS_Store
+.env.production
+*.pem
