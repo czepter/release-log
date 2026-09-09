@@ -55,6 +55,13 @@ export function createApp(reader: Reader): Server {
         return;
       }
 
+      // media[1] (the log id) is looked up undecoded, unlike mediaPath above.
+      // That is deliberate, not an oversight: undecoded is the safe
+      // direction here, since a decode could only ever turn a non-matching
+      // id into a different non-matching id. route() below makes the same
+      // choice for the log id segment it extracts from pathname. Do not
+      // add a decode here to "match" the media path -- that would be a
+      // second decode on a segment nothing has decoded once yet.
       const config = reader.config(media[1]);
       const blob = config && config.visibility === 'public'
         ? reader.media(media[1], mediaPath)
