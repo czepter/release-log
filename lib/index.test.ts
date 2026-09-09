@@ -166,6 +166,45 @@ test('re-syncing the repository that already holds the id is not a duplicate', a
   });
 });
 
+test("changing a repository's id retires its old log, releases, media and errors", async () => {
+  await withDb(async (db) => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const before = {
+      'release-log.json': CONFIG,
+      'releases/1.0.0.json': RELEASE,
+      'releases/broken.json': '{ not json',
+      'media/shot.png': png,
+    };
+    await syncLog(db, fakeGitHub({ 'o/r': before }), REF);
+    assert.equal(db.select().from(log).all().length, 1);
+    assert.equal(db.select().from(release).all().length, 1);
+    assert.equal(db.select().from(media).all().length, 1);
+    assert.equal(db.select().from(syncError).all().length, 1);
+
+    // Same repository, but release-log.json's id field was hand-edited.
+    const newConfig = JSON.stringify({ id: 'xyz789', product: 'Demo', view: 'full', visibility: 'public' });
+    const after = { ...before, 'release-log.json': newConfig };
+    const outcome = await syncLog(db, fakeGitHub({ 'o/r': after }), REF);
+
+    assert.equal(outcome.logId, 'xyz789');
+    const logs = db.select().from(log).all();
+    assert.equal(logs.length, 1, 'the old id must not be left behind as an orphaned log');
+    assert.equal(logs[0].publicId, 'xyz789');
+
+    const releases = db.select().from(release).all();
+    assert.equal(releases.length, 1, 'no orphaned release row under the old id');
+    assert.equal(releases[0].logId, 'xyz789');
+
+    const mediaRows = db.select().from(media).all();
+    assert.equal(mediaRows.length, 1, 'no orphaned media row under the old id');
+    assert.equal(mediaRows[0].logId, 'xyz789');
+
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1, 'no orphaned sync_error row under the old id');
+    assert.equal(errors[0].logId, 'xyz789');
+  });
+});
+
 test('a repository that parses clears its earlier problem row', async () => {
   await withDb(async (db) => {
     await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': '{ not json' } }), REF);

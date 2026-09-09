@@ -127,6 +127,20 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // The repo parses, so any earlier complaint about it is stale.
   db.delete(problem).where(eq(problem.path, repoPath)).run();
 
+  // This repository held a different id before (its release-log.json's id
+  // field was edited). The upsert below only ever touches config.id, so
+  // without this the old id's log and its releases/media/errors would sit
+  // in the index forever, orphaned but still served — the unique index
+  // on (repo_owner, repo_name) exists so this repo can only ever hold one
+  // log, and this is the code side of that same invariant (spec §4).
+  if (known !== null && known.publicId !== config.id) {
+    const oldId = known.publicId;
+    db.delete(release).where(eq(release.logId, oldId)).run();
+    db.delete(media).where(eq(media.logId, oldId)).run();
+    db.delete(syncError).where(eq(syncError.logId, oldId)).run();
+    db.delete(log).where(eq(log.publicId, oldId)).run();
+  }
+
   // head_sha and indexed_at are deliberately not written here — see the
   // update after the release and media sweeps below.
   db.insert(log).values({
