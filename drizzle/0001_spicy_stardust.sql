@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `log_repo_owner_repo_name_unique` ON `log` (`repo_owner`,`repo_name`);
