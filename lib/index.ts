@@ -4,10 +4,28 @@
 
 import { and, eq } from 'drizzle-orm';
 import type { Db } from './db/client.ts';
-import { log, release, syncError, problem } from './db/schema.ts';
+import { log, release, syncError, problem, media } from './db/schema.ts';
 import type { GitHub, RepoRef, TreeEntry } from './github.ts';
 import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig } from './document.ts';
+
+const MEDIA_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
+};
+const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+
+function mediaPaths(tree: TreeEntry[]): TreeEntry[] {
+  return tree.filter((e) => e.path.startsWith('media/'));
+}
+
+// The extension is compared lower-cased so `shot.PNG` is the same file type
+// as `shot.png` — a repo using that casing must not silently lose an image.
+function extensionOf(path: string): string {
+  const dot = path.lastIndexOf('.');
+  return dot === -1 ? '' : path.slice(dot).toLowerCase();
+}
 
 export type SyncOutcome = {
   logId: string | null;
@@ -210,6 +228,54 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     }).run();
   }
 
+  const seenMedia = new Set<string>();
+  for (const entry of mediaPaths(tree)) {
+    seenMedia.add(entry.path);
+    const type = MEDIA_TYPES[extensionOf(entry.path)];
+    if (!type) {
+      // A file that used to be a supported type and changed into something
+      // else must not keep serving its stale bytes forever.
+      db.delete(media).where(and(eq(media.logId, config.id), eq(media.path, entry.path))).run();
+      writeSyncError(db, config.id, entry.path, `sha:${entry.sha} unsupported media type`);
+      errors += 1;
+      continue;
+    }
+    // The tree carries the size, so an oversized file is rejected without
+    // ever being downloaded — and if it used to be indexed and grew past
+    // the cap, its stale bytes are dropped too.
+    if (entry.size > MEDIA_MAX_BYTES) {
+      db.delete(media).where(and(eq(media.logId, config.id), eq(media.path, entry.path))).run();
+      writeSyncError(db, config.id, entry.path, `sha:${entry.sha} media file exceeds the 10 MB limit (${entry.size} bytes)`);
+      errors += 1;
+      continue;
+    }
+    const indexedMedia = db.select().from(media)
+      .where(and(eq(media.logId, config.id), eq(media.path, entry.path))).all()[0] ?? null;
+    if (indexedMedia?.blobSha === entry.sha) continue;
+
+    const bytes = await gh.blob(ref, entry.sha);
+    fetched += 1;
+    if (bytes === null) {
+      db.delete(media).where(and(eq(media.logId, config.id), eq(media.path, entry.path))).run();
+      writeSyncError(db, config.id, entry.path, `sha:${entry.sha} blob not found`);
+      errors += 1;
+      continue;
+    }
+    db.delete(syncError).where(and(eq(syncError.logId, config.id), eq(syncError.path, entry.path))).run();
+    db.insert(media).values({
+      logId: config.id, path: entry.path, blobSha: entry.sha, contentType: type, bytes,
+    }).onConflictDoUpdate({
+      target: [media.logId, media.path],
+      set: { blobSha: entry.sha, contentType: type, bytes },
+    }).run();
+  }
+
+  for (const row of db.select().from(media).where(eq(media.logId, config.id)).all()) {
+    if (!seenMedia.has(row.path)) {
+      db.delete(media).where(and(eq(media.logId, config.id), eq(media.path, row.path))).run();
+    }
+  }
+
   // Anything the tree no longer carries is gone from the index too.
   for (const row of db.select().from(release).where(eq(release.logId, config.id)).all()) {
     if (!seen.has(row.path)) {
@@ -217,7 +283,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     }
   }
   for (const row of db.select().from(syncError).where(eq(syncError.logId, config.id)).all()) {
-    if (!seen.has(row.path)) {
+    if (!seen.has(row.path) && !seenMedia.has(row.path)) {
       db.delete(syncError).where(and(eq(syncError.logId, config.id), eq(syncError.path, row.path))).run();
     }
   }

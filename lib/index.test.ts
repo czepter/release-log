@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from './db/client.ts';
 import type { Db } from './db/client.ts';
-import { log, release, syncError, problem } from './db/schema.ts';
+import { log, release, syncError, problem, media } from './db/schema.ts';
 import type { GitHub } from './github.ts';
 import { fakeGitHub } from './github.ts';
 import { syncLog } from './index.ts';
@@ -340,5 +340,66 @@ test('a broken release repaired gets its release row back and loses its error', 
     assert.equal(rows.length, 1);
     assert.equal(JSON.parse(rows[0].doc).headline, 'Repariert');
     assert.equal(db.select().from(syncError).all().length, 0);
+  });
+});
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+
+test('a media file is indexed with its bytes and content type', async () => {
+  await withDb(async (db) => {
+    const gh = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': PNG } });
+    await syncLog(db, gh, REF);
+
+    const rows = db.select().from(media).all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].path, 'media/shot.png');
+    assert.equal(rows[0].contentType, 'image/png');
+    assert.deepEqual(Buffer.from(rows[0].bytes), PNG);
+  });
+});
+
+test('an unsupported media type is not indexed and is recorded', async () => {
+  await withDb(async (db) => {
+    const gh = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/notes.txt': 'hi' } });
+    await syncLog(db, gh, REF);
+
+    assert.equal(db.select().from(media).all().length, 0);
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].path.includes('notes.txt'));
+  });
+});
+
+test('a media file over the size cap is not indexed and is recorded', async () => {
+  await withDb(async (db) => {
+    const huge = Buffer.alloc(10 * 1024 * 1024 + 1, 1);
+    const gh = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/huge.png': huge } });
+    await syncLog(db, gh, REF);
+
+    assert.equal(db.select().from(media).all().length, 0);
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].message.includes('10'));
+  });
+});
+
+test('an oversized media file is never fetched, only its tree entry is read', async () => {
+  await withDb(async (db) => {
+    const huge = Buffer.alloc(10 * 1024 * 1024 + 1, 1);
+    const c = counting(fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/huge.png': huge } }));
+    await syncLog(db, c.gh, REF);
+    // Only the config blob. The size comes from the tree entry, so the
+    // service never pulls ten megabytes it is going to reject.
+    assert.equal(c.blobs.length, 1);
+  });
+});
+
+test('a media file removed from the repo disappears from the index', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': PNG } }), REF);
+    assert.equal(db.select().from(media).all().length, 1);
+
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } }), REF);
+    assert.equal(db.select().from(media).all().length, 0);
   });
 });
