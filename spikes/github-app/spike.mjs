@@ -9,6 +9,7 @@
 
 import { createServer } from 'node:http';
 import { createSign, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 const UA = 'release-log-spike';
 const findings = [];
@@ -33,6 +34,24 @@ const {
   BASE_URL, PORT, GITHUB_APP_ID, GITHUB_CLIENT_ID,
   GITHUB_CLIENT_SECRET, GITHUB_WEBHOOK_SECRET,
 } = process.env;
+
+// Der Tunnel entscheidet, welcher Port öffentlich ist. Stimmt PORT nicht mit
+// ihm überein, kommt der OAuth-Callback nie an und der Tunnel liefert 502 —
+// ein Fehlschlag, der wie ein GitHub-Problem aussieht und keines ist.
+try {
+  const conf = readFileSync('scripts/cloudflared-release-log-dev.yml', 'utf8');
+  const tunnelPort = conf.match(/localhost:(\d+)/)?.[1];
+  if (tunnelPort && tunnelPort !== String(PORT)) {
+    console.error(`\n  PORT=${PORT} in .env, aber der Tunnel zeigt auf ${tunnelPort}.`);
+    console.error('  Der Callback käme nie an. Korrigieren:');
+    console.error(`    sed -i '' 's/^PORT=.*/PORT=${tunnelPort}/' .env\n`);
+    process.exit(1);
+  }
+} catch (err) {
+  if (err.code !== 'ENOENT') throw err;
+  console.error('\n  Tunnel-Konfiguration nicht gefunden — läuft scripts/setup-tunnel.sh?\n');
+  process.exit(1);
+}
 
 const PRIVATE_KEY = Buffer.from(process.env.GITHUB_APP_PRIVATE_KEY, 'base64').toString('utf8');
 if (!PRIVATE_KEY.includes('PRIVATE KEY')) {
@@ -110,7 +129,7 @@ const server = createServer((req, res) => {
 
   res.writeHead(404).end();
 });
-await new Promise((r) => server.listen(Number(PORT), r));
+await new Promise((r) => server.listen(Number(PORT), '127.0.0.1', r));
 console.log(`\n  Spike läuft auf Port ${PORT}, öffentlich als ${BASE_URL}\n`);
 
 // ── Frage 1: legt ein Nutzer-Token ein Repo auf dem persönlichen Konto an? ─
