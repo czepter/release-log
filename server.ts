@@ -1,5 +1,8 @@
 // The only file with a socket. Everything it decides is decided in
-// lib/public.ts, which is why the routing tests need no server at all.
+// lib/public.ts, with one exception: the media route below checks
+// config.visibility itself. A media response is bytes, not a route() reply,
+// so there is no JSON shape to carry that decision through — the check has
+// to live here, in transport, where the bytes actually get written.
 
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
@@ -12,9 +15,23 @@ const JSON_CACHE = 'public, max-age=60';
 
 export function createApp(reader: Reader): Server {
   return createServer((req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    const pathname = url.pathname.replace(/\/+$/, '') || '/';
     const method = req.method ?? 'GET';
+
+    // Base is a constant: only pathname and searchParams are ever read from
+    // this URL, so req.headers.host (attacker-controlled) has no business
+    // being part of it. That alone is not enough — a malformed request
+    // target (e.g. "//[/x", which Node's HTTP parser passes through as
+    // req.url unvalidated) still throws here. Answer 400 instead of letting
+    // the exception escape the listener, which would crash the process.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'bad_request' }));
+      return;
+    }
+    const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
     // Viewer is 'public' until sessions exist (Plan 3). Drafts and private
     // logs stay invisible until then, which is the safe direction.

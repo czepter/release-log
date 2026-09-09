@@ -74,6 +74,18 @@ test('a release detail absolutises the image path', () => {
   assert.equal(body.image.src, '/l/abc123/media/media/x.png');
 });
 
+test('the image URL encodes path segments and decodes back to the source path', () => {
+  const withSpecialImage: ReleaseDoc = {
+    ...rel('1.0.0', '2026-01-01', true),
+    image: { src: 'media/my file 100%.png', alt: 'a' },
+  };
+  const r = reader(CONFIG, [withSpecialImage]);
+  const body = route('GET', '/l/abc123/releases/1.0.0', P, r, 'public').body as { image: { src: string } };
+  const prefix = '/l/abc123/media/';
+  assert.equal(body.image.src.startsWith(prefix), true);
+  assert.equal(decodeURIComponent(body.image.src.slice(prefix.length)), 'media/my file 100%.png');
+});
+
 test('a draft detail is 404 for the public and 200 for a member', () => {
   const r = reader(CONFIG, [rel('1.0.0', '2026-01-01', false)]);
   assert.equal(route('GET', '/l/abc123/releases/1.0.0', P, r, 'public').status, 404);
