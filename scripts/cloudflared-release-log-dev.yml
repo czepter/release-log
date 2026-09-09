@@ -1,0 +1,9 @@
+# Benannter Tunnel für die Spike-Umgebung des Release-Log-Hubs.
+# Start: cloudflared tunnel --config scripts/cloudflared-release-log-dev.yml run
+tunnel: 21db7a20-45b7-4545-8a9f-f4989105c82e
+credentials-file: /Users/christian/.cloudflared/21db7a20-45b7-4545-8a9f-f4989105c82e.json
+
+ingress:
+  - hostname: release-log-dev.czpt.de
+    service: http://localhost:8787
+  - service: http_status:404

@@ -706,7 +706,7 @@ Versuchen landen.
 
 | Variable | Inhalt |
 |---|---|
-| `PORT` | von Coolify gesetzt, lokal 8080 |
+| `PORT` | von Coolify gesetzt, lokal 8787 |
 | `BASE_URL` | `https://release-log.czpt.de` |
 | `GITHUB_APP_ID` | ID der GitHub App |
 | `GITHUB_APP_PRIVATE_KEY` | privater Schlüssel, **base64-kodiert** — ein mehrzeiliges PEM ist keine `.env`-Zeile |

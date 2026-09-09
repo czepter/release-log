@@ -373,7 +373,7 @@ ask ADMIN_LOGINS "GitHub-Logins mit Adminrecht, kommagetrennt:"
 write_env ADMIN_LOGINS "$ADMIN_LOGINS"
 if [[ "$ENVIRONMENT" == "dev" ]]; then
   write_env DB_PATH "./release-log.sqlite"
-  write_env PORT "8080"
+  write_env PORT "8787"
 else
   write_env DB_PATH "/data/release-log.sqlite"
   note "PORT setzt Coolify selbst — hier keiner."

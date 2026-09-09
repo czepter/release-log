@@ -188,6 +188,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 TUNNEL_NAME="release-log-dev"
 TUNNEL_HOST="release-log-dev.czpt.de"
+LOCAL_PORT="8787"
 CONFIG="scripts/cloudflared-${TUNNEL_NAME}.yml"
 
 TOTAL_STAGES=4
@@ -243,6 +244,18 @@ pause
 # ── 4 ─────────────────────────────────────────────────────────────────────
 stage "Konfiguration schreiben"
 say "Die Konfiguration liegt im Repo, die Zugangsdaten bleiben in ~/.cloudflared."
+say ""
+# Ein belegter Port heißt: der Tunnel veröffentlicht fremde Dienste ins Netz.
+if lsof -nP -iTCP:"$LOCAL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  warn "Auf Port $LOCAL_PORT hört bereits etwas anderes:"
+  lsof -nP -iTCP:"$LOCAL_PORT" -sTCP:LISTEN 2>/dev/null | sed -n '2,4p' | sed 's/^/      /'
+  say ""
+  warn "Der Tunnel würde genau das öffentlich erreichbar machen."
+  if ! confirm "Trotzdem mit Port $LOCAL_PORT weitermachen?"; then
+    ask LOCAL_PORT "Freier Port stattdessen:"
+  fi
+  say ""
+fi
 cat > "$CONFIG" <<YAML
 # Benannter Tunnel für die Spike-Umgebung des Release-Log-Hubs.
 # Start: cloudflared tunnel --config $CONFIG run
@@ -251,7 +264,7 @@ credentials-file: $HOME/.cloudflared/$TUNNEL_ID.json
 
 ingress:
   - hostname: $TUNNEL_HOST
-    service: http://localhost:8080
+    service: http://localhost:$LOCAL_PORT
   - service: http_status:404
 YAML
 printf '  %s✓ schrieb%s %s\n' "$GREEN" "$RESET" "$CONFIG"
@@ -259,7 +272,7 @@ say ""
 say "Starten mit:"
 note "  cloudflared tunnel --config $CONFIG run"
 say ""
-say "Danach ist https://${TUNNEL_HOST} dein lokaler Port 8080."
+say "Danach ist https://${TUNNEL_HOST} dein lokaler Port $LOCAL_PORT."
 say "Diese Basis-URL trägst du gleich im GitHub-App-Wizard ein."
 pause
 
