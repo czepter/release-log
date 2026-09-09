@@ -131,3 +131,47 @@ test('a repo that comes back thaws the log on the next successful sync', async (
     assert.equal(db.select().from(log).all()[0].state, 'active');
   });
 });
+
+test('a duplicate id leaves the first repository holding it untouched', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/first': files }), { owner: 'o', repo: 'first' });
+
+    const outcome = await syncLog(db, fakeGitHub({ 'o/second': files }), { owner: 'o', repo: 'second' });
+
+    assert.equal(outcome.logId, null);
+    const logs = db.select().from(log).all();
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].repoOwner, 'o');
+    assert.equal(logs[0].repoName, 'first');
+    assert.equal(db.select().from(release).all().length, 1);
+
+    const problems = db.select().from(problem).all();
+    assert.equal(problems.length, 1);
+    assert.ok(problems[0].message.includes('o/first'));
+    assert.ok(problems[0].message.includes('o/second'));
+    assert.ok(problems[0].message.includes('abc123'));
+  });
+});
+
+test('re-syncing the repository that already holds the id is not a duplicate', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+
+    assert.equal(db.select().from(log).all().length, 1);
+    assert.equal(db.select().from(problem).all().length, 0);
+  });
+});
+
+test('a repository that parses clears its earlier problem row', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': '{ not json' } }), REF);
+    assert.equal(db.select().from(problem).all().length, 1);
+
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    assert.equal(db.select().from(problem).all().length, 0);
+  });
+});
