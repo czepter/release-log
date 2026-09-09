@@ -266,3 +266,79 @@ test('an empty index rebuilds everything — no change is a special case', async
     assert.equal(outcome.fetched, 1);
   });
 });
+
+test('a good release edited into something invalid loses its release row, gains an error, and leaves other releases alone', async () => {
+  await withDb(async (db) => {
+    const second = JSON.stringify({ ...JSON.parse(RELEASE), version: '2.0.0', date: '2026-02-01' });
+    const before = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE, 'releases/2.0.0.json': second };
+    await syncLog(db, fakeGitHub({ 'o/r': before }), REF);
+    assert.equal(db.select().from(release).all().length, 2);
+
+    const broken = { ...before, 'releases/1.0.0.json': '{ not json' };
+    const outcome = await syncLog(db, fakeGitHub({ 'o/r': broken }), REF);
+
+    assert.equal(outcome.errors, 1);
+    const rows = db.select().from(release).all();
+    assert.deepEqual(rows.map((r) => r.version), ['2.0.0']);
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].path.includes('1.0.0.json'));
+  });
+});
+
+test('a broken release synced again with no change fetches nothing but still counts as an error', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+
+    const broken = { ...files, 'releases/1.0.0.json': '{ not json' };
+    await syncLog(db, fakeGitHub({ 'o/r': broken }), REF);
+
+    const c = counting(fakeGitHub({ 'o/r': broken }));
+    const outcome = await syncLog(db, c.gh, REF);
+
+    assert.equal(c.blobs.length, 0, 'no blob should be fetched for the same known-broken sha');
+    assert.equal(outcome.errors, 1);
+    assert.equal(db.select().from(release).all().length, 0);
+    assert.equal(db.select().from(syncError).all().length, 1);
+  });
+});
+
+test('a broken release edited into different broken content is re-fetched', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+
+    const brokenOne = { ...files, 'releases/1.0.0.json': '{ not json' };
+    await syncLog(db, fakeGitHub({ 'o/r': brokenOne }), REF);
+
+    const brokenTwo = { ...files, 'releases/1.0.0.json': '{ also not json' };
+    const c = counting(fakeGitHub({ 'o/r': brokenTwo }));
+    const outcome = await syncLog(db, c.gh, REF);
+
+    assert.equal(c.blobs.length, 1, 'a different broken sha must be re-fetched');
+    assert.equal(outcome.fetched, 1);
+    assert.equal(outcome.errors, 1);
+  });
+});
+
+test('a broken release repaired gets its release row back and loses its error', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+
+    const broken = { ...files, 'releases/1.0.0.json': '{ not json' };
+    await syncLog(db, fakeGitHub({ 'o/r': broken }), REF);
+    assert.equal(db.select().from(release).all().length, 0);
+    assert.equal(db.select().from(syncError).all().length, 1);
+
+    const repaired = JSON.stringify({ ...JSON.parse(RELEASE), headline: 'Repariert' });
+    const outcome = await syncLog(db, fakeGitHub({ 'o/r': { ...files, 'releases/1.0.0.json': repaired } }), REF);
+
+    assert.equal(outcome.errors, 0);
+    const rows = db.select().from(release).all();
+    assert.equal(rows.length, 1);
+    assert.equal(JSON.parse(rows[0].doc).headline, 'Repariert');
+    assert.equal(db.select().from(syncError).all().length, 0);
+  });
+});
