@@ -161,7 +161,7 @@ if (!tok.access_token) {
   record('Nutzer-Token erhalten?', 'nein', `Antwort: ${JSON.stringify(tok)}`);
   process.exit(1);
 }
-const userToken = tok.access_token;
+let userToken = tok.access_token;
 record(
   'Callback erreichbar und Nutzer-Token erhalten?', 'ja',
   `expires_in=${tok.expires_in ?? 'nie'}, refresh_token=${tok.refresh_token ? 'ja' : 'nein'}`
@@ -181,17 +181,26 @@ if (tok.refresh_token) {
     }),
   });
   const rj = await r.json();
+  if (rj.access_token) userToken = rj.access_token;
   record(
     'Trägt der Refresh-Zyklus?',
     rj.access_token ? 'ja' : 'nein',
     rj.access_token
       ? `neues Token erhalten, refresh_token_expires_in=${rj.refresh_token_expires_in ?? '?'}`
+        + `\n    Das alte Access-Token ist damit widerrufen: der Dienst muss es`
+        + `\n    ersetzen und Refreshes je Konto serialisieren.`
       : `Antwort: ${JSON.stringify(rj)}`,
   );
 }
 
 const me = await gh('/user', { token: userToken });
 const login = me.json?.login;
+if (!login) {
+  record('Nutzer-Token benutzbar?', 'nein',
+    `GET /user ergab HTTP ${me.status}: ${me.json?.message ?? me.text.slice(0, 120)}`);
+  server.close();
+  process.exit(1);
+}
 const repoName = `release-log-spike-${Date.now()}`;
 
 const created = await gh('/user/repos', {
