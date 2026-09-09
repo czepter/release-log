@@ -11,5 +11,5 @@
     "lib": ["esnext"],
     "types": ["node"]
   },
-  "include": ["lib/**/*.ts", "bin/**/*.ts", "server.ts"]
+  "include": ["lib/**/*.ts", "*.ts"]
 }
