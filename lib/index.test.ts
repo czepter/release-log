@@ -7,7 +7,7 @@ import { openDb } from './db/client.ts';
 import type { Db } from './db/client.ts';
 import { log, release, syncError, problem, media } from './db/schema.ts';
 import type { GitHub } from './github.ts';
-import { fakeGitHub } from './github.ts';
+import { fakeGitHub, blobSha } from './github.ts';
 import { syncLog } from './index.ts';
 
 const REF = { owner: 'o', repo: 'r' };
@@ -401,5 +401,80 @@ test('a media file removed from the repo disappears from the index', async () =>
 
     await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } }), REF);
     assert.equal(db.select().from(media).all().length, 0);
+  });
+});
+
+// Regression: a media file that was already indexed must not go on serving
+// its stale bytes once it regresses on a later sync — the same staleness
+// bug the release loop was already careful to avoid. Each test below starts
+// from a file that IS indexed, then regresses it, and checks the old
+// `media` row is gone, not just that a `syncError` row appeared beside it.
+
+test('an indexed media file that grows past the size cap is dropped, not left stale', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': PNG } }), REF);
+    assert.equal(db.select().from(media).all().length, 1);
+
+    const huge = Buffer.alloc(10 * 1024 * 1024 + 1, 1);
+    const grown = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': huge } });
+    await syncLog(db, grown, REF);
+
+    assert.equal(db.select().from(media).all().length, 0, 'the stale row must be gone, not just an error added');
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].path.includes('shot.png'));
+  });
+});
+
+test('an indexed media file that becomes an unsupported type is dropped, not left stale', async () => {
+  await withDb(async (db) => {
+    // The extension check is a pure function of the path, so no two real
+    // syncs against the same path can flip a file from supported to
+    // unsupported — the only way a *supported* path regresses into an
+    // unsupported one is a rename, which the tree-diff sweep already
+    // covers (a different test, a different code path). To reach the
+    // extension-check's own delete branch, seed a media row directly, as
+    // if it had been indexed under a type this codebase no longer
+    // supports (or the path was reused after such a file), then let the
+    // tree present that same path with an unsupported extension today.
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } }), REF);
+    db.insert(media).values({
+      logId: 'abc123', path: 'media/shot.gif', blobSha: 'stalesha', contentType: 'image/gif', bytes: PNG,
+    }).run();
+    assert.equal(db.select().from(media).all().length, 1);
+
+    const gh = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.gif': PNG } });
+    await syncLog(db, gh, REF);
+
+    assert.equal(db.select().from(media).all().length, 0, 'the stale row must be gone, not just an error added');
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].path.includes('shot.gif'));
+  });
+});
+
+test('an indexed media file whose blob comes back null on a later sync is dropped, not left stale', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': PNG } }), REF);
+    assert.equal(db.select().from(media).all().length, 1);
+
+    // A different sha for the same path, so the fetch is not skipped as
+    // unchanged. The fake GitHub cannot produce a missing blob for a path
+    // its tree lists, so wrap it the way the fetch-counting tests do and
+    // have the wrapper return null for that one blob.
+    const edited = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]);
+    const editedSha = blobSha(edited);
+    const base = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': edited } });
+    const missingBlob: GitHub = {
+      head: (ref) => base.head(ref),
+      tree: (ref, commit) => base.tree(ref, commit),
+      blob: async (ref, sha) => (sha === editedSha ? null : base.blob(ref, sha)),
+    };
+    await syncLog(db, missingBlob, REF);
+
+    assert.equal(db.select().from(media).all().length, 0, 'the stale row must be gone, not just an error added');
+    const errors = db.select().from(syncError).all();
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].path.includes('shot.png'));
   });
 });
