@@ -26,7 +26,10 @@ export type Reader = {
   etag(logId: string): string | null;
 };
 
-const MEDIA_TYPES: Record<string, string> = {
+// Shared with lib/index.ts (the sync side), which imports this rather than
+// keeping its own copy — one list of supported media types, not two that
+// could silently drift apart.
+export const MEDIA_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.webp': 'image/webp',
