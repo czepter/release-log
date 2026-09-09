@@ -82,7 +82,12 @@ export function route(
 
   if (rest === 'versions') {
     const sorted = sortReleases(releases);
-    const newest = viewer === 'member' ? (sorted[0] ?? null) : latestOf(releases);
+    // latest is the first entry of that order among the published, for
+    // every viewer (spec §4) -- so it has to run over the unfiltered
+    // release list. latestOf's own published-only filter does the work;
+    // passing the already-visible-filtered `releases` here would make that
+    // filter a no-op for a member and let a draft surface as latest.
+    const newest = latestOf(reader.releases(logId));
     return {
       status: 200,
       body: {
