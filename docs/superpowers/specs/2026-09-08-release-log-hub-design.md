@@ -32,7 +32,7 @@ Log-Repo. Alles, was aus Commits Themen macht, geschieht im Agenten.
 | # | Entscheidung | Begründung |
 |---|---|---|
 | 1 | Das GitHub-Repo ist die Quelle der Wahrheit; die App hält einen materialisierten Lese-Index | Git-Historie ist die echte Historie. Handedits und PRs zählen gleichberechtigt. Der öffentliche Request-Pfad hängt nicht an GitHubs Verfügbarkeit |
-| 2 | Eine GitHub App leistet Anmeldung und Repo-Zugriff; die Repos gehören dem Nutzer | Fine-grained auf ausgewählte Repos statt `repo`-Scope auf alles. Installations-Token überleben Personalwechsel. Private Repos möglich |
+| 2 | Eine GitHub App leistet Anmeldung und Repo-Zugriff; die Repos gehören dem Nutzer | Fine-grained auf ausgewählte Repos statt `repo`-Scope auf alles. Installations-Token überleben Personalwechsel. Private Repos möglich. **Eingeschränkt durch 23** |
 | 3 | Den Rohstoff liefert der Agent; die App liest kein Produkt-Repo | Der Agent sieht Diffs und PR-Text, ein Server sieht Betreffzeilen |
 | 4 | Veröffentlichen ist ein Feld: `published_at` | Ein Commit, ein Ref, eine Datei. Idempotent, und beantwortet die Frage, die eine Timeline stellt |
 | 5 | Eingebunden wird JSON; zusätzlich gibt es eine gehostete Ansichtsseite | Wer einbindet, rendert selbst. Die Ansichtseinstellung steuert nur die gehostete Seite |
@@ -52,7 +52,8 @@ Log-Repo. Alles, was aus Commits Themen macht, geschieht im Agenten.
 | 19 | TypeScript, `better-sqlite3` mit Drizzle, kein Framework, **kein Build-Schritt** | Folgt den Werkzeugen des Bestands. Node 24 entfernt Typen zur Laufzeit, also Typen ohne Artefakt |
 | 20 | OAuth wird aus `umami-mcp/src/oauth-core.ts` übernommen und angepasst | 339 Zeilen zu kopieren ist billiger als drei Laufzeiten an ein gemeinsames Paket zu koppeln |
 | 21 | Railpack auf Coolify unter `release-log.czpt.de` | Einprozess-Dienst ohne Build, dieselbe Gattung wie das Vorbild |
-| 22 | Ein Spike zur GitHub App geht dem Implementierungsplan voraus | Einziger Teil ohne Vorerfahrung im Bestand; vier Annahmen tragen die halbe Bauabfolge |
+| 22 | Ein Spike zur GitHub App geht dem Implementierungsplan voraus | Einziger Teil ohne Vorerfahrung im Bestand; die Annahmen tragen die halbe Bauabfolge |
+| 23 | Für `create_log` hält die App ein verschlüsseltes GitHub-Nutzer-Token vor | `POST /user/repos` akzeptiert laut GitHubs Referenz **nur** Nutzer-Token. Ohne dies könnte MCP auf persönlichen Konten keine Repos anlegen. Preis: weicht 2 auf — ein Angriffsziel mehr, personengebunden. Abgefedert durch Verschlüsselung im Ruhezustand und ablaufende Token mit Refresh |
 
 ## 3. Repo-Format
 
@@ -203,6 +204,7 @@ Drizzle über `better-sqlite3`; Migrationen mit `drizzle-kit`.
 | `media` | `log_id`, `path`, `blob_sha`, `content_type`, `bytes`; PK (`log_id`, `path`) |
 | `sync_error` | `log_id`, `path`, `message`, `at` |
 | `repo_permission` | `account_id`, `log_id`, `can_write`, `checked_at`; PK (`account_id`, `log_id`) |
+| `github_user_token` | `account_id` (PK), `access_token_enc`, `refresh_token_enc`, `expires_at`, `refreshed_at`. **Verschlüsselt**, nicht gehasht — es wird benutzt, nicht geprüft. Nur für `POST /user/repos` |
 | `upload_token` | `token_hash` (PK), `log_id`, `path`, `account_id`, `max_bytes`, `expires_at`, `used_at` |
 | `oauth_client` | `client_id` (PK), `client_name`, `redirect_uris` (JSON), `created_at` |
 | `oauth_grant` | `account_id`, `client_id`, `scopes`, `granted_at`; PK (`account_id`, `client_id`). Dient der Anzeige verbundener Clients und dem Widerruf — **nicht** dazu, die Zustimmung zu überspringen |
@@ -299,9 +301,31 @@ gehalten, bis sie ablaufen.
 Repo-Zugriff hängt damit an der Installation, nicht an einer Person. Verlässt
 jemand das Team, laufen Index und öffentliche Seite weiter.
 
+**Ausnahme: Repos anlegen.** GitHubs Berechtigungsreferenz führt
+`POST /orgs/{org}/repos` für Installations- und Nutzer-Token, `POST /user/repos`
+dagegen **nur für Nutzer-Token**. Da die Log-Repos auf einem persönlichen Konto
+liegen, kann `create_log` nicht über das Installations-Token laufen.
+
+Die App hält deshalb je Konto ein GitHub-Nutzer-Token vor, **verschlüsselt** im
+Ruhezustand mit `TOKEN_ENCRYPTION_KEY` — nicht gehasht, weil es benutzt und
+nicht nur geprüft wird. Die Einstellung „Expire user authorization tokens"
+bleibt aktiv: gespeichert wird ein kurzlebiges Token samt Refresh-Token statt
+eines unbefristeten. Benutzt wird es **ausschließlich** für `POST /user/repos`;
+jeder andere Repo-Zugriff läuft weiter über die Installation.
+
+Das weicht die Begründung von Entscheidung 2 auf, und das soll hier stehen: ein
+gespeichertes Nutzer-Token ist ein Angriffsziel, das der Entwurf vorher nicht
+hatte, und es geht mit der Person. Ist es abgelaufen und der Refresh
+abgewiesen, scheitert `create_log` mit `reauth_required` — der Mensch meldet
+sich einmal neu an. Kein anderer Weg des Dienstes bricht dadurch.
+
 Berechtigungen der GitHub App: `contents: write`, `metadata: read`,
-`administration: write` (Repos anlegen). Abonnierte Events: `push`,
-`installation`, `installation_repositories`, `repository`, `member`.
+`administration: write` (Repos anlegen).
+
+Abonniert werden genau drei Events: `push`, `repository`, `member`.
+`installation`, `installation_repositories` und `github_app_authorization`
+bekommt jede GitHub App automatisch — sie stehen nicht in der Auswahl und
+lassen sich nicht abbestellen. Wer sie dort sucht, sucht vergeblich.
 
 ### Rolle 2: die App als Authorization Server gegenüber Agent-Clients
 
@@ -346,7 +370,11 @@ Client, Scopes und betroffene Logs benennt, dann zurück mit Code.
   akzeptiert. Unsere Access-Token tragen als Audience unseren eigenen
   MCP-Endpunkt und werden gegen ihn geprüft. Token-Weiterreichung ist damit
   ausgeschlossen.
-- **Token liegen nur als SHA-256-Hash in der Datenbank.**
+- **Unsere Token liegen nur als SHA-256-Hash in der Datenbank.** Was
+  gespeichert wird, reicht zum Prüfen und nicht zum Benutzen. Einzige
+  Ausnahme ist das GitHub-Nutzer-Token aus 23: es wird benutzt, nicht geprüft,
+  liegt also verschlüsselt statt gehasht — und ist damit das einzige
+  Geheimnis im System, das ein Datenbankdiebstahl brauchbar erbeutet.
 - **Laufzeiten:** Access-Token 1 Stunde, Refresh-Token 30 Tage mit Rotation.
   Ein zweimal benutztes Refresh-Token widerruft die ganze Kette.
 - **Zwei Scopes:** `logs:read` und `logs:write`.
@@ -377,10 +405,17 @@ eine GitHub App bekommt die Events ihrer Installationen von selbst.
 | `unpublish_release` | write | `log_id`, `version` | Setzt `published_at` auf `null` |
 | `add_media` | write | `log_id`, `path` | Liefert eine signierte Upload-URL; siehe unten |
 
-`create_log` braucht eine bestehende Installation auf dem Ziel-Account. Gibt
-es keine, scheitert der Aufruf mit `no_installation` und liefert die
-Installations-URL zurück — der Agent reicht sie an den Menschen weiter, der
-sie einmal öffnet. Danach läuft das Anlegen ohne Browser.
+`create_log` braucht zweierlei: eine bestehende Installation auf dem
+Ziel-Account und ein gültiges GitHub-Nutzer-Token des aufrufenden Kontos. Fehlt
+die Installation, scheitert der Aufruf mit `no_installation` und liefert die
+Installations-URL zurück. Ist das Nutzer-Token abgelaufen und der Refresh
+abgewiesen, scheitert er mit `reauth_required` und liefert die Anmelde-URL.
+Beide Male reicht der Agent die URL an den Menschen weiter, der sie einmal
+öffnet; danach läuft das Anlegen ohne Browser.
+
+Das Nutzer-Token wird ausschließlich für `POST /user/repos` benutzt. Alles
+Weitere am neuen Repo — die erste `release-log.json`, die `README.md`, der
+Abgleich — läuft über das Installations-Token.
 
 `view`, `visibility` und `curation_notes` ändert nur das Dashboard. Sie sind
 Einstellungen, die ein Mensch trifft und ansieht.
@@ -422,8 +457,8 @@ Repo rutschen.
 ### Fehler
 
 `conflict`, `invalid_document`, `installation_inactive`, `no_installation`,
-`log_frozen`, `path_exists`, `not_found`, `forbidden`, `payload_too_large`,
-`github_unavailable`. Jeder trägt eine Meldung, die sagt, was als Nächstes zu
+`reauth_required`, `log_frozen`, `path_exists`, `not_found`, `forbidden`,
+`payload_too_large`, `github_unavailable`. Jeder trägt eine Meldung, die sagt, was als Nächstes zu
 tun ist.
 
 ### Instructions und Prompt
@@ -642,6 +677,11 @@ Refresh-Token zweimal benutzt, Webhook mit falscher Signatur, Zugriff auf
 fremden Log, Anmeldung ohne Eintrag in der Zulassungsliste, Upload-Token
 zweimal benutzt, Upload-Token für fremden Pfad.
 
+**GitHub-Nutzer-Token:** wird verschlüsselt abgelegt und entschlüsselt wieder
+gelesen; ein abgelaufenes Token wird über den Refresh erneuert; ein
+abgewiesener Refresh ergibt `reauth_required` statt eines Serverfehlers; das
+Token wird auf keinem anderen Pfad als `create_log` angefasst.
+
 **Rechte:** Cache liefert innerhalb von 5 Minuten ohne GitHub-Aufruf, danach
 mit; `installation_repositories` invalidiert sofort.
 
@@ -669,20 +709,22 @@ Versuchen landen.
 | `PORT` | von Coolify gesetzt, lokal 8080 |
 | `BASE_URL` | `https://release-log.czpt.de` |
 | `GITHUB_APP_ID` | ID der GitHub App |
-| `GITHUB_APP_PRIVATE_KEY` | privater Schlüssel im PEM-Format |
+| `GITHUB_APP_PRIVATE_KEY` | privater Schlüssel, **base64-kodiert** — ein mehrzeiliges PEM ist keine `.env`-Zeile |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | für den User-to-Server-Flow |
 | `GITHUB_WEBHOOK_SECRET` | zur Signaturprüfung |
 | `SIGNING_KEY` | signiert Sessions, Token und Upload-Token |
+| `TOKEN_ENCRYPTION_KEY` | verschlüsselt die GitHub-Nutzer-Token im Ruhezustand |
 | `ADMIN_LOGINS` | GitHub-Logins mit Adminrecht, kommagetrennt |
 | `DB_PATH` | Pfad der SQLite-Datei auf dem Volume |
 
 **Backup.** Fast alles ist rekonstruierbar: welche Repos Logs sind, steht in
 ihnen selbst — die Installation aufzulisten und nach `release-log.json` zu
 suchen baut den Bestand neu. Verloren gingen nur die Zulassungsliste,
-registrierte OAuth-Clients und erteilte Zustimmungen; die ersten stehen zur
-Not in `ADMIN_LOGINS`, die anderen entstehen beim nächsten Verbinden neu. Ein
-Datenbankverlust kostet eine Neuverbindung je Client, keinen Datenverlust.
-Gesichert wird täglich.
+registrierte OAuth-Clients, erteilte Zustimmungen und die
+GitHub-Nutzer-Token; die erste steht zur Not in `ADMIN_LOGINS`, die übrigen
+entstehen beim nächsten Verbinden und Anmelden neu. Ein Datenbankverlust
+kostet eine Neuverbindung je Client und eine Neuanmeldung je Person, keinen
+Datenverlust. Gesichert wird täglich.
 
 `bin/reindex.ts` baut den Index neu, für einen Log oder für alle.
 
@@ -692,13 +734,19 @@ Schritt 0 geht dem Implementierungsplan voraus. Die GitHub App ist der einzige
 Teil ohne Vorerfahrung im Bestand, und in ihr stecken vier Annahmen, die die
 Schritte 3 bis 6 tragen.
 
-0. **Spike (Wegwerfcode, Ergebnis ist eine Antwort).** Beantwortet: Kann ein
-   Installations-Token Repos anlegen, und reicht `administration: write`?
-   Worin unterscheiden sich persönliche Konten und Orgs beim Installieren und
-   Anlegen? Gibt die Contents-API beim Commit die Blob-SHA zurück, die der
-   Write-Through braucht? Trägt der Baum-Abgleich innerhalb der Rate-Limits
-   einer Installation? — Voraussetzung: die „…-dev"-App, angelegt über ein
-   geführtes Einrichtungsskript, weil nur der Betreiber sie anlegen kann.
+0. **Spike (Wegwerfcode, Ergebnis ist eine Antwort).** Vorab aus GitHubs
+   Referenz geklärt und nicht mehr Teil des Spikes: ein Installations-Token
+   kann auf einem persönlichen Konto **kein** Repo anlegen (siehe 23).
+
+   Offen und zu beantworten: Legt ein **Nutzer-Token** mit
+   `administration: write` ein Repo auf dem persönlichen Konto an, und überlebt
+   der Refresh-Zyklus die Zeit zwischen zwei Releases? Gibt die Contents-API
+   beim Commit die Blob-SHA zurück, die der Write-Through braucht? Trägt der
+   Baum-Abgleich innerhalb der Rate-Limits einer Installation? Kommen die
+   Webhooks am Tunnel an und verifiziert die Signaturprüfung sie?
+
+   Voraussetzung: `scripts/setup-tunnel.sh`, dann `scripts/setup-github-app.sh`
+   für die „…-dev"-App — nur der Betreiber kann sie anlegen.
 1. **Dokumentmodell** — `lib/document.ts` und `lib/public.ts` gegen statische
    Dateien. Testbar ohne GitHub.
 2. **Index** — Drizzle-Schema und `syncLog` gegen das Fake-GitHub.
