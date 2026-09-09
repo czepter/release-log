@@ -37,6 +37,20 @@ test('parseConfig rejects a missing id', () => {
   assert.equal(result.ok, false);
 });
 
+test('parseConfig rejects an id that a URL cannot carry unchanged', () => {
+  for (const bad of ['with space', 'with/slash', 'with%25', 'with?query', '']) {
+    const result = parseConfig({ id: bad, product: 'X' });
+    assert.equal(result.ok, false, `expected "${bad}" to be rejected`);
+  }
+});
+
+test('parseConfig accepts the id shapes the service generates', () => {
+  for (const good of ['k7m2q9xw4p1a', 'demo00000001', 'a-b_c.d~e']) {
+    const result = parseConfig({ id: good, product: 'X' });
+    assert.equal(result.ok, true, `expected "${good}" to be accepted`);
+  }
+});
+
 const HEAD = {
   version: '0.9.2',
   tag: 'v0.9.2',

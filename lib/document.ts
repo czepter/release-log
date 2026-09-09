@@ -29,7 +29,15 @@ export function parseConfig(input: unknown): Validated<LogConfig> {
   const errors: string[] = [];
   if (!isObject(input)) return { ok: false, errors: ['config: not an object'] };
 
-  if (!str(input.id)) errors.push('config.id: required, non-empty string');
+  // The id is interpolated into every emitted URL and looked up undecoded on
+  // the way back in, so it has to survive that round trip unchanged. This is
+  // a charset rule, not a format rule: the service generates Crockford
+  // base32, but a hand-written id is fine as long as a URL can carry it.
+  const ID = /^[A-Za-z0-9._~-]{1,64}$/;
+
+  if (!str(input.id) || !ID.test(input.id)) {
+    errors.push('config.id: required, 1-64 chars from A-Z a-z 0-9 . _ ~ -');
+  }
   if (!str(input.product)) errors.push('config.product: required, non-empty string');
 
   const view = input.view === undefined ? 'full' : input.view;
