@@ -15,6 +15,11 @@ export type Reader = {
   releases(logId: string): ReleaseDoc[];
   media(logId: string, path: string): MediaBlob | null;
   errors(logId: string): SyncError[];
+  // Problems with no log id to key them by: a release-log.json that fails
+  // to parse (the log itself never gets an id) and a duplicate id (the
+  // second directory is dropped before it can claim one). errors() can't
+  // carry either, so the dashboard needs a second channel (spec §3, §10).
+  problems(): SyncError[];
 };
 
 const MEDIA_TYPES: Record<string, string> = {
@@ -34,13 +39,20 @@ type Loaded = {
   errors: SyncError[];
 };
 
-function loadLog(dir: string): Loaded | null {
+function loadLog(dir: string, problems: SyncError[]): Loaded | null {
   let config: LogConfig;
   try {
     const parsed = parseConfig(JSON.parse(readFileSync(join(dir, 'release-log.json'), 'utf8')));
-    if (!parsed.ok) return null;
+    if (!parsed.ok) {
+      // No log id yet -- this can't be reported through errors(logId), so
+      // it goes on the id-less channel instead (spec §10: "Fehler im
+      // Dashboard").
+      problems.push({ path: dir, message: `invalid release-log.json: ${parsed.errors.join('; ')}` });
+      return null;
+    }
     config = parsed.value;
-  } catch {
+  } catch (err) {
+    problems.push({ path: dir, message: `invalid release-log.json: ${(err as Error).message}` });
     return null;
   }
 
@@ -82,6 +94,7 @@ export function fileReader(rootInput: string): Reader {
   // absolute against relative and rejects everything.
   const root = resolve(rootInput);
   const logs = new Map<string, Loaded>();
+  const problems: SyncError[] = [];
   let entries: string[] = [];
   try {
     entries = readdirSync(root).sort();
@@ -99,16 +112,26 @@ export function fileReader(rootInput: string): Reader {
       isDir = false;
     }
     if (!isDir) continue;
-    const loaded = loadLog(dir);
-    // First claimant wins: a second repo with a taken id is not indexed
-    // (spec §3).
-    if (loaded && !logs.has(loaded.config.id)) logs.set(loaded.config.id, loaded);
+    const loaded = loadLog(dir, problems);
+    if (!loaded) continue;
+    // First claimant wins: a second repo with a taken id is not indexed,
+    // and the dashboard names both repos and the id (spec §3).
+    const existing = logs.get(loaded.config.id);
+    if (existing) {
+      problems.push({
+        path: `${existing.dir}, ${loaded.dir}`,
+        message: `duplicate id "${loaded.config.id}": kept ${existing.dir}, dropped ${loaded.dir}`,
+      });
+    } else {
+      logs.set(loaded.config.id, loaded);
+    }
   }
 
   return {
     config: (logId) => logs.get(logId)?.config ?? null,
     releases: (logId) => logs.get(logId)?.releases ?? [],
     errors: (logId) => logs.get(logId)?.errors ?? [],
+    problems: () => problems,
     media(logId, path) {
       const log = logs.get(logId);
       if (!log) return null;

@@ -18,6 +18,7 @@ const reader: Reader = {
       ? { type: 'image/png', bytes: Buffer.from([1, 2, 3]) }
       : null,
   errors: () => [],
+  problems: () => [],
 };
 
 // Same shape as `reader` above but private, and media() still resolves the
@@ -33,6 +34,7 @@ const privateReader: Reader = {
       ? { type: 'image/png', bytes: Buffer.from([1, 2, 3]) }
       : null,
   errors: () => [],
+  problems: () => [],
 };
 
 async function withServer(reader: Reader, fn: (base: string) => Promise<void>): Promise<void> {
