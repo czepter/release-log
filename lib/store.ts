@@ -2,7 +2,7 @@
 // Plan 1 fills it from a directory; Plan 2 fills it from the SQLite index
 // without public.ts changing (spec §4, §9).
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, realpathSync } from 'node:fs';
 import { join, resolve, extname, sep } from 'node:path';
 import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig, ReleaseDoc } from './document.ts';
@@ -25,6 +25,10 @@ const MEDIA_TYPES: Record<string, string> = {
 
 type Loaded = {
   dir: string;
+  // Filesystem-resolved (symlink-free) form of `dir`, computed once at load
+  // time so media() has a real-path boundary to compare against without
+  // re-resolving on every request.
+  realDir: string;
   config: LogConfig;
   releases: ReleaseDoc[];
   errors: SyncError[];
@@ -36,6 +40,13 @@ function loadLog(dir: string): Loaded | null {
     const parsed = parseConfig(JSON.parse(readFileSync(join(dir, 'release-log.json'), 'utf8')));
     if (!parsed.ok) return null;
     config = parsed.value;
+  } catch {
+    return null;
+  }
+
+  let realDir: string;
+  try {
+    realDir = realpathSync(dir);
   } catch {
     return null;
   }
@@ -61,10 +72,15 @@ function loadLog(dir: string): Loaded | null {
       errors.push({ path, message: (err as Error).message });
     }
   }
-  return { dir, config, releases, errors };
+  return { dir, realDir, config, releases, errors };
 }
 
-export function fileReader(root: string): Reader {
+export function fileReader(rootInput: string): Reader {
+  // A relative root (the future default of './logs') must not silently
+  // fail every media request: resolve() below always returns an absolute
+  // path, so log.dir has to be absolute too or the prefix check compares
+  // absolute against relative and rejects everything.
+  const root = resolve(rootInput);
   const logs = new Map<string, Loaded>();
   let entries: string[] = [];
   try {
@@ -98,12 +114,25 @@ export function fileReader(root: string): Reader {
       if (!log) return null;
       const target = resolve(log.dir, path);
       // resolve() collapses "..", so a path that leaves the log directory is
-      // visible here and nowhere later.
+      // visible here and nowhere later. Cheap first gate, purely lexical.
       if (target !== log.dir && !target.startsWith(log.dir + sep)) return null;
       const type = MEDIA_TYPES[extname(target)];
       if (!type) return null;
+      // resolve() never touches the filesystem, so a symlink inside the log
+      // directory that points outside it still passes the lexical check
+      // above. This service serves content from repositories, which can
+      // contain symlinks, so the second gate resolves the real path and
+      // re-checks the boundary. realpathSync throws for a missing file,
+      // which is the same "not found" outcome as today.
+      let real: string;
       try {
-        return { type, bytes: readFileSync(target) };
+        real = realpathSync(target);
+      } catch {
+        return null;
+      }
+      if (real !== log.realDir && !real.startsWith(log.realDir + sep)) return null;
+      try {
+        return { type, bytes: readFileSync(real) };
       } catch {
         return null;
       }
