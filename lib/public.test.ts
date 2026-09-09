@@ -57,6 +57,15 @@ test('versions shows drafts to a member', () => {
   assert.equal(body.versions.length, 2);
 });
 
+test('a member\'s latest skips a draft newer than the newest published release', () => {
+  const r = reader(CONFIG, [rel('1.0.0', '2026-01-01', true), rel('1.1.0', '2026-02-01', false)]);
+  const body = route('GET', '/l/abc123/versions', P, r, 'member').body as { latest: string };
+  // The draft 1.1.0 sorts first by date; latest must still be the newest
+  // published release. Picking sorted[0] unconditionally for a member (the
+  // bug) would report '1.1.0' here instead.
+  assert.equal(body.latest, '1.0.0');
+});
+
 test('a release detail carries sections and never carries covered', () => {
   const r = reader(CONFIG, [rel('1.0.0', '2026-01-01', true, [change('feat'), change('fix', true)])]);
   const reply = route('GET', '/l/abc123/releases/1.0.0', P, r, 'public');
