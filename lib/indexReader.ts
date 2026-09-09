@@ -6,7 +6,7 @@
 // table, so "../" is a key that matches nothing rather than a filesystem
 // traversal to defend against.
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Db } from './db/client.ts';
 import { log, release, media, syncError, problem } from './db/schema.ts';
 import type { Reader, MediaBlob, SyncError } from './store.ts';
@@ -38,8 +38,8 @@ export function indexReader(db: Db): Reader {
         .map((row) => JSON.parse(row.doc) as ReleaseDoc);
     },
     media(logId: string, path: string): MediaBlob | null {
-      const row = db.select().from(media).where(eq(media.logId, logId)).all()
-        .find((r) => r.path === path);
+      const row = db.select().from(media)
+        .where(and(eq(media.logId, logId), eq(media.path, path))).all()[0];
       if (!row) return null;
       return { type: row.contentType, bytes: Buffer.from(row.bytes) };
     },
