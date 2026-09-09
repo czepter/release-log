@@ -169,3 +169,12 @@ test('stripSha leaves a message alone when the sha-shaped sequence is not at the
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('etag is the head sha of the indexed commit', async () => {
+  await withReader(async (reader, db) => {
+    const tag = reader.etag('abc123');
+    assert.ok(tag);
+    assert.match(tag, /^[0-9a-f]{40}$/);
+    assert.equal(reader.etag('nope'), null);
+  });
+});

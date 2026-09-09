@@ -20,6 +20,10 @@ export type Reader = {
   // second directory is dropped before it can claim one). errors() can't
   // carry either, so the dashboard needs a second channel (spec §3, §10).
   problems(): SyncError[];
+  // The commit the log was last read at, or null when there is no commit
+  // to name. A directory of files has no head, so fileReader returns null
+  // and the server simply omits the header (spec §7).
+  etag(logId: string): string | null;
 };
 
 const MEDIA_TYPES: Record<string, string> = {
@@ -132,6 +136,7 @@ export function fileReader(rootInput: string): Reader {
     releases: (logId) => logs.get(logId)?.releases ?? [],
     errors: (logId) => logs.get(logId)?.errors ?? [],
     problems: () => problems,
+    etag: () => null,
     media(logId, path) {
       const log = logs.get(logId);
       if (!log) return null;

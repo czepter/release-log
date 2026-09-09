@@ -89,6 +89,21 @@ export function createApp(reader: Reader): Server {
       'cache-control': JSON_CACHE,
     };
     if (reply.status === 200) headers['access-control-allow-origin'] = '*';
+
+    // The ETag is the commit the log was read at, so it changes exactly
+    // when the content does. Only a served log gets one; a 404 must stay
+    // indistinguishable between "missing" and "private" (spec §7).
+    const logMatch = /^\/l\/([^/]+)\//.exec(pathname + '/');
+    const tag = reply.status === 200 && logMatch ? reader.etag(logMatch[1]) : null;
+    if (tag !== null) {
+      const quoted = `"${tag}"`;
+      headers['etag'] = quoted;
+      if (req.headers['if-none-match'] === quoted) {
+        res.writeHead(304, headers);
+        res.end();
+        return;
+      }
+    }
     res.writeHead(reply.status, headers);
     res.end(method === 'HEAD' ? undefined : JSON.stringify(reply.body));
   });

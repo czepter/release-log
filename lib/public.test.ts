@@ -32,6 +32,7 @@ function reader(config: LogConfig, releases: ReleaseDoc[]): Reader {
     media: () => null,
     errors: () => [],
     problems: () => [],
+    etag: () => null,
   };
 }
 
