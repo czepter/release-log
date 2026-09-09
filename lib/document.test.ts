@@ -106,3 +106,52 @@ test('parseRelease rejects a negative commit count', () => {
   const result = parseRelease({ ...HEAD, commits: -1 });
   assert.equal(result.ok, false);
 });
+
+const CHANGE = {
+  type: 'feat',
+  scope: 'gallery',
+  title: 'Galerie-Einstellungen über der Liste',
+  description: 'Zwei Absätze.\n\nDer zweite.',
+  pr: null,
+  issues: [19, 20],
+  commit: 'b9871b32',
+  date: '2026-09-08',
+};
+
+test('parseRelease accepts a change and defaults breaking to false', () => {
+  const result = parseRelease({ ...HEAD, changes: [CHANGE] });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.changes[0].breaking, false);
+  assert.equal(result.value.changes[0].type, 'feat');
+  assert.deepEqual(result.value.changes[0].issues, [19, 20]);
+});
+
+test('parseRelease keeps an explicit breaking flag', () => {
+  const result = parseRelease({ ...HEAD, changes: [{ ...CHANGE, breaking: true }] });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.changes[0].breaking, true);
+});
+
+test('parseRelease rejects an unknown change type', () => {
+  const result = parseRelease({ ...HEAD, changes: [{ ...CHANGE, type: 'chore' }] });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.ok(result.errors.some((e) => e.includes('changes[0].type')));
+});
+
+test('parseRelease names the index of a bad change', () => {
+  const result = parseRelease({
+    ...HEAD,
+    changes: [CHANGE, { ...CHANGE, title: '' }],
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.ok(result.errors.some((e) => e.includes('changes[1].title')));
+});
+
+test('parseRelease rejects non-numeric issues', () => {
+  const result = parseRelease({ ...HEAD, changes: [{ ...CHANGE, issues: ['19'] }] });
+  assert.equal(result.ok, false);
+});
