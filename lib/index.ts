@@ -7,6 +7,7 @@ import type { Db } from './db/client.ts';
 import { log, release, syncError, problem } from './db/schema.ts';
 import type { GitHub, RepoRef, TreeEntry } from './github.ts';
 import { parseConfig, parseRelease } from './document.ts';
+import type { LogConfig } from './document.ts';
 
 export type SyncOutcome = {
   logId: string | null;
@@ -64,18 +65,36 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     return { logId: null, fetched: 0, errors: 0, frozen: false };
   }
 
-  const configBytes = await gh.blob(ref, configEntry.sha);
-  let parsedConfig;
-  try {
-    parsedConfig = parseConfig(JSON.parse((configBytes ?? Buffer.alloc(0)).toString('utf8')));
-  } catch (err) {
-    parsedConfig = { ok: false as const, errors: [(err as Error).message] };
+  const known = db.select().from(log)
+    .where(and(eq(log.repoOwner, ref.owner), eq(log.repoName, ref.repo))).all()[0] ?? null;
+
+  // Unchanged config: reuse what the index already holds instead of
+  // fetching and re-parsing it.
+  const configUnchanged = known !== null && known.configBlobSha === configEntry.sha;
+
+  let config: LogConfig;
+  if (configUnchanged && known !== null) {
+    config = {
+      id: known.publicId,
+      product: known.product,
+      view: known.view as LogConfig['view'],
+      visibility: known.visibility as LogConfig['visibility'],
+      curation_notes: known.curationNotes,
+    };
+  } else {
+    const configBytes = await gh.blob(ref, configEntry.sha);
+    let parsedConfig;
+    try {
+      parsedConfig = parseConfig(JSON.parse((configBytes ?? Buffer.alloc(0)).toString('utf8')));
+    } catch (err) {
+      parsedConfig = { ok: false as const, errors: [(err as Error).message] };
+    }
+    if (!parsedConfig.ok) {
+      writeProblem(db, repoPath, `invalid ${CONFIG_PATH}: ${parsedConfig.errors.join('; ')}`);
+      return { logId: null, fetched: 0, errors: 0, frozen: false };
+    }
+    config = parsedConfig.value;
   }
-  if (!parsedConfig.ok) {
-    writeProblem(db, repoPath, `invalid ${CONFIG_PATH}: ${parsedConfig.errors.join('; ')}`);
-    return { logId: null, fetched: 0, errors: 0, frozen: false };
-  }
-  const config = parsedConfig.value;
 
   // A duplicate id: another repository already registered config.id.
   // First claimant wins — this sync must not touch that repo's log or
@@ -130,10 +149,23 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   for (const entry of releasePaths(tree)) {
     seen.add(entry.path);
     const name = entry.path.slice('releases/'.length);
+
+    const indexed = db.select().from(release)
+      .where(and(eq(release.logId, config.id), eq(release.path, entry.path))).all()[0] ?? null;
+    const failed = db.select().from(syncError)
+      .where(and(eq(syncError.logId, config.id), eq(syncError.path, entry.path))).all()[0] ?? null;
+
+    // The blob sha is git's own content hash, so an unchanged sha means an
+    // unchanged file — for a good release and for a broken one alike. Both
+    // states are already recorded; skip the fetch.
+    if (indexed?.blobSha === entry.sha) continue;
+    if (failed !== null && indexed === null && failed.message.startsWith('sha:' + entry.sha)) continue;
+
     const bytes = await gh.blob(ref, entry.sha);
     fetched += 1;
     if (bytes === null) {
-      writeSyncError(db, config.id, entry.path, 'blob not found');
+      const message = `sha:${entry.sha} blob not found`;
+      writeSyncError(db, config.id, entry.path, message);
       errors += 1;
       continue;
     }
@@ -145,7 +177,8 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     }
     if (!parsed.ok) {
       // A hand edit must never take the whole log down (spec §10).
-      writeSyncError(db, config.id, entry.path, parsed.errors.join('; '));
+      const message = `sha:${entry.sha} ${parsed.errors.join('; ')}`;
+      writeSyncError(db, config.id, entry.path, message);
       errors += 1;
       continue;
     }

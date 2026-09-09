@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { openDb } from './db/client.ts';
 import type { Db } from './db/client.ts';
 import { log, release, syncError, problem } from './db/schema.ts';
+import type { GitHub } from './github.ts';
 import { fakeGitHub } from './github.ts';
 import { syncLog } from './index.ts';
 
@@ -173,5 +174,95 @@ test('a repository that parses clears its earlier problem row', async () => {
     const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
     await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
     assert.equal(db.select().from(problem).all().length, 0);
+  });
+});
+
+// Counts blob fetches so a test can prove the second sync is cheap.
+function counting(gh: GitHub): { gh: GitHub; blobs: string[] } {
+  const blobs: string[] = [];
+  return {
+    blobs,
+    gh: {
+      head: (ref) => gh.head(ref),
+      tree: (ref, commit) => gh.tree(ref, commit),
+      blob: (ref, sha) => { blobs.push(sha); return gh.blob(ref, sha); },
+    },
+  };
+}
+
+test('a second sync with no changes fetches nothing', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+
+    const c = counting(fakeGitHub({ 'o/r': files }));
+    const outcome = await syncLog(db, c.gh, REF);
+
+    assert.equal(c.blobs.length, 0, 'no blob should be fetched when nothing changed');
+    assert.equal(outcome.fetched, 0);
+    assert.equal(db.select().from(release).all().length, 1);
+  });
+});
+
+test('only the changed file is fetched', async () => {
+  await withDb(async (db) => {
+    const second = JSON.stringify({ ...JSON.parse(RELEASE), version: '2.0.0', date: '2026-02-01' });
+    const before = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE, 'releases/2.0.0.json': second };
+    await syncLog(db, fakeGitHub({ 'o/r': before }), REF);
+
+    const edited = JSON.stringify({ ...JSON.parse(RELEASE), headline: 'Neu geschrieben' });
+    const after = { ...before, 'releases/1.0.0.json': edited };
+    const c = counting(fakeGitHub({ 'o/r': after }));
+    const outcome = await syncLog(db, c.gh, REF);
+
+    assert.equal(outcome.fetched, 1);
+    assert.equal(c.blobs.length, 1);
+    const rows = db.select().from(release).all();
+    assert.equal(rows.length, 2);
+    const one = rows.find((r) => r.version === '1.0.0');
+    assert.ok(one);
+    assert.equal(JSON.parse(one.doc).headline, 'Neu geschrieben');
+  });
+});
+
+test('a release removed from the repo disappears from the index', async () => {
+  await withDb(async (db) => {
+    const second = JSON.stringify({ ...JSON.parse(RELEASE), version: '2.0.0', date: '2026-02-01' });
+    await syncLog(db, fakeGitHub({ 'o/r': {
+      'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE, 'releases/2.0.0.json': second,
+    } }), REF);
+    assert.equal(db.select().from(release).all().length, 2);
+
+    await syncLog(db, fakeGitHub({ 'o/r': {
+      'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE,
+    } }), REF);
+
+    const rows = db.select().from(release).all();
+    assert.deepEqual(rows.map((r) => r.version), ['1.0.0']);
+  });
+});
+
+test('a changed config is re-read and its settings applied', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } }), REF);
+    assert.equal(db.select().from(log).all()[0].visibility, 'public');
+
+    const priv = JSON.stringify({ ...JSON.parse(CONFIG), visibility: 'private', view: 'timeline' });
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': priv } }), REF);
+
+    const row = db.select().from(log).all()[0];
+    assert.equal(row.visibility, 'private');
+    assert.equal(row.view, 'timeline');
+  });
+});
+
+test('an empty index rebuilds everything — no change is a special case', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    const c = counting(fakeGitHub({ 'o/r': files }));
+    const outcome = await syncLog(db, c.gh, REF);
+    // config + one release
+    assert.equal(c.blobs.length, 2);
+    assert.equal(outcome.fetched, 1);
   });
 });
