@@ -71,6 +71,9 @@ test('retries are bounded and the last failure is returned, not thrown', async (
   const res = await withRetry(inner, { attempts: 3, sleep })('https://api.github.com/repos/o/r');
   assert.equal(res.status, 500);
   assert.equal(waits.length, 2, 'three attempts means two waits');
+  // Pins the growth itself, not just the count: a stub that always waits 0ms
+  // would satisfy every assertion above.
+  assert.deepEqual(waits, [500, 1000], 'backoff must double each attempt from BASE_BACKOFF_MS');
 });
 
 test('a 404 is not retried', async () => {

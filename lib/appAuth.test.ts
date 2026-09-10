@@ -49,6 +49,11 @@ test('iat is backdated and exp is under ten minutes out', () => {
   assert.ok((payload.iat as number) < now, 'iat must be backdated against clock skew');
   assert.ok((payload.exp as number) > now, 'exp must be in the future');
   assert.ok((payload.exp as number) - now <= 600, 'exp must be at most 10 minutes ahead');
+  // GitHub's ceiling is exp - iat, not exp - now: iat is already backdated
+  // by SKEW_SECONDS, so `exp - now <= 600` holds for any LIFETIME_SECONDS
+  // at or under 600 regardless of the skew added on top. Pin the sum that
+  // actually has to stay under GitHub's 10-minute limit.
+  assert.ok((payload.exp as number) - (payload.iat as number) <= 600, 'exp - iat must be at most 10 minutes');
 });
 
 test('a tampered payload no longer verifies', () => {
