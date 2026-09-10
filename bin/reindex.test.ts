@@ -209,15 +209,14 @@ test('buildClient produces a GitHub client that talks through the given http', a
     'GET /repos/o/r/installation',
     'POST /app/installations/7/access_tokens',
     'GET /repos/o/r',
-    'GET /repos/o/r/installation',
     'GET /repos/o/r/commits/main',
   ]);
   // Who each request authenticates as: the app's own JWT to find the
   // installation and to mint, the installation token for repository data.
-  // The second lookup is not a bug — the token cache keys on installation
-  // id, so it has to resolve the id before it can find the cached token.
+  // The installation id is resolved once and memoized — the second data
+  // call reuses it rather than looking it up again.
   const asWhom = auth.map((value) => (value === 'Bearer ghs_abc' ? 'token' : 'jwt'));
-  assert.deepEqual(asWhom, ['jwt', 'jwt', 'token', 'jwt', 'token']);
+  assert.deepEqual(asWhom, ['jwt', 'jwt', 'token', 'token']);
   assert.ok(auth[0].startsWith('Bearer eyJ'), 'the app authenticates with its own signed jwt');
 });
 

@@ -47,6 +47,10 @@ export type Installations = {
   // null when the app is not installed on that repository — a normal
   // state, not an error (spec §6: create_log reports no_installation).
   tokenFor(ref: { owner: string; repo: string }): Promise<string | null>;
+  // A token that GitHub has killed before its expiry must be discardable —
+  // otherwise it keeps being handed out to every repository of this
+  // installation for up to an hour.
+  invalidate(ref: { owner: string; repo: string }): void;
 };
 
 type Minted = { token: string; expiresAtMs: number };
@@ -68,17 +72,30 @@ export function installations(
   // Keyed by installation, not by repository: every repository of one
   // installation shares its token, and minting is rate-limited.
   const cache = new Map<number, Minted>();
+  // Keyed by repository: the repo -> installation mapping only changes on
+  // a transfer, and then invalidate clears it away.
+  const ids = new Map<string, number>();
+  const keyOf = (ref: { owner: string; repo: string }): string => `${ref.owner}/${ref.repo}`;
+
+  async function idFor(ref: { owner: string; repo: string }): Promise<number | null> {
+    const known = ids.get(keyOf(ref));
+    if (known !== undefined) return known;
+    const found = await http(`${API}/repos/${ref.owner}/${ref.repo}/installation`, {
+      headers: headers(appJwt(config)),
+    });
+    if (found.status === 404) return null;
+    if (!found.ok) {
+      throw new Error(`installation lookup failed: HTTP ${found.status}`);
+    }
+    const id = ((await found.json()) as { id: number }).id;
+    ids.set(keyOf(ref), id);
+    return id;
+  }
 
   return {
     async tokenFor(ref) {
-      const found = await http(`${API}/repos/${ref.owner}/${ref.repo}/installation`, {
-        headers: headers(appJwt(config)),
-      });
-      if (found.status === 404) return null;
-      if (!found.ok) {
-        throw new Error(`installation lookup failed: HTTP ${found.status}`);
-      }
-      const installationId = ((await found.json()) as { id: number }).id;
+      const installationId = await idFor(ref);
+      if (installationId === null) return null;
 
       const cached = cache.get(installationId);
       if (cached && cached.expiresAtMs - EXPIRY_MARGIN_MS > nowMs()) {
@@ -99,6 +116,12 @@ export function installations(
         expiresAtMs: Date.parse(body.expires_at),
       });
       return body.token;
+    },
+
+    invalidate(ref) {
+      const id = ids.get(keyOf(ref));
+      ids.delete(keyOf(ref));
+      if (id !== undefined) cache.delete(id);
     },
   };
 }

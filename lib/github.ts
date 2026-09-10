@@ -81,12 +81,29 @@ export function githubClient(inst: Installations, http: Http): GitHub {
     // Not installed: there is nothing to ask, and asking without a token
     // would be a different failure than the one the caller means.
     if (token === null) return null;
-    return http(`${API}${path}`, {
+    const res = await http(`${API}${path}`, {
       headers: {
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
         'user-agent': 'release-log-hub',
         authorization: `Bearer ${token}`,
+      },
+    });
+    if (res.status !== 401) return res;
+
+    // Exactly one attempt: a 401 means either "token dead" — a fresh one
+    // carries it — or "permission gone", and then a tenth would not help
+    // either. withRetry deliberately does not retry a 401, because it is
+    // an answer, not an outage.
+    inst.invalidate(ref);
+    const fresh = await inst.tokenFor(ref);
+    if (fresh === null) return null;
+    return http(`${API}${path}`, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'release-log-hub',
+        authorization: `Bearer ${fresh}`,
       },
     });
   }
