@@ -777,3 +777,57 @@ test('a repository renamed onto a name a frozen log still holds is refused, not 
     assert.equal(db.select().from(problem).all().length, 1);
   });
 });
+
+// Task 5 finding: a rename landing on a path an ACTIVE row holds, where
+// the incoming repository is a legacy row with no node id on record, made
+// `known` resolve to byPath()'s hit — log-y, the active row occupying the
+// path — even though log-y's own node id proves it is not us. The
+// claimant guard let it through (a NULL node id is its own exemption, for
+// good reason), and the recycled-name guard read "nameHolder === known"
+// as "this is our own path", because both were the same byPath() lookup.
+// Execution then reached the id-change cleanup and deleted log-y's log,
+// releases and media outright. This is the reviewer's live reproduction.
+test('a rename onto a path an active row holds does not delete that row', async () => {
+  await withDb(async (db) => {
+    const configY = JSON.stringify({ id: 'log-y', product: 'Y', view: 'full', visibility: 'public' });
+    await syncLog(
+      db,
+      fakeGitHub({ 'o/target': { 'release-log.json': configY, 'releases/1.0.0.json': RELEASE } }),
+      { owner: 'o', repo: 'target' },
+    );
+    assert.equal(db.select().from(log).all().find((r) => r.publicId === 'log-y')?.state, 'active');
+    assert.equal(db.select().from(release).all().length, 1, 'log-y holds a release before the collision');
+
+    // log-x: a legacy row with no node id on record — the only way to
+    // produce one today is to write it directly, bypassing syncLog.
+    db.insert(log).values({
+      publicId: 'log-x',
+      repoOwner: 'o',
+      repoName: 'legacy-path',
+      product: 'X',
+      view: 'full',
+      visibility: 'public',
+      state: 'active',
+    }).run();
+
+    // The repository behind log-x is renamed onto 'o/target' — a path
+    // log-y legitimately holds — and synced.
+    const configX = JSON.stringify({ id: 'log-x', product: 'X', view: 'full', visibility: 'public' });
+    const renamed: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c-renamed', nodeId: 'R_x_new' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(configX), size: configX.length }],
+      blob: async (_ref, sha) => (sha === blobSha(configX) ? Buffer.from(configX) : null),
+    };
+    const outcome = await syncLog(db, renamed, { owner: 'o', repo: 'target' });
+
+    assert.equal(outcome.logId, null, 'refused, not adopted as a rename onto someone else\'s path');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 2, 'both logs survive');
+    const rowY = rows.find((r) => r.publicId === 'log-y');
+    assert.ok(rowY, 'log-y is not deleted');
+    assert.equal(rowY?.repoName, 'target', 'log-y keeps its path, untouched');
+    assert.equal(rows.find((r) => r.publicId === 'log-x')?.repoName, 'legacy-path', 'log-x is untouched, not adopted onto the occupied path');
+    assert.equal(db.select().from(release).all().length, 1, "log-y's release survives");
+    assert.equal(db.select().from(problem).all().length, 1, 'the collision is recorded as a problem, not silently resolved');
+  });
+});
