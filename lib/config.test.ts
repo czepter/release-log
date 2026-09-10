@@ -28,6 +28,9 @@ test('readConfig names every missing variable at once', () => {
       assert.ok(message.includes(name), `expected ${name} in: ${message}`);
     }
     assert.ok(!message.includes('GITHUB_APP_ID'), 'a variable that is present must not be reported missing');
+    // Ensure no actual secret values appear in the error message
+    assert.ok(!message.includes('shhh'), 'the webhook secret must not appear in an error');
+    assert.ok(!message.includes('https://release-log.czpt.de'), 'the base URL must not appear in an error');
   }
 });
 
@@ -39,12 +42,45 @@ test('readConfig rejects a private key that is not PEM after decoding', () => {
   );
 });
 
-test('the thrown message never contains a secret value', () => {
+test('the thrown message never contains a secret value on missing variables', () => {
   try {
     readConfig({ ...COMPLETE, GITHUB_APP_PRIVATE_KEY: undefined });
     assert.fail('expected readConfig to throw');
   } catch (err) {
     const message = (err as Error).message;
+    assert.ok(!message.includes('shhh'), 'the webhook secret must not appear in an error');
+  }
+});
+
+test('the thrown message never contains a secret value on PEM validation failure', () => {
+  // Use a valid base64 string that decodes to something that is NOT a PEM block
+  const notPemDecoded = 'this is not a key';
+  const notPemB64 = Buffer.from(notPemDecoded, 'utf8').toString('base64');
+  try {
+    readConfig({ ...COMPLETE, GITHUB_APP_PRIVATE_KEY: notPemB64 });
+    assert.fail('expected readConfig to throw');
+  } catch (err) {
+    const message = (err as Error).message;
+    // Ensure neither the base64 nor the decoded text appears in the error
+    assert.ok(
+      !message.includes(notPemB64),
+      `the base64-encoded key must not appear in error message: ${message}`,
+    );
+    assert.ok(
+      !message.includes(notPemDecoded),
+      `the decoded key must not appear in error message: ${message}`,
+    );
+  }
+});
+
+test('readConfig treats empty string as missing variable', () => {
+  try {
+    readConfig({ ...COMPLETE, GITHUB_WEBHOOK_SECRET: '' });
+    assert.fail('expected readConfig to throw');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(message.includes('GITHUB_WEBHOOK_SECRET'), `expected GITHUB_WEBHOOK_SECRET in: ${message}`);
+    // Ensure no actual value appears
     assert.ok(!message.includes('shhh'), 'the webhook secret must not appear in an error');
   }
 });
