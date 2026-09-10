@@ -216,3 +216,23 @@ test('a fetched blob really hashes to the sha it was asked for', async () => {
   const bytes = await githubClient(withToken('t'), http).blob(REF, sha);
   assert.equal(blobSha(bytes as Buffer), sha, 'the decode must round-trip to the same git hash');
 });
+
+test('a blob of arbitrary bytes round-trips, not just ascii', async () => {
+  // A release log holds screenshots. Every ASCII test above passes with a
+  // decoder that mangles the high half of the byte range, so push all 256
+  // values through and compare the git hash on both sides.
+  const content = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from(Array.from({ length: 256 }, (_, i) => i)),
+  ]);
+  const sha = blobSha(content);
+  const http = fakeHttp({
+    [`GET /repos/o/r/git/blobs/${sha}`]: {
+      body: { encoding: 'base64', content: content.toString('base64') },
+    },
+  });
+  const bytes = await githubClient(withToken('t'), http).blob(REF, sha);
+  assert.ok(bytes !== null, 'the blob must be found');
+  assert.deepEqual(bytes, content, 'every byte must survive the decode');
+  assert.equal(blobSha(bytes as Buffer), sha);
+});
