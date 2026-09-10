@@ -50,7 +50,15 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  const gh = buildClient(process.env, withRetry((url, init) => fetch(url, init)));
+  // Node has no default fetch timeout: a hung connection would hang the
+  // CLI forever, and will hang a later plan's reconcile loop the same way.
+  // 30s is generous for a single GitHub API call, including the blobs a
+  // sync fetches one at a time.
+  const FETCH_TIMEOUT_MS = 30_000;
+  const gh = buildClient(
+    process.env,
+    withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })),
+  );
   const outcomes = await reindex(openDb(dbPath), gh, refs);
   for (const [i, outcome] of outcomes.entries()) {
     const ref = refs[i];

@@ -1,7 +1,7 @@
-// The only place that will talk to the network, once Plan 3 fills it in.
-// Plan 2 uses the fake below, which computes real git blob SHAs — so the
-// sync's diff logic is exercised against the same hashes production will
-// see, not against invented identifiers.
+// The only place that talks to GitHub's network API. fakeGitHub below
+// computes real git blob SHAs, so tests exercise the sync's diff logic
+// against the same hashes production will see, not against invented
+// identifiers.
 
 import { createHash } from 'node:crypto';
 import type { Http } from './http.ts';

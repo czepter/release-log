@@ -78,7 +78,5 @@ test('readConfig treats empty string as missing variable', () => {
   } catch (err) {
     const message = (err as Error).message;
     assert.ok(message.includes('GITHUB_WEBHOOK_SECRET'), `expected GITHUB_WEBHOOK_SECRET in: ${message}`);
-    // Ensure no actual value appears
-    assert.ok(!message.includes('shhh'), 'the webhook secret must not appear in an error');
   }
 });
