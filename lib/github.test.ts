@@ -190,9 +190,24 @@ test('blob handles the newlines GitHub inserts into base64 content', async () =>
   assert.equal(bytes?.toString('utf8'), 'hello\n');
 });
 
-test('a missing blob yields null', async () => {
+test('a 404 blob throws rather than returning null', async () => {
+  // A blob named by a tree GitHub just served cannot legitimately be
+  // absent: a 404 here means lost access or a transient failure, not a
+  // deleted file. Returning null would read to the sync as "drop this
+  // file's row" (spec §10) and the loss would be permanent.
   const http = fakeHttp({});
-  assert.equal(await githubClient(withToken('t'), http).blob(REF, 'nope'), null);
+  await assert.rejects(
+    () => githubClient(withToken('t'), http).blob(REF, 'nope'),
+    /blob fetch failed/,
+  );
+});
+
+test('a blob requested without an installation throws rather than reading as missing', async () => {
+  const http = fakeHttp({});
+  await assert.rejects(
+    () => githubClient(withToken(null), http).blob(REF, 'nope'),
+    /no installation token/,
+  );
 });
 
 test('an unexpected blob encoding throws rather than returning garbage', async () => {
