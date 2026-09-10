@@ -10,15 +10,21 @@ import type { Installations } from './appAuth.ts';
 export type RepoRef = { owner: string; repo: string };
 export type TreeEntry = { path: string; sha: string; size: number };
 
+// Four states, because three of them demand different answers: 'gone'
+// freezes the log, 'no_installation' keeps syncing skipped without
+// freezing (spec §10), 'empty' is a repository that is not a log yet.
+// They stay internal — which state applies must never leak into an HTTP
+// response (spec §7).
+export type RepoState =
+  | { kind: 'ready'; head: string; nodeId: string }
+  | { kind: 'empty'; nodeId: string }
+  | { kind: 'no_installation' }
+  | { kind: 'gone' };
+
 export type GitHub = {
-  // null when the repo is gone: a deleted repo freezes its log (spec §10).
-  head(ref: RepoRef): Promise<string | null>;
+  probe(ref: RepoRef): Promise<RepoState>;
   tree(ref: RepoRef, commit: string): Promise<TreeEntry[]>;
   blob(ref: RepoRef, sha: string): Promise<Buffer | null>;
-  // GitHub's immutable id for the repository. It survives a rename and a
-  // transfer, which is what lets a later plan tell those apart from a
-  // repository claiming an id that belongs to someone else (spec §10).
-  repoId(ref: RepoRef): Promise<string | null>;
 };
 
 // git hashes a blob as sha1("blob <byte length>\0" + content).
@@ -41,15 +47,16 @@ export function fakeGitHub(repos: Record<string, Record<string, string | Buffer>
   };
 
   return {
-    async head(ref) {
+    async probe(ref) {
       const entries = entriesOf(ref);
-      if (!entries) return null;
-      // A stand-in commit id: the hash of every path and blob sha in the
-      // tree, so any content change moves the head, exactly as a real
-      // commit would.
+      if (!entries) return { kind: 'gone' };
+      const nodeId = `R_fake_${key(ref)}`;
+      if (entries.length === 0) return { kind: 'empty', nodeId };
+      // A stand-in commit: the hash over every path and blob sha, so any
+      // content change moves the head, exactly as a real commit would.
       const summary = [...entries].sort((a, b) => (a.path < b.path ? -1 : 1))
         .map((e) => `${e.path} ${e.sha}`).join('\n');
-      return createHash('sha1').update(summary).digest('hex');
+      return { kind: 'ready', head: createHash('sha1').update(summary).digest('hex'), nodeId };
     },
     async tree(ref) {
       return entriesOf(ref) ?? [];
@@ -63,15 +70,10 @@ export function fakeGitHub(repos: Record<string, Record<string, string | Buffer>
       }
       return null;
     },
-    async repoId(ref) {
-      return entriesOf(ref) === null ? null : `R_fake_${key(ref)}`;
-    },
   };
 }
 
 const API = 'https://api.github.com';
-
-type RepoInfo = { nodeId: string; defaultBranch: string };
 
 export function githubClient(inst: Installations, http: Http): GitHub {
   async function authed(ref: RepoRef, path: string): Promise<Response | null> {
@@ -89,38 +91,32 @@ export function githubClient(inst: Installations, http: Http): GitHub {
     });
   }
 
-  async function repoInfo(ref: RepoRef): Promise<RepoInfo | null> {
-    const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}`);
-    if (res === null || res.status === 404) return null;
-    if (!res.ok) throw new Error(`repo lookup failed: HTTP ${res.status}`);
-    const body = (await res.json()) as { node_id: string; default_branch: string };
-    return { nodeId: body.node_id, defaultBranch: body.default_branch };
-  }
-
   return {
-    async repoId(ref) {
-      return (await repoInfo(ref))?.nodeId ?? null;
-    },
+    async probe(ref) {
+      const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}`);
+      if (res === null) return { kind: 'no_installation' };
+      if (res.status === 404) return { kind: 'gone' };
+      if (!res.ok) throw new Error(`repo lookup failed: HTTP ${res.status}`);
+      const info = (await res.json()) as { node_id: string; default_branch: string };
 
-    async head(ref) {
-      const info = await repoInfo(ref);
-      if (info === null) return null;
-      const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/commits/${info.defaultBranch}`);
-      if (res === null || res.status === 404) return null;
-      // 409 is how GitHub reports a repository with no commits at all.
-      // That is an empty log, not a missing one — but there is no tree to
-      // read either, so it answers like a gone repository here.
-      if (res.status === 409) return null;
-      if (!res.ok) throw new Error(`head lookup failed: HTTP ${res.status}`);
-      return ((await res.json()) as { sha: string }).sha;
+      const commits = await authed(ref, `/repos/${ref.owner}/${ref.repo}/commits/${info.default_branch}`);
+      if (commits === null) return { kind: 'no_installation' };
+      // 409 reports a repository with no commits at all, 404 a branch
+      // that does not (yet) exist. Both are "there, but nothing to
+      // read" — and deliberately not 'gone', since freezing is the
+      // expensive direction: a log only thaws through another
+      // successful sync.
+      if (commits.status === 409 || commits.status === 404) return { kind: 'empty', nodeId: info.node_id };
+      if (!commits.ok) throw new Error(`head lookup failed: HTTP ${commits.status}`);
+      return { kind: 'ready', head: ((await commits.json()) as { sha: string }).sha, nodeId: info.node_id };
     },
 
     async tree(ref, commit) {
       const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/git/trees/${commit}?recursive=1`);
       // Never return an empty array for a failure. To the sync an empty
       // tree is indistinguishable from a repository whose files were all
-      // deleted, and it would delete every row. head() already answers
-      // null for a gone or empty repository, so by the time anything asks
+      // deleted, and it would delete every row. probe() already answers
+      // 'gone' or 'empty' for those cases, so by the time anything asks
       // for a tree there is one to read.
       if (res === null) throw new Error(`tree unavailable for ${ref.owner}/${ref.repo}: no installation token`);
       if (!res.ok) throw new Error(`tree lookup failed: HTTP ${res.status}`);

@@ -20,7 +20,8 @@ test('blobSha changes when the content changes by one byte', () => {
 
 test('fakeGitHub returns a tree with a sha and size per file', async () => {
   const gh = fakeGitHub({ 'o/r': { 'release-log.json': '{}', 'releases/1.0.0.json': 'x' } });
-  const head = await gh.head({ owner: 'o', repo: 'r' });
+  const state = await gh.probe({ owner: 'o', repo: 'r' });
+  const head = state.kind === 'ready' ? state.head : null;
   assert.ok(head);
   const tree = await gh.tree({ owner: 'o', repo: 'r' }, head);
   assert.deepEqual(tree.map((e) => e.path).sort(), ['release-log.json', 'releases/1.0.0.json']);
@@ -36,87 +37,98 @@ test('fakeGitHub serves a blob by its sha', async () => {
   assert.equal(await gh.blob({ owner: 'o', repo: 'r' }, blobSha('nope')), null);
 });
 
-test('fakeGitHub reports a missing repo as a null head', async () => {
-  const gh = fakeGitHub({});
-  assert.equal(await gh.head({ owner: 'o', repo: 'gone' }), null);
-});
-
-test('the head changes when any file changes', async () => {
-  const before = fakeGitHub({ 'o/r': { 'a.txt': '1' } });
-  const after = fakeGitHub({ 'o/r': { 'a.txt': '2' } });
-  assert.notEqual(
-    await before.head({ owner: 'o', repo: 'r' }),
-    await after.head({ owner: 'o', repo: 'r' }),
-  );
-});
-
 const REF = { owner: 'o', repo: 'r' };
 
 function withToken(token: string | null): Installations {
   return { async tokenFor() { return token; } };
 }
 
-test('head returns the sha of the default branch tip', async () => {
+test('probe reports ready with the head and the node id in one call', async () => {
   const http = fakeHttp({
     'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
     'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
   });
-  assert.equal(await githubClient(withToken('t'), http).head(REF), 'c0ffee');
+  const state = await githubClient(withToken('t'), http).probe(REF);
+  assert.deepEqual(state, { kind: 'ready', head: 'c0ffee', nodeId: 'R_kg1' });
+  // Two requests, not three: the repo call already carries the node id.
+  assert.deepEqual(http.calls, ['GET /repos/o/r', 'GET /repos/o/r/commits/main']);
 });
 
-test('head follows the repository default branch rather than assuming main', async () => {
+test('probe follows the repository default branch, not a hardcoded main', async () => {
   const http = fakeHttp({
     'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'trunk' } },
     'GET /repos/o/r/commits/trunk': { body: { sha: 'deadbee' } },
   });
-  assert.equal(await githubClient(withToken('t'), http).head(REF), 'deadbee');
+  const state = await githubClient(withToken('t'), http).probe(REF);
+  assert.equal(state.kind === 'ready' && state.head, 'deadbee');
 });
 
-test('a deleted repository yields a null head', async () => {
+test('a deleted repository probes as gone, which is what freezes a log', async () => {
   const http = fakeHttp({});
-  assert.equal(await githubClient(withToken('t'), http).head(REF), null);
+  assert.deepEqual(await githubClient(withToken('t'), http).probe(REF), { kind: 'gone' });
 });
 
-test('a repository the app is not installed on yields a null head', async () => {
-  const http = fakeHttp({
-    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
-    'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
-  });
-  assert.equal(await githubClient(withToken(null), http).head(REF), null);
+test('a repository the app is not installed on probes as no_installation, never as gone', async () => {
+  // The distinction carries spec §10: a removed installation means no sync
+  // while delivery keeps going, a deleted repository means frozen. Mapping
+  // both to 'gone' would freeze a log on every revoked grant.
+  const http = fakeHttp({});
+  assert.deepEqual(await githubClient(withToken(null), http).probe(REF), { kind: 'no_installation' });
   assert.deepEqual(http.calls, [], 'without a token there is nothing to ask');
 });
 
-test('an empty repository with no commits yields a null head', async () => {
+test('a repository with no commits probes as empty and keeps its node id', async () => {
   const http = fakeHttp({
     'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
-    'GET /repos/o/r/commits/main': { status: 409, body: { message: 'Git Repository is empty.' } },
+    'GET /repos/o/r/commits/main': { status: 409 },
   });
-  assert.equal(await githubClient(withToken('t'), http).head(REF), null);
+  assert.deepEqual(await githubClient(withToken('t'), http).probe(REF), { kind: 'empty', nodeId: 'R_kg1' });
 });
 
-test('repoId returns the immutable node id', async () => {
-  const http = fakeHttp({ 'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } } });
-  assert.equal(await githubClient(withToken('t'), http).repoId(REF), 'R_kg1');
+test('a default branch that is not there yet is empty, not gone', async () => {
+  // A repository whose default branch is mid-rename answers 404 on the
+  // commit call. The repository itself exists — freezing it would be the
+  // expensive mistake, since a frozen log only thaws through another
+  // successful sync.
+  const http = fakeHttp({
+    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
+    'GET /repos/o/r/commits/main': { status: 404 },
+  });
+  assert.deepEqual(await githubClient(withToken('t'), http).probe(REF), { kind: 'empty', nodeId: 'R_kg1' });
 });
 
-test('the request carries the installation token, not the app jwt', async () => {
-  let seen: string | undefined;
-  const inner = fakeHttp({ 'GET /repos/o/r': { body: { node_id: 'R_1', default_branch: 'main' } } });
+test('probe carries the installation token, not the app jwt', async () => {
+  const seen: string[] = [];
+  const inner = fakeHttp({
+    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
+    'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
+  });
   const spy = Object.assign(
-    async (url: string, init?: RequestInit) => {
-      seen = new Headers(init?.headers).get('authorization') ?? undefined;
+    (url: string, init?: RequestInit) => {
+      seen.push(String((init?.headers as Record<string, string> | undefined)?.authorization ?? ''));
       return inner(url, init);
     },
     { calls: inner.calls },
   );
-  await githubClient(withToken('ghs_abc'), spy).repoId(REF);
-  assert.equal(seen, 'Bearer ghs_abc');
+  await githubClient(withToken('ghs_abc'), spy).probe(REF);
+  assert.deepEqual(seen, ['Bearer ghs_abc', 'Bearer ghs_abc']);
 });
 
-test('fakeGitHub answers repoId for a known repository and null for an unknown one', async () => {
-  const gh = fakeGitHub({ 'o/r': { 'a.txt': 'x' } });
-  assert.ok(await gh.repoId({ owner: 'o', repo: 'r' }));
-  assert.equal(await gh.repoId({ owner: 'o', repo: 'gone' }), null);
+test('fakeGitHub probes a repo it knows as ready and one it does not as gone', async () => {
+  const gh = fakeGitHub({ 'o/r': { 'release-log.json': '{}' } });
+  const ready = await gh.probe({ owner: 'o', repo: 'r' });
+  assert.equal(ready.kind, 'ready');
+  assert.ok(ready.kind === 'ready' && ready.head.length === 40, 'a head looks like a commit');
+  assert.ok(ready.kind === 'ready' && ready.nodeId, 'and carries a node id');
+  assert.deepEqual(await gh.probe({ owner: 'o', repo: 'gone' }), { kind: 'gone' });
+});
+
+test('fakeGitHub moves its head when content changes', async () => {
+  const before = fakeGitHub({ 'o/r': { 'a.json': '{"v":1}' } });
+  const after = fakeGitHub({ 'o/r': { 'a.json': '{"v":2}' } });
+  const a = await before.probe({ owner: 'o', repo: 'r' });
+  const b = await after.probe({ owner: 'o', repo: 'r' });
+  assert.notEqual(a.kind === 'ready' && a.head, b.kind === 'ready' && b.head);
 });
 
 test('tree returns only blobs, with path, sha and size', async () => {
