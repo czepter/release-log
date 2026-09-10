@@ -729,3 +729,39 @@ test('(c) a claimant row with a NULL node id is adopted, not refused', async () 
     assert.equal(db.select().from(problem).all().length, 0);
   });
 });
+
+// Task 4 finding 2: a rename landing on a path some other row already
+// holds (e.g. a name freed by a repository that went away, leaving a
+// frozen log behind) made the upsert throw an unhandled UNIQUE constraint
+// error on (repo_owner, repo_name) instead of being recorded as a problem.
+test('a repository renamed onto a name a frozen log still holds is refused, not thrown', async () => {
+  await withDb(async (db) => {
+    const configA = JSON.stringify({ id: 'log-a', product: 'A', view: 'full', visibility: 'public' });
+    const configB = JSON.stringify({ id: 'log-b', product: 'B', view: 'full', visibility: 'public' });
+
+    await syncLog(db, fakeGitHub({ 'o/other': { 'release-log.json': configA } }), { owner: 'o', repo: 'other' });
+    const rowA = db.select().from(log).all().find((r) => r.publicId === 'log-a')!;
+
+    await syncLog(db, fakeGitHub({ 'o/recycled': { 'release-log.json': configB } }), { owner: 'o', repo: 'recycled' });
+    // The repository behind log-b is gone; its log freezes and keeps the
+    // 'o/recycled' name — freeing nothing, but leaving the name occupied.
+    await syncLog(db, fakeGitHub({}), { owner: 'o', repo: 'recycled' });
+    assert.equal(db.select().from(log).all().find((r) => r.publicId === 'log-b')?.state, 'frozen');
+
+    // log-a's repository (unrelated to log-b) renames into the name
+    // log-b's frozen log still holds.
+    const renamed: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c-renamed', nodeId: rowA.repoNodeId as string }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(configA), size: configA.length }],
+      blob: async (_ref, sha) => (sha === blobSha(configA) ? Buffer.from(configA) : null),
+    };
+    const outcome = await syncLog(db, renamed, { owner: 'o', repo: 'recycled' });
+
+    assert.equal(outcome.logId, null, 'refused, not thrown, and nothing indexed under the colliding name');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 2, 'both logs survive, untouched');
+    assert.equal(rows.find((r) => r.publicId === 'log-a')?.repoName, 'other', 'log-a keeps its old name; the rename was refused');
+    assert.equal(rows.find((r) => r.publicId === 'log-b')?.repoName, 'recycled', 'the frozen log is untouched');
+    assert.equal(db.select().from(problem).all().length, 1);
+  });
+});
