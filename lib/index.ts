@@ -21,6 +21,10 @@ export type SyncOutcome = {
   fetched: number;
   errors: number;
   frozen: boolean;
+  // Warum nichts getan wurde, wenn nichts getan wurde. 'no_installation'
+  // ist ausdrücklich kein Fehler und ausdrücklich kein Einfrieren (Spec
+  // §10): die Auslieferung läuft weiter, nur der Abgleich ruht.
+  skipped: 'no_installation' | 'no_commits' | null;
   // Always false from syncLog itself: a thrown error propagates out of
   // this function rather than being turned into an outcome. reindex()
   // sets this true when it catches that throw, so a caller can tell "this
@@ -59,29 +63,53 @@ function writeSyncError(db: Db, logId: string, path: string, message: string): v
 
 export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOutcome> {
   const repoPath = `${ref.owner}/${ref.repo}`;
-  const probed = await gh.probe(ref);
-  const head = probed.kind === 'ready' ? probed.head : null;
+  const byPath = (): typeof log.$inferSelect | null =>
+    db.select().from(log)
+      .where(and(eq(log.repoOwner, ref.owner), eq(log.repoName, ref.repo))).all()[0] ?? null;
 
-  // A repo that is gone freezes whatever log it carried; the last state
-  // stays served and nothing is deleted (spec §10).
-  if (head === null) {
-    const existing = db.select().from(log)
-      .where(and(eq(log.repoOwner, ref.owner), eq(log.repoName, ref.repo))).all();
-    for (const row of existing) {
-      db.update(log).set({ state: 'frozen' }).where(eq(log.publicId, row.publicId)).run();
-    }
-    return { logId: existing[0]?.publicId ?? null, fetched: 0, errors: 0, frozen: existing.length > 0, failed: false };
+  const probed = await gh.probe(ref);
+
+  // Die Installation ist weg oder suspendiert. Der Log bleibt, wie er ist,
+  // und wird weiter ausgeliefert; nur abgeglichen wird nicht (Spec §10).
+  // Einfrieren wäre hier der teure Fehler: aus 'frozen' kommt ein Log nur
+  // über einen weiteren erfolgreichen Abgleich wieder heraus.
+  if (probed.kind === 'no_installation') {
+    return { logId: byPath()?.publicId ?? null, fetched: 0, errors: 0, frozen: false, skipped: 'no_installation', failed: false };
   }
+
+  // Ein Repo, das es nicht mehr gibt, friert den Log ein, den es trug; der
+  // letzte Stand bleibt online und nichts wird gelöscht (Spec §10).
+  if (probed.kind === 'gone') {
+    const existing = byPath();
+    if (existing) {
+      db.update(log).set({ state: 'frozen' }).where(eq(log.publicId, existing.publicId)).run();
+    }
+    return { logId: existing?.publicId ?? null, fetched: 0, errors: 0, frozen: existing !== null, skipped: null, failed: false };
+  }
+
+  // Ein Repo ohne Commits ist noch kein Log und noch kein kaputtes Repo.
+  if (probed.kind === 'empty') {
+    return { logId: null, fetched: 0, errors: 0, frozen: false, skipped: 'no_commits', failed: false };
+  }
+
+  const head = probed.head;
+  const repoNodeId = probed.nodeId;
 
   const tree = await gh.tree(ref, head);
   const configEntry = tree.find((e) => e.path === CONFIG_PATH);
   if (!configEntry) {
     writeProblem(db, repoPath, `no ${CONFIG_PATH} in ${repoPath}`);
-    return { logId: null, fetched: 0, errors: 0, frozen: false, failed: false };
+    return { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: false };
   }
 
-  const known = db.select().from(log)
-    .where(and(eq(log.repoOwner, ref.owner), eq(log.repoName, ref.repo))).all()[0] ?? null;
+  // Die Node-ID zuerst: sie überlebt Umbenennen und Transfer, der Pfad
+  // nicht. Ohne diese Reihenfolge entstünde nach einer Umbenennung ein
+  // zweiter Log und die eingebundene URL des ersten zeigte ins Leere
+  // (Spec §10).
+  const known =
+    db.select().from(log).where(eq(log.repoNodeId, repoNodeId)).all()[0]
+    ?? byPath()
+    ?? null;
 
   // Unchanged config: reuse what the index already holds instead of
   // fetching and re-parsing it.
@@ -106,7 +134,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     }
     if (!parsedConfig.ok) {
       writeProblem(db, repoPath, `invalid ${CONFIG_PATH}: ${parsedConfig.errors.join('; ')}`);
-      return { logId: null, fetched: 0, errors: 0, frozen: false, failed: false };
+      return { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: false };
     }
     config = parsedConfig.value;
   }
@@ -114,15 +142,19 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // A duplicate id: another repository already registered config.id.
   // First claimant wins — this sync must not touch that repo's log or
   // releases, only record the collision (spec: problem table comment).
+  // Compared against `known`, not against ref.owner/ref.repo: a rename
+  // is the same repository claiming the same id under a new path, and
+  // `known` already carries that identity via the node id above — path
+  // equality alone would misfire on every rename (Task 3 finding).
   const claimant = db.select().from(log).where(eq(log.publicId, config.id)).all()[0];
-  if (claimant && (claimant.repoOwner !== ref.owner || claimant.repoName !== ref.repo)) {
+  if (claimant && (known === null || known.publicId !== config.id)) {
     const claimantPath = `${claimant.repoOwner}/${claimant.repoName}`;
     writeProblem(
       db,
       repoPath,
       `duplicate id ${config.id}: already held by ${claimantPath}, also claimed by ${repoPath}`,
     );
-    return { logId: null, fetched: 0, errors: 0, frozen: false, failed: false };
+    return { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: false };
   }
 
   // The repo parses, so any earlier complaint about it is stale.
@@ -142,11 +174,6 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     db.delete(log).where(eq(log.publicId, oldId)).run();
   }
 
-  // A lookup failure (rate limit, transient network error) must not erase
-  // a node id this repo already has on record — only ever raise it to a
-  // fresh non-null value, never lower it to null.
-  const repoNodeId = probed.kind === 'ready' ? probed.nodeId : null;
-
   // head_sha and indexed_at are deliberately not written here — see the
   // update after the release and media sweeps below.
   db.insert(log).values({
@@ -165,7 +192,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     set: {
       repoOwner: ref.owner,
       repoName: ref.repo,
-      ...(repoNodeId !== null ? { repoNodeId } : {}),
+      repoNodeId,
       product: config.product,
       view: config.view,
       visibility: config.visibility,
@@ -316,5 +343,5 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // point at a partial sync).
   db.update(log).set({ headSha: head, indexedAt: now() }).where(eq(log.publicId, config.id)).run();
 
-  return { logId: config.id, fetched, errors, frozen: false, failed: false };
+  return { logId: config.id, fetched, errors, frozen: false, skipped: null, failed: false };
 }

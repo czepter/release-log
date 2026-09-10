@@ -29,7 +29,7 @@ export async function reindex(db: Db, gh: GitHub, refs: RepoRef[]): Promise<Sync
       outcomes.push(await syncLog(db, gh, ref));
     } catch (err) {
       console.error(`reindex: ${ref.owner}/${ref.repo} failed: ${(err as Error).message}`);
-      outcomes.push({ logId: null, fetched: 0, errors: 0, frozen: false, failed: true });
+      outcomes.push({ logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: true });
     }
   }
   return outcomes;
