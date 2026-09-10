@@ -67,11 +67,19 @@ const MAX_WAIT_MS = 60_000;
 
 function waitFor(res: Response, attempt: number, nowMs: () => number): number | null {
   if (res.status === 429) {
-    const after = Number(res.headers.get('retry-after'));
+    // headers.get returns null, not a missing key, when the header is
+    // absent — and Number(null) is 0, a finite number that would pass the
+    // guard below and be honoured as a zero-millisecond wait. Check for
+    // absence before ever calling Number() on it.
+    const afterHeader = res.headers.get('retry-after');
+    if (afterHeader === null) return BASE_BACKOFF_MS;
+    const after = Number(afterHeader);
     return Number.isFinite(after) && after >= 0 ? after * 1000 : BASE_BACKOFF_MS;
   }
   if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
-    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    const resetHeader = res.headers.get('x-ratelimit-reset');
+    if (resetHeader === null) return BASE_BACKOFF_MS;
+    const reset = Number(resetHeader);
     if (!Number.isFinite(reset)) return BASE_BACKOFF_MS;
     return Math.max(0, reset * 1000 - nowMs());
   }

@@ -119,6 +119,29 @@ test('a 429 honours Retry-After', async () => {
   assert.equal(waits[0], 5000);
 });
 
+test('a 429 with no Retry-After header waits the fallback, not zero', async () => {
+  // headers.get returns null for a missing header, and Number(null) is 0 —
+  // a finite, non-negative number that would silently pass as "wait 0ms"
+  // if the code ever called Number() on the header before checking for
+  // null.
+  const inner = fakeHttp({ 'GET /repos/o/r': [{ status: 429 }, { status: 200, body: { ok: true } }] });
+  const { sleep, waits } = recordingSleep();
+  await withRetry(inner, { sleep })('https://api.github.com/repos/o/r');
+  assert.equal(waits[0], 500, 'must wait BASE_BACKOFF_MS, not 0ms');
+});
+
+test('a rate-limited 403 with no reset header waits the fallback, not zero', async () => {
+  const inner = fakeHttp({
+    'GET /repos/o/r': [
+      { status: 403, headers: { 'x-ratelimit-remaining': '0' } },
+      { status: 200, body: { ok: true } },
+    ],
+  });
+  const { sleep, waits } = recordingSleep();
+  await withRetry(inner, { sleep })('https://api.github.com/repos/o/r');
+  assert.equal(waits[0], 500, 'must wait BASE_BACKOFF_MS, not 0ms');
+});
+
 test('a wait longer than the ceiling gives up rather than sleeping for an hour', async () => {
   const now = 1_700_000_000_000;
   const inner = fakeHttp({
