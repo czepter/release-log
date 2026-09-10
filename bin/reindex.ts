@@ -5,8 +5,20 @@
 import { openDb } from '../lib/db/client.ts';
 import type { Db } from '../lib/db/client.ts';
 import { syncLog } from '../lib/index.ts';
+import { githubClient } from '../lib/github.ts';
 import type { GitHub, RepoRef } from '../lib/github.ts';
 import type { SyncOutcome } from '../lib/index.ts';
+import { readConfig } from '../lib/config.ts';
+import { installations } from '../lib/appAuth.ts';
+import { withRetry } from '../lib/http.ts';
+import type { Http } from '../lib/http.ts';
+
+// Assembled here rather than inside githubClient so a test can hand in a
+// fake http and a caller can hand in the real fetch.
+export function buildClient(env: Record<string, string | undefined>, http: Http): GitHub {
+  const config = readConfig(env);
+  return githubClient(installations(config, http), http);
+}
 
 export async function reindex(db: Db, gh: GitHub, refs: RepoRef[]): Promise<SyncOutcome[]> {
   const outcomes: SyncOutcome[] = [];
@@ -26,8 +38,8 @@ export async function reindex(db: Db, gh: GitHub, refs: RepoRef[]): Promise<Sync
 if (import.meta.main) {
   const dbPath = process.env.DB_PATH ?? './release-log.sqlite';
   const refs = process.argv.slice(2).map((arg) => {
-    const [owner, repo] = arg.split('/');
-    if (!owner || !repo) {
+    const [owner, repo, ...rest] = arg.split('/');
+    if (!owner || !repo || rest.length > 0) {
       console.error(`not an owner/repo pair: ${arg}`);
       process.exit(1);
     }
@@ -37,8 +49,16 @@ if (import.meta.main) {
     console.error('usage: node bin/reindex.ts <owner>/<repo> [...]');
     process.exit(1);
   }
-  // Plan 2 has no real GitHub client yet, so the entrypoint says so rather
-  // than pretending. Plan 3 replaces this line with the real one.
-  console.error('bin/reindex.ts needs the GitHub client from Plan 3; the reindex() function is usable today.');
-  process.exit(1);
+
+  const gh = buildClient(process.env, withRetry((url, init) => fetch(url, init)));
+  const outcomes = await reindex(openDb(dbPath), gh, refs);
+  for (const [i, outcome] of outcomes.entries()) {
+    const ref = refs[i];
+    const state = outcome.failed ? 'failed'
+      : outcome.frozen ? 'frozen'
+      : outcome.logId === null ? 'not a log'
+      : `${outcome.logId} (${outcome.fetched} fetched, ${outcome.errors} errors)`;
+    console.log(`${ref.owner}/${ref.repo}: ${state}`);
+  }
+  if (outcomes.some((o) => o.failed)) process.exit(1);
 }
