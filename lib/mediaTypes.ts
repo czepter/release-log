@@ -5,7 +5,7 @@
 
 import { extname } from 'node:path';
 
-export const MEDIA_TYPES: Record<string, string> = {
+const MEDIA_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.webp': 'image/webp',
