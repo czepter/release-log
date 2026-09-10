@@ -59,3 +59,67 @@ test('a tampered payload no longer verifies', () => {
   verifier.update(`${h}.${forged}`);
   assert.equal(verifier.verify(publicKey, Buffer.from(signature, 'base64url')), false);
 });
+
+import { installations } from './appAuth.ts';
+import { fakeHttp } from './http.ts';
+
+const REF = { owner: 'o', repo: 'r' };
+
+function inAnHour(): string {
+  return new Date(Date.now() + 3_600_000).toISOString();
+}
+
+test('tokenFor exchanges the app jwt for an installation token', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': { body: { token: 'ghs_abc', expires_at: inAnHour() } },
+  });
+  const token = await installations(CONFIG, http).tokenFor(REF);
+  assert.equal(token, 'ghs_abc');
+});
+
+test('a repository with no installation yields null, not a throw', async () => {
+  const http = fakeHttp({ 'GET /repos/o/r/installation': { status: 404 } });
+  assert.equal(await installations(CONFIG, http).tokenFor(REF), null);
+});
+
+test('a second call for the same installation does not mint a second token', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': { body: { token: 'ghs_abc', expires_at: inAnHour() } },
+  });
+  const inst = installations(CONFIG, http);
+  await inst.tokenFor(REF);
+  await inst.tokenFor(REF);
+  const mints = http.calls.filter((c) => c.startsWith('POST /app/installations'));
+  assert.equal(mints.length, 1, 'the cached token must be reused');
+});
+
+test('a token close to expiry is replaced before it expires', async () => {
+  let clock = 1_000_000;
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': [
+      { body: { token: 'first', expires_at: new Date(clock + 120_000).toISOString() } },
+      { body: { token: 'second', expires_at: new Date(clock + 3_600_000).toISOString() } },
+    ],
+  });
+  const inst = installations(CONFIG, http, () => clock);
+  assert.equal(await inst.tokenFor(REF), 'first');
+  // Still 90 seconds of nominal life left, but inside the safety margin.
+  clock += 30_000;
+  assert.equal(await inst.tokenFor(REF), 'second');
+});
+
+test('two repositories in one installation share its token', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/one/installation': { body: { id: 7 } },
+    'GET /repos/o/two/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': { body: { token: 'ghs_abc', expires_at: inAnHour() } },
+  });
+  const inst = installations(CONFIG, http);
+  await inst.tokenFor({ owner: 'o', repo: 'one' });
+  await inst.tokenFor({ owner: 'o', repo: 'two' });
+  const mints = http.calls.filter((c) => c.startsWith('POST /app/installations'));
+  assert.equal(mints.length, 1, 'the cache is keyed by installation, not by repository');
+});
