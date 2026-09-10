@@ -544,3 +544,22 @@ test('an indexed media file whose blob comes back null on a later sync is droppe
     assert.ok(errors[0].path.includes('shot.png'));
   });
 });
+
+test('the sync stores the repository node id', async () => {
+  await withDb(async (db) => {
+    const gh = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } });
+    await syncLog(db, gh, REF);
+    const row = db.select().from(log).all()[0];
+    assert.ok(row.repoNodeId, 'repoNodeId must be filled from the client');
+  });
+});
+
+test('an unchanged node id is not overwritten with null on a later sync', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    const first = db.select().from(log).all()[0].repoNodeId;
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    assert.equal(db.select().from(log).all()[0].repoNodeId, first);
+  });
+});

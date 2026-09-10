@@ -8,19 +8,12 @@ import { log, release, syncError, problem, media } from './db/schema.ts';
 import type { GitHub, RepoRef, TreeEntry } from './github.ts';
 import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig } from './document.ts';
-import { MEDIA_TYPES } from './store.ts';
+import { mediaTypeOf } from './mediaTypes.ts';
 
 const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
 
 function mediaPaths(tree: TreeEntry[]): TreeEntry[] {
   return tree.filter((e) => e.path.startsWith('media/'));
-}
-
-// The extension is compared lower-cased so `shot.PNG` is the same file type
-// as `shot.png` — a repo using that casing must not silently lose an image.
-function extensionOf(path: string): string {
-  const dot = path.lastIndexOf('.');
-  return dot === -1 ? '' : path.slice(dot).toLowerCase();
 }
 
 export type SyncOutcome = {
@@ -148,13 +141,18 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     db.delete(log).where(eq(log.publicId, oldId)).run();
   }
 
+  // A lookup failure (rate limit, transient network error) must not erase
+  // a node id this repo already has on record — only ever raise it to a
+  // fresh non-null value, never lower it to null.
+  const repoNodeId = await gh.repoId(ref);
+
   // head_sha and indexed_at are deliberately not written here — see the
   // update after the release and media sweeps below.
   db.insert(log).values({
     publicId: config.id,
     repoOwner: ref.owner,
     repoName: ref.repo,
-    repoNodeId: null,
+    repoNodeId,
     product: config.product,
     view: config.view,
     visibility: config.visibility,
@@ -166,6 +164,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     set: {
       repoOwner: ref.owner,
       repoName: ref.repo,
+      ...(repoNodeId !== null ? { repoNodeId } : {}),
       product: config.product,
       view: config.view,
       visibility: config.visibility,
@@ -246,7 +245,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   const seenMedia = new Set<string>();
   for (const entry of mediaPaths(tree)) {
     seenMedia.add(entry.path);
-    const type = MEDIA_TYPES[extensionOf(entry.path)];
+    const type = mediaTypeOf(entry.path);
     if (!type) {
       // A file that used to be a supported type and changed into something
       // else must not keep serving its stale bytes forever.

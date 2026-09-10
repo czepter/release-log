@@ -3,9 +3,10 @@
 // without public.ts changing (spec §4, §9).
 
 import { readdirSync, readFileSync, statSync, realpathSync } from 'node:fs';
-import { join, resolve, extname, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig, ReleaseDoc } from './document.ts';
+import { mediaTypeOf } from './mediaTypes.ts';
 
 export type MediaBlob = { type: string; bytes: Buffer };
 export type SyncError = { path: string; message: string };
@@ -24,15 +25,6 @@ export type Reader = {
   // to name. A directory of files has no head, so fileReader returns null
   // and the server simply omits the header (spec §7).
   etag(logId: string): string | null;
-};
-
-// Shared with lib/index.ts (the sync side), which imports this rather than
-// keeping its own copy — one list of supported media types, not two that
-// could silently drift apart.
-export const MEDIA_TYPES: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.webp': 'image/webp',
 };
 
 type Loaded = {
@@ -147,7 +139,7 @@ export function fileReader(rootInput: string): Reader {
       // resolve() collapses "..", so a path that leaves the log directory is
       // visible here and nowhere later. Cheap first gate, purely lexical.
       if (target !== log.dir && !target.startsWith(log.dir + sep)) return null;
-      const type = MEDIA_TYPES[extname(target)];
+      const type = mediaTypeOf(target);
       if (!type) return null;
       // resolve() never touches the filesystem, so a symlink inside the log
       // directory that points outside it still passes the lexical check
