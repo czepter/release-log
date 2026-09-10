@@ -102,6 +102,22 @@ test('an exhausted rate limit waits until its reset', async () => {
   assert.ok(waits[0] >= 30_000 && waits[0] <= 31_000, `expected a ~30s wait, got ${waits[0]}`);
 });
 
+test('a secondary rate limit (403 with Retry-After) is retried even with quota left', async () => {
+  // A secondary rate limit answers 403 with Retry-After while the primary
+  // quota is untouched, so x-ratelimit-remaining is not '0'. It must still
+  // be retried, honouring Retry-After.
+  const inner = fakeHttp({
+    'GET /repos/o/r': [
+      { status: 403, headers: { 'retry-after': '3', 'x-ratelimit-remaining': '42' } },
+      { status: 200, body: { ok: true } },
+    ],
+  });
+  const { sleep, waits } = recordingSleep();
+  const res = await withRetry(inner, { sleep })('https://api.github.com/repos/o/r');
+  assert.equal(res.status, 200);
+  assert.equal(waits[0], 3000, 'must wait the Retry-After duration');
+});
+
 test('a 403 that is not a rate limit is not retried', async () => {
   const inner = fakeHttp({ 'GET /repos/o/r': { status: 403, headers: { 'x-ratelimit-remaining': '4999' } } });
   const { sleep, waits } = recordingSleep();

@@ -76,12 +76,28 @@ function waitFor(res: Response, attempt: number, nowMs: () => number): number | 
     const after = Number(afterHeader);
     return Number.isFinite(after) && after >= 0 ? after * 1000 : BASE_BACKOFF_MS;
   }
-  if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
-    const resetHeader = res.headers.get('x-ratelimit-reset');
-    if (resetHeader === null) return BASE_BACKOFF_MS;
-    const reset = Number(resetHeader);
-    if (!Number.isFinite(reset)) return BASE_BACKOFF_MS;
-    return Math.max(0, reset * 1000 - nowMs());
+  if (res.status === 403) {
+    // A secondary rate limit also answers 403, carries Retry-After, and
+    // leaves the primary quota intact — so x-ratelimit-remaining is not
+    // '0'. Checking Retry-After first catches that case; checking
+    // remaining-quota first would treat it as a permission failure and
+    // never retry it, and a blob loop is exactly the workload most likely
+    // to trip it.
+    const afterHeader = res.headers.get('retry-after');
+    if (afterHeader !== null) {
+      const after = Number(afterHeader);
+      return Number.isFinite(after) && after >= 0 ? after * 1000 : BASE_BACKOFF_MS;
+    }
+    if (res.headers.get('x-ratelimit-remaining') === '0') {
+      const resetHeader = res.headers.get('x-ratelimit-reset');
+      if (resetHeader === null) return BASE_BACKOFF_MS;
+      const reset = Number(resetHeader);
+      if (!Number.isFinite(reset)) return BASE_BACKOFF_MS;
+      return Math.max(0, reset * 1000 - nowMs());
+    }
+    // Neither signal: this is a permission answer, not a rate limit, and
+    // will not resolve itself by waiting.
+    return null;
   }
   if (res.status >= 500) return BASE_BACKOFF_MS * 2 ** attempt;
   return null;
