@@ -186,8 +186,39 @@ test('buildClient produces a GitHub client that talks through the given http', a
     'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
   });
 
-  const gh = buildClient(env, http);
+  // Wrapped, because fakeHttp.calls deliberately records method and path
+  // only — never a header. The token has to be caught on the way past.
+  const auth: string[] = [];
+  const watched = Object.assign(
+    (url: string, init?: RequestInit) => {
+      auth.push(String((init?.headers as Record<string, string> | undefined)?.authorization ?? ''));
+      return http(url, init);
+    },
+    { calls: http.calls },
+  );
+
+  const gh = buildClient(env, watched);
   assert.equal(await gh.head({ owner: 'o', repo: 'r' }), 'c0ffee');
+
+  // Returning the right sha proves nothing on its own: a client built over
+  // the global fetch could not have produced it, but a stub ignoring both
+  // arguments could. What pins the wiring down is that every request went
+  // through the injected http, in order, and that the data calls carried the
+  // token minted from the config that was passed in.
+  assert.deepEqual(http.calls, [
+    'GET /repos/o/r/installation',
+    'POST /app/installations/7/access_tokens',
+    'GET /repos/o/r',
+    'GET /repos/o/r/installation',
+    'GET /repos/o/r/commits/main',
+  ]);
+  // Who each request authenticates as: the app's own JWT to find the
+  // installation and to mint, the installation token for repository data.
+  // The second lookup is not a bug — the token cache keys on installation
+  // id, so it has to resolve the id before it can find the cached token.
+  const asWhom = auth.map((value) => (value === 'Bearer ghs_abc' ? 'token' : 'jwt'));
+  assert.deepEqual(asWhom, ['jwt', 'jwt', 'token', 'jwt', 'token']);
+  assert.ok(auth[0].startsWith('Bearer eyJ'), 'the app authenticates with its own signed jwt');
 });
 
 test('buildClient reports a missing environment rather than failing later', () => {
