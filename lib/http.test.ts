@@ -44,3 +44,10 @@ test('the query string is part of the key', async () => {
   const res = await http('https://api.github.com/repos/o/r/git/trees/abc?recursive=1');
   assert.equal(res.status, 200);
 });
+
+test('the method is matched case-insensitively, as fetch normalises it', async () => {
+  const http = fakeHttp({ 'POST /app/installations/7/access_tokens': { body: { token: 't' } } });
+  const res = await http('https://api.github.com/app/installations/7/access_tokens', { method: 'post' });
+  assert.deepEqual(await res.json(), { token: 't' });
+  assert.deepEqual(http.calls, ['POST /app/installations/7/access_tokens']);
+});

@@ -12,7 +12,11 @@ export type FakeRoute = {
 
 function keyOf(url: string, init?: RequestInit): string {
   const parsed = new URL(url);
-  return `${init?.method ?? 'GET'} ${parsed.pathname}${parsed.search}`;
+  // fetch uppercases the method before it goes on the wire. Without the same
+  // normalisation here, a caller writing `method: 'post'` would 404 against the
+  // fake and succeed against the real API.
+  const method = (init?.method ?? 'GET').toUpperCase();
+  return `${method} ${parsed.pathname}${parsed.search}`;
 }
 
 export function fakeHttp(
