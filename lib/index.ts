@@ -59,7 +59,8 @@ function writeSyncError(db: Db, logId: string, path: string, message: string): v
 
 export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOutcome> {
   const repoPath = `${ref.owner}/${ref.repo}`;
-  const head = await gh.head(ref);
+  const probed = await gh.probe(ref);
+  const head = probed.kind === 'ready' ? probed.head : null;
 
   // A repo that is gone freezes whatever log it carried; the last state
   // stays served and nothing is deleted (spec §10).
@@ -144,7 +145,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // A lookup failure (rate limit, transient network error) must not erase
   // a node id this repo already has on record — only ever raise it to a
   // fresh non-null value, never lower it to null.
-  const repoNodeId = await gh.repoId(ref);
+  const repoNodeId = probed.kind === 'ready' ? probed.nodeId : null;
 
   // head_sha and indexed_at are deliberately not written here — see the
   // update after the release and media sweeps below.

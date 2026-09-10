@@ -222,10 +222,9 @@ function counting(gh: GitHub): { gh: GitHub; blobs: string[] } {
   return {
     blobs,
     gh: {
-      head: (ref) => gh.head(ref),
+      probe: (ref) => gh.probe(ref),
       tree: (ref, commit) => gh.tree(ref, commit),
       blob: (ref, sha) => { blobs.push(sha); return gh.blob(ref, sha); },
-      repoId: (ref) => gh.repoId(ref),
     },
   };
 }
@@ -256,10 +255,9 @@ test('a sync that throws partway through leaves head_sha at the previous value',
     const changed = { ...files, 'releases/2.0.0.json': second };
     const base = fakeGitHub({ 'o/r': changed });
     const failing: GitHub = {
-      head: (ref) => base.head(ref),
+      probe: (ref) => base.probe(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async () => { throw new Error('rate limited'); },
-      repoId: (ref) => base.repoId(ref),
     };
 
     await assert.rejects(() => syncLog(db, failing, REF));
@@ -531,10 +529,9 @@ test('an indexed media file whose blob comes back null on a later sync is droppe
     const editedSha = blobSha(edited);
     const base = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': edited } });
     const missingBlob: GitHub = {
-      head: (ref) => base.head(ref),
+      probe: (ref) => base.probe(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async (ref, sha) => (sha === editedSha ? null : base.blob(ref, sha)),
-      repoId: (ref) => base.repoId(ref),
     };
     await syncLog(db, missingBlob, REF);
 
@@ -552,7 +549,7 @@ test('the sync stores the repository node id', async () => {
     const row = db.select().from(log).all()[0];
     // Compared against what the client actually answered, not merely
     // asserted non-empty: a hardcoded id would satisfy "not null".
-    assert.equal(row.repoNodeId, await gh.repoId(REF));
+    assert.equal(row.repoNodeId, (await gh.probe(REF) as { nodeId: string }).nodeId);
   });
 });
 
@@ -568,10 +565,9 @@ test('an unchanged node id is not overwritten with null on a later sync', async 
     // limited, or a transient error — and answers null. The fake alone
     // cannot produce that, so wrap it.
     const idLookupFailed: GitHub = {
-      head: (ref) => base.head(ref),
+      probe: async () => ({ kind: 'no_installation' } as const),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
-      repoId: async () => null,
     };
     await syncLog(db, idLookupFailed, REF);
     assert.equal(db.select().from(log).all()[0].repoNodeId, first);

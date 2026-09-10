@@ -133,18 +133,17 @@ test('a repository whose sync throws does not stop the others', async () => {
   try {
     const db = openDb(join(dir, 'i.sqlite'));
     const base = fakeGitHub({ 'o/good': { 'release-log.json': CONFIG } });
-    // Unlike a repo that is simply gone (head() returns null and syncLog
+    // Unlike a repo that is simply gone (probe() answers 'gone' and syncLog
     // handles it), this simulates GitHub answering with an error — e.g. a
     // 500 or a rate limit — which syncLog does not catch and lets
     // propagate.
     const gh: GitHub = {
-      head: async (ref) => {
+      probe: async (ref) => {
         if (ref.repo === 'bad') throw new Error('500 from upstream');
-        return base.head(ref);
+        return base.probe(ref);
       },
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
-      repoId: (ref) => base.repoId(ref),
     };
 
     const outcomes = await reindex(db, gh, [
@@ -198,7 +197,8 @@ test('buildClient produces a GitHub client that talks through the given http', a
   );
 
   const gh = buildClient(env, watched);
-  assert.equal(await gh.head({ owner: 'o', repo: 'r' }), 'c0ffee');
+  const state = await gh.probe({ owner: 'o', repo: 'r' });
+  assert.equal(state.kind === 'ready' && state.head, 'c0ffee');
 
   // Returning the right sha proves nothing on its own: a client built over
   // the global fetch could not have produced it, but a stub ignoring both
