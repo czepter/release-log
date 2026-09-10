@@ -146,8 +146,20 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // is the same repository claiming the same id under a new path, and
   // `known` already carries that identity via the node id above — path
   // equality alone would misfire on every rename (Task 3 finding).
+  //
+  // The `claimant.repoNodeId !== null` guard below is what keeps that
+  // rename check from firing on itself: a NULL node id can only belong
+  // to a row written before node ids were recorded, since every path
+  // that writes a row today has one in hand (only this 'ready' branch
+  // writes, and probe() always hands a nodeId in here). After a rename,
+  // such a row matches neither the node-id lookup nor the path lookup
+  // above, so `known` comes back null and this repository would
+  // otherwise report a duplicate against itself. Treat it as ours
+  // instead and let the upsert below adopt it, filling in the node id —
+  // a genuine collision always has a node id already, and it differs
+  // from ours (Task 4 finding 1).
   const claimant = db.select().from(log).where(eq(log.publicId, config.id)).all()[0];
-  if (claimant && (known === null || known.publicId !== config.id)) {
+  if (claimant && claimant.repoNodeId !== null && (known === null || known.publicId !== config.id)) {
     const claimantPath = `${claimant.repoOwner}/${claimant.repoName}`;
     writeProblem(
       db,

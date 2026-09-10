@@ -650,3 +650,82 @@ test('a renamed repository keeps its log, anchored on the node id', async () => 
     assert.equal(rows[0].repoName, 'renamed', 'Owner und Name ziehen nach');
   });
 });
+
+// Task 4 finding 1: the duplicate-id guard false-positived on a rename
+// when the existing row's repo_node_id was NULL, because a row written
+// before node ids were tracked can be matched by neither the node-id
+// lookup nor (after the rename) the path lookup — so the guard fired
+// against the row's own id. These three tests pin the guard's exact
+// boundary: refuse a real collision (a), let a genuine rename through
+// (b), and adopt — rather than refuse — a legacy NULL-node-id row (c).
+
+test('(a) a genuinely different repository cannot claim an id it does not hold', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE };
+    await syncLog(db, fakeGitHub({ 'o/first': files }), { owner: 'o', repo: 'first' });
+
+    const outcome = await syncLog(db, fakeGitHub({ 'o/second': files }), { owner: 'o', repo: 'second' });
+
+    assert.equal(outcome.logId, null);
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].repoName, 'first', 'the rightful holder is untouched');
+    assert.equal(db.select().from(problem).all().length, 1);
+  });
+});
+
+test('(b) the rightful holder re-syncing under a new name keeps its log', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    const before = db.select().from(log).all()[0];
+
+    const renamed: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: before.repoNodeId as string }),
+      tree: async () => fakeGitHub({ 'o/r': files }).tree(REF, 'c1'),
+      blob: (ref, sha) => fakeGitHub({ 'o/r': files }).blob(REF, sha),
+    };
+    const outcome = await syncLog(db, renamed, { owner: 'o', repo: 'renamed' });
+
+    assert.equal(outcome.logId, before.publicId);
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].repoName, 'renamed');
+    assert.equal(db.select().from(problem).all().length, 0, 'the guard must not mistake a rename for a collision');
+  });
+});
+
+test('(c) a claimant row with a NULL node id is adopted, not refused', async () => {
+  await withDb(async (db) => {
+    // The only way to produce a NULL node id today: a row written before
+    // node ids were recorded. db.insert bypasses syncLog entirely to
+    // stand one up directly.
+    db.insert(log).values({
+      publicId: 'legacy-id',
+      repoOwner: 'o',
+      repoName: 'r',
+      product: 'Legacy',
+      view: 'full',
+      visibility: 'public',
+      state: 'active',
+    }).run();
+
+    const config = JSON.stringify({ id: 'legacy-id', product: 'Legacy', view: 'full', visibility: 'public' });
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_new' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(config), size: config.length }],
+      blob: async (_ref, sha) => (sha === blobSha(config) ? Buffer.from(config) : null),
+    };
+    // Also renamed, which is exactly what a NULL node id cannot survive:
+    // the node-id lookup misses (nothing yet has 'R_new') and the path
+    // lookup misses too (it searches the new name, not 'o/r').
+    const outcome = await syncLog(db, gh, { owner: 'o', repo: 'renamed' });
+
+    assert.equal(outcome.logId, 'legacy-id', 'adopted, not refused as a duplicate');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1, 'no self-collision problem, no second row');
+    assert.equal(rows[0].repoNodeId, 'R_new', 'the node id is filled in on adoption');
+    assert.equal(rows[0].repoName, 'renamed');
+    assert.equal(db.select().from(problem).all().length, 0);
+  });
+});
