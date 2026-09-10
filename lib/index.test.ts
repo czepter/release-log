@@ -550,16 +550,30 @@ test('the sync stores the repository node id', async () => {
     const gh = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } });
     await syncLog(db, gh, REF);
     const row = db.select().from(log).all()[0];
-    assert.ok(row.repoNodeId, 'repoNodeId must be filled from the client');
+    // Compared against what the client actually answered, not merely
+    // asserted non-empty: a hardcoded id would satisfy "not null".
+    assert.equal(row.repoNodeId, await gh.repoId(REF));
   });
 });
 
 test('an unchanged node id is not overwritten with null on a later sync', async () => {
   await withDb(async (db) => {
     const files = { 'release-log.json': CONFIG };
-    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    const base = fakeGitHub({ 'o/r': files });
+    await syncLog(db, base, REF);
     const first = db.select().from(log).all()[0].repoNodeId;
-    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    assert.ok(first, 'the first sync must have stored an id to defend');
+
+    // The case the guard exists for: the lookup fails on a resync — rate
+    // limited, or a transient error — and answers null. The fake alone
+    // cannot produce that, so wrap it.
+    const idLookupFailed: GitHub = {
+      head: (ref) => base.head(ref),
+      tree: (ref, commit) => base.tree(ref, commit),
+      blob: (ref, sha) => base.blob(ref, sha),
+      repoId: async () => null,
+    };
+    await syncLog(db, idLookupFailed, REF);
     assert.equal(db.select().from(log).all()[0].repoNodeId, first);
   });
 });
