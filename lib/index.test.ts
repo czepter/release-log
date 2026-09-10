@@ -225,6 +225,7 @@ function counting(gh: GitHub): { gh: GitHub; blobs: string[] } {
       head: (ref) => gh.head(ref),
       tree: (ref, commit) => gh.tree(ref, commit),
       blob: (ref, sha) => { blobs.push(sha); return gh.blob(ref, sha); },
+      repoId: (ref) => gh.repoId(ref),
     },
   };
 }
@@ -258,6 +259,7 @@ test('a sync that throws partway through leaves head_sha at the previous value',
       head: (ref) => base.head(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async () => { throw new Error('rate limited'); },
+      repoId: (ref) => base.repoId(ref),
     };
 
     await assert.rejects(() => syncLog(db, failing, REF));
@@ -532,6 +534,7 @@ test('an indexed media file whose blob comes back null on a later sync is droppe
       head: (ref) => base.head(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async (ref, sha) => (sha === editedSha ? null : base.blob(ref, sha)),
+      repoId: (ref) => base.repoId(ref),
     };
     await syncLog(db, missingBlob, REF);
 

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { blobSha, fakeGitHub } from './github.ts';
+import { blobSha, fakeGitHub, githubClient } from './github.ts';
+import { fakeHttp } from './http.ts';
+import type { Installations } from './appAuth.ts';
 
 test('blobSha matches git hash-object for an empty blob', () => {
   // git's well-known empty-blob hash. If this drifts, the whole diff is wrong.
@@ -46,4 +48,73 @@ test('the head changes when any file changes', async () => {
     await before.head({ owner: 'o', repo: 'r' }),
     await after.head({ owner: 'o', repo: 'r' }),
   );
+});
+
+const REF = { owner: 'o', repo: 'r' };
+
+function withToken(token: string | null): Installations {
+  return { async tokenFor() { return token; } };
+}
+
+test('head returns the sha of the default branch tip', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
+    'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
+  });
+  assert.equal(await githubClient(withToken('t'), http).head(REF), 'c0ffee');
+});
+
+test('head follows the repository default branch rather than assuming main', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'trunk' } },
+    'GET /repos/o/r/commits/trunk': { body: { sha: 'deadbee' } },
+  });
+  assert.equal(await githubClient(withToken('t'), http).head(REF), 'deadbee');
+});
+
+test('a deleted repository yields a null head', async () => {
+  const http = fakeHttp({});
+  assert.equal(await githubClient(withToken('t'), http).head(REF), null);
+});
+
+test('a repository the app is not installed on yields a null head', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
+    'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
+  });
+  assert.equal(await githubClient(withToken(null), http).head(REF), null);
+  assert.deepEqual(http.calls, [], 'without a token there is nothing to ask');
+});
+
+test('an empty repository with no commits yields a null head', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } },
+    'GET /repos/o/r/commits/main': { status: 409, body: { message: 'Git Repository is empty.' } },
+  });
+  assert.equal(await githubClient(withToken('t'), http).head(REF), null);
+});
+
+test('repoId returns the immutable node id', async () => {
+  const http = fakeHttp({ 'GET /repos/o/r': { body: { node_id: 'R_kg1', default_branch: 'main' } } });
+  assert.equal(await githubClient(withToken('t'), http).repoId(REF), 'R_kg1');
+});
+
+test('the request carries the installation token, not the app jwt', async () => {
+  let seen: string | undefined;
+  const inner = fakeHttp({ 'GET /repos/o/r': { body: { node_id: 'R_1', default_branch: 'main' } } });
+  const spy = Object.assign(
+    async (url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers).get('authorization') ?? undefined;
+      return inner(url, init);
+    },
+    { calls: inner.calls },
+  );
+  await githubClient(withToken('ghs_abc'), spy).repoId(REF);
+  assert.equal(seen, 'Bearer ghs_abc');
+});
+
+test('fakeGitHub answers repoId for a known repository and null for an unknown one', async () => {
+  const gh = fakeGitHub({ 'o/r': { 'a.txt': 'x' } });
+  assert.ok(await gh.repoId({ owner: 'o', repo: 'r' }));
+  assert.equal(await gh.repoId({ owner: 'o', repo: 'gone' }), null);
 });

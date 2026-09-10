@@ -143,6 +143,7 @@ test('a repository whose sync throws does not stop the others', async () => {
       },
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
+      repoId: (ref) => base.repoId(ref),
     };
 
     const outcomes = await reindex(db, gh, [
