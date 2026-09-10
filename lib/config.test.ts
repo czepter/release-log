@@ -20,7 +20,7 @@ test('readConfig decodes the base64 private key back to PEM', () => {
 
 test('readConfig names every missing variable at once', () => {
   try {
-    readConfig({ GITHUB_APP_ID: '12345' });
+    readConfig({ GITHUB_APP_ID: 'app-id-must-not-appear-in-errors' });
     assert.fail('expected readConfig to throw');
   } catch (err) {
     const message = (err as Error).message;
@@ -28,9 +28,7 @@ test('readConfig names every missing variable at once', () => {
       assert.ok(message.includes(name), `expected ${name} in: ${message}`);
     }
     assert.ok(!message.includes('GITHUB_APP_ID'), 'a variable that is present must not be reported missing');
-    // Ensure no actual secret values appear in the error message
-    assert.ok(!message.includes('shhh'), 'the webhook secret must not appear in an error');
-    assert.ok(!message.includes('https://release-log.example'), 'the base URL must not appear in an error');
+    assert.ok(!message.includes('app-id-must-not-appear-in-errors'), 'the present variable value must not appear in the error message');
   }
 });
 
