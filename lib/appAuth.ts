@@ -37,7 +37,7 @@ const API = 'https://api.github.com';
 // revoked installation. Generous relative to GitHub's one-hour token
 // lifetime, so it costs nothing in production while still giving a slow
 // request plenty of room to finish on the token it started with.
-const EXPIRY_MARGIN_MS = 100_000;
+const EXPIRY_MARGIN_MS = 120_000;
 
 export type Installations = {
   // The parameter is spelled out rather than imported as RepoRef:
