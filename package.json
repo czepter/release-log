@@ -11,7 +11,7 @@
     "test": "node --test",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "reindex": "node bin/reindex.ts"
+    "reindex": "node --env-file-if-exists=.env bin/reindex.ts"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
