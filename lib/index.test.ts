@@ -553,23 +553,100 @@ test('the sync stores the repository node id', async () => {
   });
 });
 
-test('an unchanged node id is not overwritten with null on a later sync', async () => {
+test('a sync without an installation leaves the stored node id alone', async () => {
   await withDb(async (db) => {
-    const files = { 'release-log.json': CONFIG };
-    const base = fakeGitHub({ 'o/r': files });
+    const base = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } });
     await syncLog(db, base, REF);
     const first = db.select().from(log).all()[0].repoNodeId;
-    assert.ok(first, 'the first sync must have stored an id to defend');
+    assert.ok(first, 'der erste Abgleich muss eine ID abgelegt haben');
 
-    // The case the guard exists for: the lookup fails on a resync — rate
-    // limited, or a transient error — and answers null. The fake alone
-    // cannot produce that, so wrap it.
-    const idLookupFailed: GitHub = {
-      probe: async () => ({ kind: 'no_installation' } as const),
+    const uninstalled: GitHub = {
+      probe: async () => ({ kind: 'no_installation' }),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
     };
-    await syncLog(db, idLookupFailed, REF);
+    await syncLog(db, uninstalled, REF);
     assert.equal(db.select().from(log).all()[0].repoNodeId, first);
+  });
+});
+
+test('a repository the app is not installed on is skipped, not frozen', async () => {
+  await withDb(async (db) => {
+    const base = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'releases/1.0.0.json': RELEASE } });
+    await syncLog(db, base, REF);
+    assert.equal(db.select().from(log).all()[0].state, 'active');
+
+    // Spec §10: Installation suspendiert oder entfernt -> kein Abgleich,
+    // Auslieferung läuft. Einfrieren wäre hier der teure Fehler.
+    const uninstalled: GitHub = {
+      probe: async () => ({ kind: 'no_installation' }),
+      tree: (ref, commit) => base.tree(ref, commit),
+      blob: (ref, sha) => base.blob(ref, sha),
+    };
+    const outcome = await syncLog(db, uninstalled, REF);
+
+    assert.equal(outcome.skipped, 'no_installation');
+    assert.equal(outcome.frozen, false);
+    assert.equal(db.select().from(log).all()[0].state, 'active', 'der Log bleibt aktiv');
+    assert.equal(db.select().from(release).all().length, 1, 'und behält seinen Inhalt');
+  });
+});
+
+test('a deleted repository still freezes its log', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } }), REF);
+    const outcome = await syncLog(db, fakeGitHub({}), REF);
+    assert.equal(outcome.frozen, true);
+    assert.equal(outcome.skipped, null);
+    assert.equal(db.select().from(log).all()[0].state, 'frozen');
+  });
+});
+
+test('a restored repository thaws on the next successful sync', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    await syncLog(db, fakeGitHub({}), REF);
+    assert.equal(db.select().from(log).all()[0].state, 'frozen');
+
+    // Spec §10: der nächste erfolgreiche Abgleich taut den Log von selbst auf.
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    assert.equal(db.select().from(log).all()[0].state, 'active');
+  });
+});
+
+test('a repository with no commits is skipped without a problem row', async () => {
+  await withDb(async (db) => {
+    const empty: GitHub = {
+      probe: async () => ({ kind: 'empty', nodeId: 'R_1' }),
+      tree: async () => [],
+      blob: async () => null,
+    };
+    const outcome = await syncLog(db, empty, REF);
+    assert.equal(outcome.skipped, 'no_commits');
+    assert.equal(outcome.logId, null);
+    // Ein frisch angelegtes Repo ist noch kein kaputtes Repo.
+    assert.equal(db.select().from(problem).all().length, 0);
+  });
+});
+
+test('a renamed repository keeps its log, anchored on the node id', async () => {
+  await withDb(async (db) => {
+    const files = { 'release-log.json': CONFIG };
+    await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
+    const before = db.select().from(log).all()[0];
+
+    // Dasselbe Repo unter neuem Namen: gleiche Node-ID, anderer Pfad.
+    const renamed: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: before.repoNodeId as string }),
+      tree: async () => fakeGitHub({ 'o/r': files }).tree(REF, 'c1'),
+      blob: (ref, sha) => fakeGitHub({ 'o/r': files }).blob(REF, sha),
+    };
+    await syncLog(db, renamed, { owner: 'o', repo: 'renamed' });
+
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1, 'kein zweiter Log für dasselbe Repo');
+    assert.equal(rows[0].publicId, before.publicId, 'eingebundene URLs brechen nicht');
+    assert.equal(rows[0].repoName, 'renamed', 'Owner und Name ziehen nach');
   });
 });
