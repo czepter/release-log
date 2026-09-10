@@ -141,7 +141,15 @@ export function githubClient(inst: Installations, http: Http): GitHub {
 
     async blob(ref, sha) {
       const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/git/blobs/${sha}`);
-      if (res === null || res.status === 404) return null;
+      // Same reasoning as tree(): a null return here reads to the sync as
+      // "file broken, drop it" rather than "could not check" — and unlike
+      // tree(), that loss is silent and permanent (the row is deleted, and
+      // the resulting error row's sha matches the unchanged tree entry on
+      // every later sync, so it is never retried). Throw instead.
+      if (res === null) throw new Error(`blob unavailable for ${ref.owner}/${ref.repo}@${sha}: no installation token`);
+      // A blob named by a tree GitHub just served cannot legitimately be
+      // absent, so a 404 here is lost access or a transient glitch, not a
+      // deleted file — fold it into the same throw as every other non-ok.
       if (!res.ok) throw new Error(`blob fetch failed: HTTP ${res.status}`);
       const body = (await res.json()) as { encoding: string; content: string };
       if (body.encoding !== 'base64') {
