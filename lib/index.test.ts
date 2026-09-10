@@ -831,3 +831,88 @@ test('a rename onto a path an active row holds does not delete that row', async 
     assert.equal(db.select().from(problem).all().length, 1, 'the collision is recorded as a problem, not silently resolved');
   });
 });
+
+// These two pin the `pathMatch.repoNodeId === null` gate itself, not the
+// guards it feeds. Distinct from (c) above: (c) renames the legacy row
+// onto a NEW path, which exercises the duplicate-id guard's null
+// exemption; this one keeps the path unchanged, which is what exercises
+// the `known = pathMatch` branch of the gate directly. Do not merge them.
+test('a legacy row synced under its own path is adopted and gets its node id filled in', async () => {
+  await withDb(async (db) => {
+    const config = JSON.stringify({ id: 'legacy-id', product: 'Legacy', view: 'full', visibility: 'public' });
+    // A row written before node ids were recorded, standing at the path it
+    // will be synced under — no rename involved. configBlobSha is set to
+    // match the tree's entry below, so the "unchanged config" fast path
+    // can only fire if `known` actually resolves to this row: every other
+    // guard downstream of `known` is a no-op here because the incoming
+    // config carries this row's own public_id (claimant's node id is
+    // NULL, so its own exemption already lets it through; nameHolder's id
+    // already equals config.id) — those observables would hold even with
+    // the gate reversed. The blob-fetch count below is what a wrong gate
+    // (`known` staying null) actually breaks: without adopting `known`,
+    // configUnchanged is false and the config gets re-fetched.
+    db.insert(log).values({
+      publicId: 'legacy-id',
+      repoOwner: 'o',
+      repoName: 'r',
+      product: 'Legacy',
+      view: 'full',
+      visibility: 'public',
+      state: 'active',
+      configBlobSha: blobSha(config),
+    }).run();
+
+    let configBlobFetches = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_new' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(config), size: config.length }],
+      blob: async (_ref, sha) => {
+        if (sha === blobSha(config)) configBlobFetches += 1;
+        return sha === blobSha(config) ? Buffer.from(config) : null;
+      },
+    };
+    const outcome = await syncLog(db, gh, REF);
+
+    assert.equal(outcome.logId, 'legacy-id', 'indexes normally, not refused');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1, 'the same row, not a second one');
+    assert.equal(rows[0].publicId, 'legacy-id');
+    assert.equal(rows[0].repoNodeId, 'R_new', 'its node id is filled in on adoption');
+    assert.equal(db.select().from(problem).all().length, 0);
+    assert.equal(configBlobFetches, 0, 'known resolved to the legacy row, so the unchanged-config blob sha short-circuits the refetch');
+  });
+});
+
+test('a rename onto a path a frozen row holds is refused when the incoming repository has no row of its own', async () => {
+  await withDb(async (db) => {
+    const configA = JSON.stringify({ id: 'log-a', product: 'A', view: 'full', visibility: 'public' });
+    await syncLog(db, fakeGitHub({ 'o/frozen-holder': { 'release-log.json': configA, 'releases/1.0.0.json': RELEASE } }), { owner: 'o', repo: 'frozen-holder' });
+    const rowA = db.select().from(log).all().find((r) => r.publicId === 'log-a')!;
+
+    // The repository behind log-a is gone; its log freezes and keeps the
+    // 'o/frozen-holder' name.
+    await syncLog(db, fakeGitHub({}), { owner: 'o', repo: 'frozen-holder' });
+    assert.equal(db.select().from(log).all().find((r) => r.publicId === 'log-a')?.state, 'frozen');
+
+    // A different repository, fresh node id, its own public_id, nothing on
+    // record — nameHolder is the frozen row, known is null.
+    const configB = JSON.stringify({ id: 'log-b', product: 'B', view: 'full', visibility: 'public' });
+    const incoming: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_b_new' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(configB), size: configB.length }],
+      blob: async (_ref, sha) => (sha === blobSha(configB) ? Buffer.from(configB) : null),
+    };
+    const outcome = await syncLog(db, incoming, { owner: 'o', repo: 'frozen-holder' });
+
+    assert.equal(outcome.logId, null, 'refused, nothing indexed for the incoming repository');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1, 'no second row was created');
+    const stillA = rows.find((r) => r.publicId === 'log-a');
+    assert.ok(stillA, 'the frozen row is untouched');
+    assert.equal(stillA?.repoName, 'frozen-holder', 'it keeps its path');
+    assert.equal(stillA?.state, 'frozen');
+    assert.equal(stillA?.repoNodeId, rowA.repoNodeId, 'not adopted by the incoming repository');
+    assert.equal(db.select().from(release).all().length, 1, "the frozen row's release survives, nothing deleted");
+    assert.equal(db.select().from(problem).all().length, 1, 'exactly one problem row');
+  });
+});
