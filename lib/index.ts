@@ -169,6 +169,25 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     return { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: false };
   }
 
+  // A rename can land on a path some OTHER row already holds — e.g. a
+  // name freed by a repository that went away and left a frozen log
+  // behind. Left unchecked, the upsert below would try to write that
+  // (owner, name) pair under a different publicId and hit the unique
+  // index on (repo_owner, repo_name), throwing an unhandled SQLite error
+  // instead of recording the collision. Excluded when the row at that
+  // path is `known` itself: that is this same repository (unchanged
+  // path, or an id change on it), not a collision with someone else
+  // (Task 4 finding 2).
+  const nameHolder = byPath();
+  if (nameHolder && (known === null || nameHolder.publicId !== known.publicId) && nameHolder.publicId !== config.id) {
+    writeProblem(
+      db,
+      repoPath,
+      `name collision: ${repoPath} is already held by log ${nameHolder.publicId}, also claimed by log ${config.id}`,
+    );
+    return { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: false };
+  }
+
   // The repo parses, so any earlier complaint about it is stale.
   db.delete(problem).where(eq(problem.path, repoPath)).run();
 
