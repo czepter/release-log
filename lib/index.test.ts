@@ -560,13 +560,25 @@ test('a sync without an installation leaves the stored node id alone', async () 
     const first = db.select().from(log).all()[0].repoNodeId;
     assert.ok(first, 'der erste Abgleich muss eine ID abgelegt haben');
 
+    let treeCalled = false;
+    let blobCalled = false;
     const uninstalled: GitHub = {
       probe: async () => ({ kind: 'no_installation' }),
-      tree: (ref, commit) => base.tree(ref, commit),
-      blob: (ref, sha) => base.blob(ref, sha),
+      tree: async (ref, commit) => { treeCalled = true; return base.tree(ref, commit); },
+      blob: async (ref, sha) => { blobCalled = true; return base.blob(ref, sha); },
     };
     await syncLog(db, uninstalled, REF);
+
     assert.equal(db.select().from(log).all()[0].repoNodeId, first);
+    // The node-id assertion above is not wrong, only insufficient: Drizzle
+    // drops an `undefined` field from a SET clause instead of writing
+    // NULL, so it would also pass by ORM accident if the early return
+    // were removed and the sync fell through to the upsert with an
+    // undefined node id. What this branch actually promises is that the
+    // sync never goes on to read the repository at all — assert that
+    // directly (Task 4 finding 3).
+    assert.equal(treeCalled, false, 'tree() must not be called when there is no installation');
+    assert.equal(blobCalled, false, 'blob() must not be called when there is no installation');
   });
 });
 
