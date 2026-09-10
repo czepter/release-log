@@ -158,7 +158,30 @@ test('invalidate drops both the token and the resolved installation id', async (
   assert.equal(lookups.length, 2, 'auch die ID wird neu aufgelöst — ein Transfer ändert sie');
 });
 
-test('invalidating an unknown repository is a no-op, not a throw', () => {
-  const inst = installations(CONFIG, fakeHttp({}), () => Date.now());
-  inst.invalidate({ owner: 'never', repo: 'asked' });
+test('invalidating another repository does not clear the whole cache', async () => {
+  // The prior test called invalidate on an unknown repo and asserted only the
+  // absence of a throw — but Map.delete(undefined) never throws, so the test
+  // passed when the guard was deleted. What matters is containment: invalidating
+  // one repository must not clear the cache of another. The mint count shows
+  // this: if cache.clear() is called, the next tokenFor() remints (count=2);
+  // if only one entry is deleted, it reuses from cache (count=1).
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': { body: { token: 'ghs_abc', expires_at: inAnHour() } },
+  });
+  const inst = installations(CONFIG, http);
+
+  // Mint and cache a token for the first repository.
+  await inst.tokenFor(REF);
+  let mints = http.calls.filter((c) => c.startsWith('POST /app/installations'));
+  assert.equal(mints.length, 1, 'first token is minted and cached');
+
+  // Invalidate a different repository that was never looked up. This must not
+  // throw, and must not disturb the cache.
+  inst.invalidate({ owner: 'other', repo: 'repo' });
+
+  // The first repository must still draw from cache, not remint.
+  await inst.tokenFor(REF);
+  mints = http.calls.filter((c) => c.startsWith('POST /app/installations'));
+  assert.equal(mints.length, 1, 'cache is not cleared by invalidating another repository');
 });
