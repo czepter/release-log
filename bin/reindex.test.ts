@@ -8,7 +8,8 @@ import type { Db } from '../lib/db/client.ts';
 import { log, release, media, syncError, problem } from '../lib/db/schema.ts';
 import { fakeGitHub } from '../lib/github.ts';
 import type { GitHub } from '../lib/github.ts';
-import { reindex } from './reindex.ts';
+import { reindex, buildClient } from './reindex.ts';
+import { fakeHttp } from '../lib/http.ts';
 
 const CONFIG = JSON.stringify({ id: 'abc123', product: 'Demo', view: 'full', visibility: 'public' });
 const RELEASE = JSON.stringify({
@@ -159,4 +160,36 @@ test('a repository whose sync throws does not stop the others', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const PEM_ENV = {
+  GITHUB_APP_ID: '12345',
+  GITHUB_APP_PRIVATE_KEY: '',
+  GITHUB_WEBHOOK_SECRET: 'shhh',
+  BASE_URL: 'https://example.test',
+};
+
+test('buildClient produces a GitHub client that talks through the given http', async () => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  });
+  const env = { ...PEM_ENV, GITHUB_APP_PRIVATE_KEY: Buffer.from(privateKey, 'utf8').toString('base64') };
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': {
+      body: { token: 'ghs_abc', expires_at: new Date(Date.now() + 3_600_000).toISOString() },
+    },
+    'GET /repos/o/r': { body: { node_id: 'R_1', default_branch: 'main' } },
+    'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
+  });
+
+  const gh = buildClient(env, http);
+  assert.equal(await gh.head({ owner: 'o', repo: 'r' }), 'c0ffee');
+});
+
+test('buildClient reports a missing environment rather than failing later', () => {
+  assert.throws(() => buildClient({ GITHUB_APP_ID: '1' }, fakeHttp({})), /GITHUB_APP_PRIVATE_KEY/);
 });

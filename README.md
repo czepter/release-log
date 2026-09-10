@@ -25,3 +25,20 @@ Ein Log ist ein Verzeichnis unter `LOGS_ROOT` mit `release-log.json`,
 `release-log.json`, nicht im Verzeichnisnamen.
 
 `covered` erscheint in keiner Antwort: es ist Buchhaltung, kein Inhalt.
+
+## Index aus GitHub aufbauen
+
+```bash
+npm run reindex -- <owner>/<repo> [...]
+```
+
+Liest jedes genannte Repository über die installierte GitHub App und
+schreibt seinen Log-Index in die SQLite-Datenbank (`DB_PATH`, Vorgabe
+`./release-log.sqlite`). `readConfig` verlangt vier Umgebungsvariablen:
+
+| Variable | Bedeutung |
+|---|---|
+| `GITHUB_APP_ID` | Die App-ID der GitHub App |
+| `GITHUB_APP_PRIVATE_KEY` | Ihr privater Schlüssel, PEM, base64-kodiert |
+| `GITHUB_WEBHOOK_SECRET` | Das Webhook-Secret der App |
+| `BASE_URL` | Die öffentliche Basis-URL des Diensts |
