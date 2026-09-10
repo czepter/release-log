@@ -115,12 +115,41 @@ export function githubClient(inst: Installations, http: Http): GitHub {
       return ((await res.json()) as { sha: string }).sha;
     },
 
-    async tree() {
-      throw new Error('not implemented');
+    async tree(ref, commit) {
+      const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/git/trees/${commit}?recursive=1`);
+      // Never return an empty array for a failure. To the sync an empty
+      // tree is indistinguishable from a repository whose files were all
+      // deleted, and it would delete every row. head() already answers
+      // null for a gone or empty repository, so by the time anything asks
+      // for a tree there is one to read.
+      if (res === null) throw new Error(`tree unavailable for ${ref.owner}/${ref.repo}: no installation token`);
+      if (!res.ok) throw new Error(`tree lookup failed: HTTP ${res.status}`);
+      const body = (await res.json()) as {
+        truncated: boolean;
+        tree: { path: string; type: string; sha: string; size?: number }[];
+      };
+      // A truncated tree is indistinguishable, to the sync, from a
+      // repository whose remaining files were deleted — and the sync would
+      // delete their rows. Refuse rather than silently lose content.
+      if (body.truncated) {
+        throw new Error(`tree for ${ref.owner}/${ref.repo}@${commit} is truncated; refusing a partial sync`);
+      }
+      return body.tree
+        .filter((entry) => entry.type === 'blob')
+        .map((entry) => ({ path: entry.path, sha: entry.sha, size: entry.size ?? 0 }));
     },
 
-    async blob() {
-      throw new Error('not implemented');
+    async blob(ref, sha) {
+      const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/git/blobs/${sha}`);
+      if (res === null || res.status === 404) return null;
+      if (!res.ok) throw new Error(`blob fetch failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { encoding: string; content: string };
+      if (body.encoding !== 'base64') {
+        throw new Error(`unexpected blob encoding "${body.encoding}" for ${sha}`);
+      }
+      // GitHub wraps base64 content at 60 characters; Buffer.from ignores
+      // the newlines, but strip them so the input is what it claims to be.
+      return Buffer.from(body.content.replace(/\n/g, ''), 'base64');
     },
   };
 }
