@@ -53,3 +53,48 @@ export function fakeHttp(
 
   return Object.assign(http, { calls });
 }
+
+// Bounded patience. GitHub answers a spent rate limit with 403 plus the
+// second at which it resets, and a secondary limit with 429 plus
+// Retry-After; a 5xx is worth one more try. Everything else is an answer,
+// not a delay (spec §10).
+
+const DEFAULT_ATTEMPTS = 3;
+const BASE_BACKOFF_MS = 500;
+// Longer than this and waiting would block the sync for minutes. Report
+// the failure and let the caller decide.
+const MAX_WAIT_MS = 60_000;
+
+function waitFor(res: Response, attempt: number, nowMs: () => number): number | null {
+  if (res.status === 429) {
+    const after = Number(res.headers.get('retry-after'));
+    return Number.isFinite(after) && after >= 0 ? after * 1000 : BASE_BACKOFF_MS;
+  }
+  if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
+    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    if (!Number.isFinite(reset)) return BASE_BACKOFF_MS;
+    return Math.max(0, reset * 1000 - nowMs());
+  }
+  if (res.status >= 500) return BASE_BACKOFF_MS * 2 ** attempt;
+  return null;
+}
+
+export function withRetry(
+  http: Http,
+  options: { attempts?: number; sleep?: (ms: number) => Promise<void>; nowMs?: () => number } = {},
+): Http {
+  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const nowMs = options.nowMs ?? Date.now;
+
+  return async (url, init) => {
+    let last = await http(url, init);
+    for (let attempt = 0; attempt < attempts - 1; attempt += 1) {
+      const wait = waitFor(last, attempt, nowMs);
+      if (wait === null || wait > MAX_WAIT_MS) return last;
+      await sleep(wait);
+      last = await http(url, init);
+    }
+    return last;
+  };
+}
