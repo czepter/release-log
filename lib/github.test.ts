@@ -1,8 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { blobSha, fakeGitHub, githubClient } from './github.ts';
 import { fakeHttp } from './http.ts';
+import { installations } from './appAuth.ts';
 import type { Installations } from './appAuth.ts';
+
+const TEST_PEM = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+}).privateKey;
 
 test('blobSha matches git hash-object for an empty blob', () => {
   // git's well-known empty-blob hash. If this drifts, the whole diff is wrong.
@@ -40,7 +48,7 @@ test('fakeGitHub serves a blob by its sha', async () => {
 const REF = { owner: 'o', repo: 'r' };
 
 function withToken(token: string | null): Installations {
-  return { async tokenFor() { return token; } };
+  return { async tokenFor() { return token; }, invalidate() {} };
 }
 
 test('probe reports ready with the head and the node id in one call', async () => {
@@ -262,4 +270,47 @@ test('a blob of arbitrary bytes round-trips, not just ascii', async () => {
   assert.ok(bytes !== null, 'the blob must be found');
   assert.deepEqual(bytes, content, 'every byte must survive the decode');
   assert.equal(blobSha(bytes as Buffer), sha);
+});
+
+test('a 401 invalidates the token and the request is retried once', async () => {
+  // GitHub kann ein Token vor seinem genannten Ablauf töten. Ohne diesen
+  // Pfad läge das tote Token bis zu einer Stunde im Cache und jeder
+  // Abgleich dieser Installation schlüge fehl.
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': [
+      { body: { token: 'dead', expires_at: new Date(Date.now() + 3_600_000).toISOString() } },
+      { body: { token: 'fresh', expires_at: new Date(Date.now() + 3_600_000).toISOString() } },
+    ],
+    'GET /repos/o/r': [
+      { status: 401 },
+      { body: { node_id: 'R_kg1', default_branch: 'main' } },
+    ],
+    'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
+  });
+  const inst = installations(
+    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test' },
+    http,
+  );
+  const state = await githubClient(inst, http).probe(REF);
+  assert.equal(state.kind, 'ready');
+  const mints = http.calls.filter((c) => c === 'POST /app/installations/7/access_tokens');
+  assert.equal(mints.length, 2, 'das tote Token wurde weggeworfen und ein neues geprägt');
+});
+
+test('a 401 that survives the retry is reported, not retried forever', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': {
+      body: { token: 't', expires_at: new Date(Date.now() + 3_600_000).toISOString() },
+    },
+    'GET /repos/o/r': { status: 401 },
+  });
+  const inst = installations(
+    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test' },
+    http,
+  );
+  await assert.rejects(() => githubClient(inst, http).probe(REF), /HTTP 401/);
+  const repoCalls = http.calls.filter((c) => c === 'GET /repos/o/r');
+  assert.equal(repoCalls.length, 2, 'genau ein Wiederholungsversuch, nicht mehr');
 });

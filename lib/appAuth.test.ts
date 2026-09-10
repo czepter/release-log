@@ -128,3 +128,37 @@ test('two repositories in one installation share its token', async () => {
   const mints = http.calls.filter((c) => c.startsWith('POST /app/installations'));
   assert.equal(mints.length, 1, 'the cache is keyed by installation, not by repository');
 });
+
+test('the installation id is resolved once, not on every call', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': { body: { token: 'ghs_abc', expires_at: inAnHour() } },
+  });
+  const inst = installations(CONFIG, http, () => Date.now());
+  await inst.tokenFor(REF);
+  await inst.tokenFor(REF);
+  await inst.tokenFor(REF);
+  const lookups = http.calls.filter((c) => c === 'GET /repos/o/r/installation');
+  assert.equal(lookups.length, 1, 'die Installations-ID ändert sich nicht zwischen zwei Aufrufen');
+});
+
+test('invalidate drops both the token and the resolved installation id', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/installation': { body: { id: 7 } },
+    'POST /app/installations/7/access_tokens': [
+      { body: { token: 'first', expires_at: inAnHour() } },
+      { body: { token: 'second', expires_at: inAnHour() } },
+    ],
+  });
+  const inst = installations(CONFIG, http, () => Date.now());
+  assert.equal(await inst.tokenFor(REF), 'first');
+  inst.invalidate(REF);
+  assert.equal(await inst.tokenFor(REF), 'second', 'nach invalidate wird neu geprägt');
+  const lookups = http.calls.filter((c) => c === 'GET /repos/o/r/installation');
+  assert.equal(lookups.length, 2, 'auch die ID wird neu aufgelöst — ein Transfer ändert sie');
+});
+
+test('invalidating an unknown repository is a no-op, not a throw', () => {
+  const inst = installations(CONFIG, fakeHttp({}), () => Date.now());
+  inst.invalidate({ owner: 'never', repo: 'asked' });
+});
