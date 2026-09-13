@@ -841,16 +841,17 @@ test('a legacy row synced under its own path is adopted and gets its node id fil
   await withDb(async (db) => {
     const config = JSON.stringify({ id: 'legacy-id', product: 'Legacy', view: 'full', visibility: 'public' });
     // A row written before node ids were recorded, standing at the path it
-    // will be synced under — no rename involved. configBlobSha is set to
-    // match the tree's entry below, so the "unchanged config" fast path
-    // can only fire if `known` actually resolves to this row: every other
-    // guard downstream of `known` is a no-op here because the incoming
-    // config carries this row's own public_id (claimant's node id is
-    // NULL, so its own exemption already lets it through; nameHolder's id
-    // already equals config.id) — those observables would hold even with
-    // the gate reversed. The blob-fetch count below is what a wrong gate
-    // (`known` staying null) actually breaks: without adopting `known`,
-    // configUnchanged is false and the config gets re-fetched.
+    // will be synced under — no rename involved. Since Finding 1, a NULL
+    // node id no longer lets `known` resolve via the path match — that
+    // fallback was also the hijack an unrelated repository could ride to
+    // delete this row's content, so it's gone. The row is still adopted,
+    // but only through the ordinary upsert-on-public_id below: every guard
+    // downstream of `known` is a no-op here because the incoming config
+    // carries this row's own public_id (claimant's node id is NULL, so its
+    // own exemption already lets it through; nameHolder's id already
+    // equals config.id). What's lost is the fetch-avoidance optimization —
+    // with `known` null, configUnchanged is false and the config blob gets
+    // re-fetched even though its sha hasn't changed.
     db.insert(log).values({
       publicId: 'legacy-id',
       repoOwner: 'o',
@@ -879,7 +880,59 @@ test('a legacy row synced under its own path is adopted and gets its node id fil
     assert.equal(rows[0].publicId, 'legacy-id');
     assert.equal(rows[0].repoNodeId, 'R_new', 'its node id is filled in on adoption');
     assert.equal(db.select().from(problem).all().length, 0);
-    assert.equal(configBlobFetches, 0, 'known resolved to the legacy row, so the unchanged-config blob sha short-circuits the refetch');
+    assert.equal(configBlobFetches, 1, 'the fetch-avoidance optimization is gone with the NULL-node-id path fallback; the row is still adopted, just via one extra fetch');
+  });
+});
+
+// Finding 1 regression: with the removed `pathMatch` fallback, a NULL
+// node-id row occupying a path made `known` resolve to it by path alone.
+// A wholly UNRELATED repository — its own node id, its own
+// release-log.json id — synced onto that same path then also resolved
+// `known` to that row (nameHolder === known, so the recycled-name guard
+// never fired), reached the old-id cleanup, and deleted the NULL row's
+// log, releases and media outright before overwriting it with its own
+// content — with outcome.failed: false and no problem row. This is the
+// reviewer's live reproduction of that hijack; it must now be refused.
+test('a different repository synced onto a legacy NULL-node-id row\'s path is refused, not adopted and overwritten', async () => {
+  await withDb(async (db) => {
+    // Legacy row: written before node-id tracking, holding a release.
+    db.insert(log).values({
+      publicId: 'legacy-id',
+      repoOwner: 'o',
+      repoName: 'r',
+      product: 'Legacy',
+      view: 'full',
+      visibility: 'public',
+      state: 'active',
+    }).run();
+    db.insert(release).values({
+      logId: 'legacy-id',
+      version: '1.0.0',
+      date: '2026-01-01',
+      publishedAt: '2026-01-01T00:00:00Z',
+      blobSha: 'legacysha',
+      path: 'releases/1.0.0.json',
+      doc: JSON.stringify({ version: '1.0.0' }),
+    }).run();
+
+    // A completely different repository — its own node id, its own
+    // release-log.json id — synced onto the SAME (owner, repo) the legacy
+    // row occupies. Not a rename of the legacy repo: an unrelated one.
+    const configOther = JSON.stringify({ id: 'other-id', product: 'Other', view: 'full', visibility: 'public' });
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_other' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(configOther), size: configOther.length }],
+      blob: async (_ref, sha) => (sha === blobSha(configOther) ? Buffer.from(configOther) : null),
+    };
+    const outcome = await syncLog(db, gh, REF);
+
+    assert.equal(outcome.logId, null, 'refused, not adopted and overwritten');
+    assert.equal(outcome.failed, false, 'a refusal is a clean outcome, not a thrown failure');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1, 'the legacy row survives; nothing was inserted for the other repository');
+    assert.equal(rows[0].publicId, 'legacy-id', 'not overwritten with the other repository\'s id');
+    assert.equal(db.select().from(release).all().length, 1, "the legacy row's release survives, untouched");
+    assert.equal(db.select().from(problem).all().length, 1, 'the collision is recorded as a problem, not silently resolved');
   });
 });
 
