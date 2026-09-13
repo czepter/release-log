@@ -29,6 +29,11 @@ test('a missing or malformed signature header does not verify', () => {
   assert.equal(verifySignature(SECRET, body, undefined), false);
   assert.equal(verifySignature(SECRET, body, ''), false);
   assert.equal(verifySignature(SECRET, body, 'deadbeef'), false, 'ohne sha256= ist es kein Header, den wir kennen');
+  // Das beweist NICHT, dass die 'sha256='-Präfixprüfung existiert: ohne sie
+  // baut verifySignature den erwarteten Wert als die volle Zeichenkette
+  // 'sha256=<hex>' und vergleicht dagegen, also scheitert jeder Header ohne
+  // dieses Präfix schon am Vergleich. Was hier tatsächlich geprüft wird, ist
+  // nur "ein Header mit falschem Algorithmus-Präfix verifiziert nicht".
   assert.equal(verifySignature(SECRET, body, 'sha1=deadbeef'), false);
   assert.equal(verifySignature(SECRET, body, 'sha256=nothex!!'), false);
   assert.equal(verifySignature(SECRET, body, 'sha256=abc'), false, 'zu kurz, und timingSafeEqual wirft bei ungleicher Länge');
