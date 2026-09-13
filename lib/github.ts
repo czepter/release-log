@@ -82,20 +82,22 @@ export function fakeGitHub(repos: Record<string, Record<string, string | Buffer>
 
 const API = 'https://api.github.com';
 
+function headers(token: string): Record<string, string> {
+  return {
+    accept: 'application/vnd.github+json',
+    'x-github-api-version': '2022-11-28',
+    'user-agent': 'release-log-hub',
+    authorization: `Bearer ${token}`,
+  };
+}
+
 export function githubClient(inst: Installations, http: Http): GitHub {
   async function authed(ref: RepoRef, path: string): Promise<Response | null> {
     const token = await inst.tokenFor(ref);
     // Not installed: there is nothing to ask, and asking without a token
     // would be a different failure than the one the caller means.
     if (token === null) return null;
-    const res = await http(`${API}${path}`, {
-      headers: {
-        accept: 'application/vnd.github+json',
-        'x-github-api-version': '2022-11-28',
-        'user-agent': 'release-log-hub',
-        authorization: `Bearer ${token}`,
-      },
-    });
+    const res = await http(`${API}${path}`, { headers: headers(token) });
     if (res.status !== 401) return res;
 
     // Exactly one attempt: a 401 means either "token dead" — a fresh one
@@ -105,14 +107,7 @@ export function githubClient(inst: Installations, http: Http): GitHub {
     inst.invalidate(ref);
     const fresh = await inst.tokenFor(ref);
     if (fresh === null) return null;
-    return http(`${API}${path}`, {
-      headers: {
-        accept: 'application/vnd.github+json',
-        'x-github-api-version': '2022-11-28',
-        'user-agent': 'release-log-hub',
-        authorization: `Bearer ${fresh}`,
-      },
-    });
+    return http(`${API}${path}`, { headers: headers(fresh) });
   }
 
   return {
