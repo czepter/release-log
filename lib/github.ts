@@ -16,7 +16,14 @@ export type TreeEntry = { path: string; sha: string; size: number };
 // They stay internal — which state applies must never leak into an HTTP
 // response (spec §7).
 export type RepoState =
-  | { kind: 'ready'; head: string; nodeId: string }
+  // owner/repo are the CANONICAL name from GitHub's response, not
+  // necessarily the ref probe() was called with: GET /repos/{old}/{old}
+  // 301-redirects to a renamed repository and fetch follows it, so a
+  // stale ref still probes 'ready' — but with the repository's current
+  // name in the body. Optional: fakeGitHub and hand-written test fixtures
+  // that predate this field don't carry it, and the caller falls back to
+  // the ref it probed with.
+  | { kind: 'ready'; head: string; nodeId: string; owner?: string; repo?: string }
   | { kind: 'empty'; nodeId: string }
   | { kind: 'no_installation' }
   | { kind: 'gone' };
@@ -114,7 +121,13 @@ export function githubClient(inst: Installations, http: Http): GitHub {
       if (res === null) return { kind: 'no_installation' };
       if (res.status === 404) return { kind: 'gone' };
       if (!res.ok) throw new Error(`repo lookup failed: HTTP ${res.status}`);
-      const info = (await res.json()) as { node_id: string; default_branch: string };
+      const info = (await res.json()) as { node_id: string; default_branch: string; full_name?: string };
+      // full_name is GitHub's canonical "owner/repo" post-redirect: a
+      // stale ref (e.g. after a rename) still lands here via a 301, but
+      // the body names where the repository actually lives now. Optional
+      // here only because some hand-written test fixtures predate this
+      // field — the real API always sends it.
+      const canonical = info.full_name ? info.full_name.split('/') : null;
 
       const commits = await authed(ref, `/repos/${ref.owner}/${ref.repo}/commits/${info.default_branch}`);
       if (commits === null) return { kind: 'no_installation' };
@@ -125,7 +138,12 @@ export function githubClient(inst: Installations, http: Http): GitHub {
       // successful sync.
       if (commits.status === 409 || commits.status === 404) return { kind: 'empty', nodeId: info.node_id };
       if (!commits.ok) throw new Error(`head lookup failed: HTTP ${commits.status}`);
-      return { kind: 'ready', head: ((await commits.json()) as { sha: string }).sha, nodeId: info.node_id };
+      return {
+        kind: 'ready',
+        head: ((await commits.json()) as { sha: string }).sha,
+        nodeId: info.node_id,
+        ...(canonical ? { owner: canonical[0], repo: canonical[1] } : {}),
+      };
     },
 
     async tree(ref, commit) {

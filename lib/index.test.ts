@@ -642,6 +642,30 @@ test('a repository with no commits is skipped without a problem row', async () =
   });
 });
 
+// Finding 2: GET /repos/{old}/{old} 301-redirects to a renamed repository
+// and fetch follows redirects, so probe() on a STALE ref still succeeds —
+// but the response body's full_name names where the repository actually
+// lives now. Writing ref.owner/ref.repo back (the stale name we were
+// called with) instead of that canonical name means a lost rename webhook
+// makes reconcile re-assert the stale name forever. Simulate that: probe()
+// reports a different canonical owner/repo than the ref syncLog is called
+// with, and check the stored row converges on the canonical name.
+test("a stale ref's sync converges the row on the canonical name probe() reports, not the ref it was called with", async () => {
+  await withDb(async (db) => {
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_1', owner: 'o', repo: 'new-name' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(CONFIG), size: CONFIG.length }],
+      blob: async (_ref, sha) => (sha === blobSha(CONFIG) ? Buffer.from(CONFIG) : null),
+    };
+    const outcome = await syncLog(db, gh, { owner: 'o', repo: 'old-stale-name' });
+
+    assert.equal(outcome.logId, 'abc123');
+    const row = db.select().from(log).all()[0];
+    assert.equal(row.repoOwner, 'o');
+    assert.equal(row.repoName, 'new-name', 'the canonical name probe() reported, not the stale ref it was called with');
+  });
+});
+
 test('a renamed repository keeps its log, anchored on the node id', async () => {
   await withDb(async (db) => {
     const files = { 'release-log.json': CONFIG };

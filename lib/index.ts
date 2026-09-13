@@ -94,6 +94,15 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
 
   const head = probed.head;
   const repoNodeId = probed.nodeId;
+  // The CANONICAL name, not ref.owner/ref.repo: a stale ref survives a
+  // rename via GitHub's redirect (probe() still succeeds), but writing
+  // the ref back over the row re-asserts the old name forever if the
+  // rename webhook is ever lost — reconcile keeps re-syncing the stale
+  // path, the true name never converges, and a repository later created
+  // at the freed old name permanently collides with the phantom row
+  // (Finding 2). Falls back to the ref when a prober doesn't report one.
+  const repoOwner = probed.owner ?? ref.owner;
+  const repoName = probed.repo ?? ref.repo;
 
   const tree = await gh.tree(ref, head);
   const configEntry = tree.find((e) => e.path === CONFIG_PATH);
@@ -219,8 +228,8 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // update after the release and media sweeps below.
   db.insert(log).values({
     publicId: config.id,
-    repoOwner: ref.owner,
-    repoName: ref.repo,
+    repoOwner,
+    repoName,
     repoNodeId,
     product: config.product,
     view: config.view,
@@ -231,8 +240,8 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   }).onConflictDoUpdate({
     target: log.publicId,
     set: {
-      repoOwner: ref.owner,
-      repoName: ref.repo,
+      repoOwner,
+      repoName,
       repoNodeId,
       product: config.product,
       view: config.view,
