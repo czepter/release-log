@@ -74,7 +74,17 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // Einfrieren wäre hier der teure Fehler: aus 'frozen' kommt ein Log nur
   // über einen weiteren erfolgreichen Abgleich wieder heraus.
   if (probed.kind === 'no_installation') {
-    return { logId: byPath()?.publicId ?? null, fetched: 0, errors: 0, frozen: false, skipped: 'no_installation', failed: false };
+    // Stamp indexed_at even though nothing else about the row changes:
+    // dueLogs' staleness rule reads indexed_at as "last looked at", and
+    // without this a skipped log is more than an hour stale on every tick
+    // forever, so every 5-minute reconcile round re-mints a JWT and looks
+    // up the installation for it again (Finding 3) — once per hour, as
+    // spec §10's "give it a chance to thaw" intends, not once per tick.
+    const existing = byPath();
+    if (existing) {
+      db.update(log).set({ indexedAt: now() }).where(eq(log.publicId, existing.publicId)).run();
+    }
+    return { logId: existing?.publicId ?? null, fetched: 0, errors: 0, frozen: false, skipped: 'no_installation', failed: false };
   }
 
   // Ein Repo, das es nicht mehr gibt, friert den Log ein, den es trug; der
@@ -82,7 +92,10 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   if (probed.kind === 'gone') {
     const existing = byPath();
     if (existing) {
-      db.update(log).set({ state: 'frozen' }).where(eq(log.publicId, existing.publicId)).run();
+      // indexed_at too, for the same reason as the no_installation branch
+      // above: without it a frozen log is stale on every tick, not just
+      // hourly (Finding 3).
+      db.update(log).set({ state: 'frozen', indexedAt: now() }).where(eq(log.publicId, existing.publicId)).run();
     }
     return { logId: existing?.publicId ?? null, fetched: 0, errors: 0, frozen: existing !== null, skipped: null, failed: false };
   }

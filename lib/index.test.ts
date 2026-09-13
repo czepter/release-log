@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 import { openDb } from './db/client.ts';
 import type { Db } from './db/client.ts';
 import { log, release, syncError, problem, media } from './db/schema.ts';
@@ -624,6 +625,60 @@ test('a restored repository thaws on the next successful sync', async () => {
     // Spec §10: der nächste erfolgreiche Abgleich taut den Log von selbst auf.
     await syncLog(db, fakeGitHub({ 'o/r': files }), REF);
     assert.equal(db.select().from(log).all()[0].state, 'active');
+  });
+});
+
+// Finding 3: neither branch used to advance indexed_at, so dueLogs' hourly
+// staleness rule never actually applied to a frozen or skipped log — every
+// one of them looked "over an hour stale" on every 5-minute reconcile
+// tick, forever, not once per hour as documented. Stamping indexed_at
+// makes "last looked at" the real semantics of the column here too.
+test('(Finding 3) a gone repository stamps indexed_at on the row it freezes', async () => {
+  await withDb(async (db) => {
+    await syncLog(db, fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } }), REF);
+    // Back-date indexed_at from the full sync above so this test can
+    // actually distinguish "the gone branch stamped it" from "it was
+    // already recent from the sync a moment ago" — a row already fresh
+    // from setup would pass the 'recent' check below whether or not the
+    // gone branch does anything at all.
+    const publicId = db.select().from(log).all()[0].publicId;
+    db.update(log).set({ indexedAt: new Date(Date.now() - 3_600_000).toISOString() })
+      .where(eq(log.publicId, publicId)).run();
+    const before = Date.now();
+
+    await syncLog(db, fakeGitHub({}), REF);
+
+    const row = db.select().from(log).all()[0];
+    assert.equal(row.state, 'frozen');
+    assert.ok(row.indexedAt, 'indexed_at must not be left null');
+    const gap = Math.abs(Date.parse(row.indexedAt as string) - before);
+    assert.ok(gap < 5_000, `indexed_at must be recent, was ${row.indexedAt}`);
+  });
+});
+
+test('(Finding 3) a no_installation result stamps indexed_at on the existing row', async () => {
+  await withDb(async (db) => {
+    const base = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG } });
+    await syncLog(db, base, REF);
+    // Same reasoning as the 'gone' test above: back-date first so a stale
+    // stamp is actually distinguishable from a freshly-synced one.
+    const publicId = db.select().from(log).all()[0].publicId;
+    db.update(log).set({ indexedAt: new Date(Date.now() - 3_600_000).toISOString() })
+      .where(eq(log.publicId, publicId)).run();
+    const before = Date.now();
+
+    const uninstalled: GitHub = {
+      probe: async () => ({ kind: 'no_installation' }),
+      tree: (ref, commit) => base.tree(ref, commit),
+      blob: (ref, sha) => base.blob(ref, sha),
+    };
+    const outcome = await syncLog(db, uninstalled, REF);
+
+    assert.equal(outcome.skipped, 'no_installation');
+    const row = db.select().from(log).all()[0];
+    assert.ok(row.indexedAt, 'indexed_at must not be left null');
+    const gap = Math.abs(Date.parse(row.indexedAt as string) - before);
+    assert.ok(gap < 5_000, `indexed_at must be recent, was ${row.indexedAt}`);
   });
 });
 
