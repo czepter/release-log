@@ -8,6 +8,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { RepoRef } from './github.ts';
 
 export function verifySignature(secret: string, body: Buffer, header: string | undefined): boolean {
+  // Dies ist ein Early-Out, keine Sicherheitsprüfung: es erspart das HMAC
+  // über den Body, wenn der Header offensichtlich nicht unserer ist. Was den
+  // Vergleich sicher macht, ist unten der Vergleich gegen die volle
+  // 'sha256=<hex>'-Zeichenkette — ein Header ohne dieses Präfix scheitert
+  // dort ohnehin, mit oder ohne diese Zeile.
   if (typeof header !== 'string' || !header.startsWith('sha256=')) return false;
   const expected = Buffer.from(`sha256=${createHmac('sha256', secret).update(body).digest('hex')}`, 'utf8');
   const given = Buffer.from(header, 'utf8');
