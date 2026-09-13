@@ -107,20 +107,19 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // zweiter Log und die eingebundene URL des ersten zeigte ins Leere
   // (Spec §10).
   //
-  // byPath() is a fallback for rows written before node-id tracking
-  // existed, not evidence that whatever sits at our path IS us. A row can
-  // occupy (ref.owner, ref.repo) simply because it is a wholly unrelated
-  // log parked there — a rename landing on someone else's path is exactly
-  // that. Only trust the path match as `known` when its stored node id is
-  // NULL, i.e. it predates node-id tracking and makes no competing claim;
-  // a row whose node id is present and different names a specific other
-  // repository, and treating "occupies our path" as "is our own row" is
-  // how an unrelated log ends up deleted by the cleanup further down
-  // (Task 5 finding).
+  // `pathMatch` (used only by the recycled-name guard further down) is
+  // deliberately NOT folded into `known`. A row occupying (ref.owner,
+  // ref.repo) with a NULL node id is not evidence it is OUR row, only
+  // that whoever synced it first did so before node-id tracking existed —
+  // and a wholly unrelated repository can be synced onto that same path
+  // under its own id. Adopting it here on path alone let that unrelated
+  // sync pass the guards below as "ourselves" and delete the NULL row's
+  // content in the old-id cleanup (Finding 1: a data-destroying hijack).
+  // A legacy NULL-node-id row still gets adopted, just through the
+  // ordinary upsert-on-public_id below, once its config blob is
+  // re-fetched (configUnchanged can no longer short-circuit on it).
   const pathMatch = byPath();
-  const known =
-    db.select().from(log).where(eq(log.repoNodeId, repoNodeId)).all()[0]
-    ?? (pathMatch !== null && pathMatch.repoNodeId === null ? pathMatch : null);
+  const known = db.select().from(log).where(eq(log.repoNodeId, repoNodeId)).all()[0] ?? null;
 
   // Unchanged config: reuse what the index already holds instead of
   // fetching and re-parsing it.
