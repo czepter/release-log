@@ -108,3 +108,37 @@ test('a malformed payload names nothing instead of throwing', () => {
   assert.deepEqual(refsFor({ event: 'push', payload: { repository: { full_name: '../../etc' } } }), []);
   assert.deepEqual(refsFor({ event: 'installation', payload: { repositories: 'nope' } }), []);
 });
+
+test('a full_name that is not a real GitHub owner/repo names nothing, even when it looks like two segments', () => {
+  // Diese Werte landen roh in einem API-Pfad (Task 7). Jeder hier ist ein
+  // Weg, den ein Blocklist-Ansatz übersehen hätte:
+  const pushOf = (fullName: string) => refsFor({ event: 'push', payload: { repository: { full_name: fullName } } });
+  // new URL() und fetch() wenden WHATWG dot-segment removal an und behandeln
+  // '%2e' als '.' — das wäre also '../x', kein 'literales' '%2e%2e/x'.
+  assert.deepEqual(pushOf('%2e%2e/x'), []);
+  // '?' beginnt einen Query-String, keinen Pfad-Bestandteil.
+  assert.deepEqual(pushOf('a/b?x=1'), []);
+  // Ein rohes Leerzeichen ist in keinem der beiden GitHub-Zeichensets erlaubt.
+  assert.deepEqual(pushOf('a b/c'), []);
+  // GitHub-Owner sind höchstens 39 Zeichen lang.
+  assert.deepEqual(pushOf(`${'a'.repeat(40)}/x`), []);
+  // GitHub-Repository-Namen sind höchstens 100 Zeichen lang.
+  assert.deepEqual(pushOf(`x/${'a'.repeat(101)}`), []);
+  // '.' ist im Owner-Zeichensatz gar nicht enthalten (anders als im
+  // Repository-Zeichensatz).
+  assert.deepEqual(pushOf('foo.bar/repo'), []);
+  // Das Repository-Zeichenset allein ließe ein Repo-Segment von genau '.'
+  // oder '..' durch — beides gültige Zeichen im Zeichensatz, aber keine
+  // Namen, die GitHub je vergäbe.
+  assert.deepEqual(pushOf('o/.'), []);
+  assert.deepEqual(pushOf('o/..'), []);
+});
+
+test('a realistic owner/repo with dots, underscores, and hyphens still comes through', () => {
+  // Die Positivkontrolle: die Positivliste darf nicht so eng geraten sein,
+  // dass sie echte GitHub-Namen ablehnt.
+  assert.deepEqual(
+    refsFor({ event: 'push', payload: { repository: { full_name: 'some-org/my_repo.v2' } } }),
+    [{ owner: 'some-org', repo: 'my_repo.v2' }],
+  );
+});

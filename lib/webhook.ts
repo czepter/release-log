@@ -25,15 +25,27 @@ export function verifySignature(secret: string, body: Buffer, header: string | u
 
 export type Delivery = { event: string; payload: unknown };
 
+// owner und repo werden später roh in einen GitHub-API-Pfad interpoliert
+// (Task 7). Die Frage ist also nicht "sieht das gefährlich aus?" — das lässt
+// sich nicht vollständig aufzählen (%2e%2e wird von new URL()/fetch() als
+// Punkt-Segment behandelt, ein '?' startet eine Query-String, ein Leerzeichen
+// ist ungültig in einer URL) — sondern "kann GitHub ein Repository überhaupt
+// so nennen?". Eine Positivliste dessen, was GitHub zulässt, ist die Prüfung,
+// keine Negativliste dessen, was verdächtig aussieht.
+const OWNER_RE = /^[A-Za-z0-9-]{1,39}$/;
+const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+
 function refOf(value: unknown): RepoRef | null {
   const fullName = (value as { full_name?: unknown } | null)?.full_name;
   if (typeof fullName !== 'string') return null;
   const parts = fullName.split('/');
-  // Genau zwei nicht-leere Segmente. Alles andere landete sonst ungeprüft
-  // in einem API-Pfad.
-  if (parts.length !== 2 || parts[0] === '' || parts[1] === '') return null;
-  if (parts.some((part) => part === '.' || part === '..')) return null;
-  return { owner: parts[0], repo: parts[1] };
+  if (parts.length !== 2) return null;
+  const [owner, repo] = parts;
+  // Das Repo-Zeichenset allein ließe '.' und '..' durch (beides gültige
+  // Zeichen), und GitHub würde daraus nie ein Repository machen.
+  if (repo === '.' || repo === '..') return null;
+  if (!OWNER_RE.test(owner) || !REPO_RE.test(repo)) return null;
+  return { owner, repo };
 }
 
 function listOf(value: unknown): RepoRef[] {
