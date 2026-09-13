@@ -8,7 +8,7 @@ import type { Db } from '../lib/db/client.ts';
 import { log, release, media, syncError, problem } from '../lib/db/schema.ts';
 import { fakeGitHub } from '../lib/github.ts';
 import type { GitHub } from '../lib/github.ts';
-import { reindex, buildClient } from './reindex.ts';
+import { reindex, buildClient, statusLine } from './reindex.ts';
 import { fakeHttp } from '../lib/http.ts';
 
 const CONFIG = JSON.stringify({ id: 'abc123', product: 'Demo', view: 'full', visibility: 'public' });
@@ -240,4 +240,16 @@ test('reindex reports a repository the app is not installed on', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('statusLine displays no_installation as "no installation"', () => {
+  const ref = { owner: 'o', repo: 'r' };
+  const outcome = { logId: null, fetched: 0, errors: 0, frozen: false, skipped: 'no_installation' as const, failed: false };
+  assert.equal(statusLine(ref, outcome), 'o/r: no installation');
+});
+
+test('statusLine displays no_commits as "no commits yet"', () => {
+  const ref = { owner: 'o', repo: 'r' };
+  const outcome = { logId: null, fetched: 0, errors: 0, frozen: false, skipped: 'no_commits' as const, failed: false };
+  assert.equal(statusLine(ref, outcome), 'o/r: no commits yet');
 });
