@@ -857,6 +857,45 @@ test('a repository renamed onto a name a frozen log still holds is refused, not 
   });
 });
 
+// The guard above only ever exercised probe() reporting the same owner/repo
+// as the ref it was called with (Finding 2's canonical-name fallback never
+// diverges from ref there). But the recycled-name guard resolves the
+// destination path by looking a row up, and the upsert below it writes the
+// CANONICAL owner/repo (probed.owner/repo), not the ref's. If the guard
+// still looked the stale ref up while the upsert wrote the canonical path,
+// a stale ref reproduces the exact crash this guard exists to prevent: no
+// collision is found at the stale path, so the guard lets the sync through,
+// and the upsert then throws an uncaught UNIQUE constraint error writing
+// the canonical path a frozen, unrelated log already holds.
+test('a stale ref whose canonical name is already held by a frozen log is refused, not thrown', async () => {
+  await withDb(async (db) => {
+    const configA = JSON.stringify({ id: 'log-a', product: 'A', view: 'full', visibility: 'public' });
+    const configB = JSON.stringify({ id: 'log-b', product: 'B', view: 'full', visibility: 'public' });
+
+    // log-b occupies 'o/new' and then freezes, leaving the name occupied.
+    await syncLog(db, fakeGitHub({ 'o/new': { 'release-log.json': configB } }), { owner: 'o', repo: 'new' });
+    await syncLog(db, fakeGitHub({}), { owner: 'o', repo: 'new' });
+    assert.equal(db.select().from(log).all().find((r) => r.publicId === 'log-b')?.state, 'frozen');
+
+    // log-a is called with a STALE ref ('o/old-stale'), but probe() reports
+    // its canonical name has moved to 'o/new' — the same path log-b's
+    // frozen row still holds.
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_a', owner: 'o', repo: 'new' }),
+      tree: async () => [{ path: 'release-log.json', sha: blobSha(configA), size: configA.length }],
+      blob: async (_ref, sha) => (sha === blobSha(configA) ? Buffer.from(configA) : null),
+    };
+    const outcome = await syncLog(db, gh, { owner: 'o', repo: 'old-stale' });
+
+    assert.equal(outcome.logId, null, 'refused, not thrown, and nothing indexed under the colliding canonical name');
+    const rows = db.select().from(log).all();
+    assert.equal(rows.length, 1, 'log-a was never written; the frozen row is untouched');
+    assert.equal(rows[0].publicId, 'log-b');
+    assert.equal(rows[0].repoName, 'new', 'the frozen log keeps its name');
+    assert.equal(db.select().from(problem).all().length, 1, 'a problem row records the collision');
+  });
+});
+
 // Task 5 finding: a rename landing on a path an ACTIVE row holds, where
 // the incoming repository is a legacy row with no node id on record, made
 // `known` resolve to byPath()'s hit — log-y, the active row occupying the

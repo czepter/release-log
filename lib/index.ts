@@ -63,9 +63,9 @@ function writeSyncError(db: Db, logId: string, path: string, message: string): v
 
 export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOutcome> {
   const repoPath = `${ref.owner}/${ref.repo}`;
-  const byPath = (): typeof log.$inferSelect | null =>
+  const byPath = (owner = ref.owner, repo = ref.repo): typeof log.$inferSelect | null =>
     db.select().from(log)
-      .where(and(eq(log.repoOwner, ref.owner), eq(log.repoName, ref.repo))).all()[0] ?? null;
+      .where(and(eq(log.repoOwner, owner), eq(log.repoName, repo))).all()[0] ?? null;
 
   const probed = await gh.probe(ref);
 
@@ -140,7 +140,15 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
   // A legacy NULL-node-id row still gets adopted, just through the
   // ordinary upsert-on-public_id below, once its config blob is
   // re-fetched (configUnchanged can no longer short-circuit on it).
-  const pathMatch = byPath();
+  //
+  // Resolved against (repoOwner, repoName) — the CANONICAL pair the
+  // upsert below actually writes — not (ref.owner, ref.repo). A stale
+  // ref whose canonical name differs (Finding 2, above) would otherwise
+  // have this guard inspect the wrong path: it finds no collision at the
+  // stale path while the upsert goes on to write the canonical path,
+  // colliding there and throwing an uncaught UNIQUE constraint error
+  // instead of being refused with a problem row.
+  const pathMatch = byPath(repoOwner, repoName);
   const known = db.select().from(log).where(eq(log.repoNodeId, repoNodeId)).all()[0] ?? null;
 
   // Unchanged config: reuse what the index already holds instead of
