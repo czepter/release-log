@@ -4,7 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from 'node:net';
+import { createHmac } from 'node:crypto';
 import { createApp } from './server.ts';
+import type { Hooks } from './server.ts';
 import { fileReader } from './lib/store.ts';
 import type { Reader } from './lib/store.ts';
 
@@ -39,8 +41,12 @@ const privateReader: Reader = {
   etag: () => null,
 };
 
-async function withServer(reader: Reader, fn: (base: string) => Promise<void>): Promise<void> {
-  const server = createApp(reader);
+async function withServer(
+  reader: Reader,
+  fn: (base: string) => Promise<void>,
+  hooks?: Hooks,
+): Promise<void> {
+  const server = createApp(reader, hooks);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('no port');
@@ -101,11 +107,15 @@ function rawRequest(port: number, requestText: string): Promise<string> {
 }
 
 test('health answers 200 with JSON', async () => {
+  // server.ts now answers /health itself, ahead of route() (Task 7): the
+  // process-liveness shape is { ok: true }, not lib/public.ts's { status:
+  // 'ok' } -- that handler is only still reachable by calling route()
+  // directly, as lib/public.test.ts does.
   await withServer(reader, async (base) => {
     const res = await fetch(`${base}/health`);
     assert.equal(res.status, 200);
     assert.match(res.headers.get('content-type') ?? '', /application\/json/);
-    assert.deepEqual(await res.json(), { status: 'ok' });
+    assert.deepEqual(await res.json(), { ok: true });
   });
 });
 
@@ -226,7 +236,7 @@ test('a malformed request target answers 400 and the server survives to serve th
     // would kill the whole test run, not just fail a status-code check.
     const res = await fetch(`${base}/health`);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { status: 'ok' });
+    assert.deepEqual(await res.json(), { ok: true });
   });
 });
 
@@ -293,5 +303,130 @@ test('a non-existent log returns 404 with no ETag header even when the reader ha
     const res = await fetch(`${base}/l/nonexistent/versions`);
     assert.equal(res.status, 404);
     assert.equal(res.headers.get('etag'), null);
+  });
+});
+
+const HOOK_SECRET = 'not-the-real-secret';
+
+function signed(body: string, secret = HOOK_SECRET): string {
+  return `sha256=${createHmac('sha256', secret).update(Buffer.from(body, 'utf8')).digest('hex')}`;
+}
+
+async function deliver(base: string, event: string, body: string, signature?: string): Promise<Response> {
+  const headers: Record<string, string> = { 'x-github-event': event, 'content-type': 'application/json' };
+  if (signature !== undefined) headers['x-hub-signature-256'] = signature;
+  return fetch(`${base}/webhook`, { method: 'POST', headers, body });
+}
+
+test('health answers 200 without touching the reader', async () => {
+  await withServer(reader, async (base) => {
+    const res = await fetch(`${base}/health`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+});
+
+test('a signed push is accepted and its repository is handed on', async () => {
+  const seen: string[] = [];
+  const body = JSON.stringify({ repository: { full_name: 'o/r' } });
+  await withServer(
+    reader,
+    async (base) => {
+      const res = await deliver(base, 'push', body, signed(body));
+      assert.equal(res.status, 202);
+      assert.deepEqual(seen, ['o/r']);
+    },
+    { webhookSecret: HOOK_SECRET, onDelivery: (refs) => { for (const ref of refs) seen.push(`${ref.owner}/${ref.repo}`); } },
+  );
+});
+
+test('an unsigned delivery is refused and nothing is handed on', async () => {
+  let called = false;
+  const body = JSON.stringify({ repository: { full_name: 'o/r' } });
+  await withServer(
+    reader,
+    async (base) => {
+      const res = await deliver(base, 'push', body);
+      assert.equal(res.status, 401);
+      assert.equal(called, false);
+    },
+    { webhookSecret: HOOK_SECRET, onDelivery: () => { called = true; } },
+  );
+});
+
+test('a delivery signed with the wrong secret is refused', async () => {
+  let called = false;
+  const body = JSON.stringify({ repository: { full_name: 'o/r' } });
+  await withServer(
+    reader,
+    async (base) => {
+      const res = await deliver(base, 'push', body, signed(body, 'someone-elses-secret'));
+      assert.equal(res.status, 401);
+      assert.equal(called, false);
+    },
+    { webhookSecret: HOOK_SECRET, onDelivery: () => { called = true; } },
+  );
+});
+
+test('a body that is not json is refused after the signature checks out', async () => {
+  // The signature checks out, the content is still garbage. This may be 400
+  // and must not crash the process.
+  let called = false;
+  const body = 'not json at all';
+  await withServer(
+    reader,
+    async (base) => {
+      const res = await deliver(base, 'push', body, signed(body));
+      assert.equal(res.status, 400);
+      assert.equal(called, false);
+    },
+    { webhookSecret: HOOK_SECRET, onDelivery: () => { called = true; } },
+  );
+});
+
+test('an oversized delivery is refused', async () => {
+  // Valid JSON, just too large. That's the point: without a size limit this
+  // body would sail through and be accepted with 202 -- a test with broken
+  // JSON would also pass without the limit, because it would fail at the
+  // parser instead of at the limit.
+  let handed = -1;
+  const body = JSON.stringify({ repository: { full_name: 'o/r' }, pad: 'x'.repeat(2 * 1024 * 1024) });
+  await withServer(
+    reader,
+    async (base) => {
+      // The server aborts the connection as soon as the limit falls; depending
+      // on how much of the body was already out, the client sees either the
+      // 413 or a dropped connection. Both count as "refused".
+      const status = await deliver(base, 'push', body, signed(body))
+        .then((res) => res.status)
+        .catch(() => 0);
+      assert.notEqual(status, 202, 'an oversized body must not be accepted');
+      assert.ok(status === 413 || status === 0, `unexpected status ${status}`);
+      assert.equal(handed, -1, 'and none of it may reach the queue');
+    },
+    { webhookSecret: HOOK_SECRET, onDelivery: (refs) => { handed = refs.length; } },
+  );
+});
+
+test('a ping is accepted and names nothing', async () => {
+  let refCount = -1;
+  const body = JSON.stringify({ zen: 'hi' });
+  await withServer(
+    reader,
+    async (base) => {
+      const res = await deliver(base, 'ping', body, signed(body));
+      assert.equal(res.status, 202);
+      assert.equal(refCount, 0);
+    },
+    { webhookSecret: HOOK_SECRET, onDelivery: (refs) => { refCount = refs.length; } },
+  );
+});
+
+test('without a webhook secret configured the route does not exist', async () => {
+  // A service with no secret configured must not be an open trigger.
+  const body = JSON.stringify({ repository: { full_name: 'o/r' } });
+  await withServer(reader, async (base) => {
+    const res = await deliver(base, 'push', body, signed(body));
+    assert.equal(res.status, 404);
   });
 });
