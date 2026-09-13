@@ -93,6 +93,28 @@ test('an empty index has nothing due', async () => {
   });
 });
 
+test('(Finding 3) a frozen log just re-stamped is not due again until an hour passes', async () => {
+  // syncLog now stamps indexed_at on the gone/no_installation branches
+  // (Finding 3), so this is the guarantee that stamp actually buys: a
+  // frozen or skipped log synced a moment ago drops out of dueLogs
+  // entirely (unless it happens to be the single oldest row), and only
+  // comes back once genuinely stale — once per hour, not every 5-minute
+  // tick forever.
+  await withDb(async (db) => {
+    // 'older' is deliberately the single-oldest row, so rule 1 ("the
+    // oldest, always") picks it instead of 'frozen' — isolating what this
+    // test actually checks, the hourly staleness rule, from the always-due
+    // rule which would otherwise mask a broken stamp.
+    insert(db, 'older', 'older', new Date(NOW - 120_000).toISOString());
+    insert(db, 'frozen', 'frozen', new Date(NOW - 60_000).toISOString(), 'frozen');
+    const due = dueLogs(db, NOW).map((r) => r.repo);
+    assert.ok(!due.includes('frozen'), 'just re-stamped, so not due yet');
+
+    const laterDue = dueLogs(db, NOW + 61 * 60_000).map((r) => r.repo);
+    assert.ok(laterDue.includes('frozen'), 'due again once over an hour has passed');
+  });
+});
+
 test('a tick enqueues every due log and reports how many', async () => {
   await withDb(async (db) => {
     insert(db, 'a', 'a', null);
