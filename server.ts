@@ -201,9 +201,15 @@ if (import.meta.main) {
   const db = openDb(dbPath);
 
   const config = readConfig(process.env);
+  // Node has no default fetch timeout: a hung connection would block this
+  // process's single in-flight sync indefinitely, stalling every
+  // repository's sync, not just the hung one. 30s is generous for a
+  // single GitHub API call, including the blobs a sync fetches one at a
+  // time. Same treatment as bin/reindex.ts, for the same reason.
+  const FETCH_TIMEOUT_MS = 30_000;
   const gh = githubClient(
-    installations(config, withRetry((url, init) => fetch(url, init))),
-    withRetry((url, init) => fetch(url, init)),
+    installations(config, withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }))),
+    withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })),
   );
   const queue = syncQueue(
     async (ref) => { await syncLog(db, gh, ref); },
