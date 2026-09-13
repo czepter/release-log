@@ -35,6 +35,16 @@ export async function reindex(db: Db, gh: GitHub, refs: RepoRef[]): Promise<Sync
   return outcomes;
 }
 
+export function statusLine(ref: RepoRef, outcome: SyncOutcome): string {
+  const state = outcome.failed ? 'failed'
+    : outcome.skipped === 'no_installation' ? 'no installation'
+    : outcome.skipped === 'no_commits' ? 'no commits yet'
+    : outcome.frozen ? 'frozen'
+    : outcome.logId === null ? 'not a log'
+    : `${outcome.logId} (${outcome.fetched} fetched, ${outcome.errors} errors)`;
+  return `${ref.owner}/${ref.repo}: ${state}`;
+}
+
 if (import.meta.main) {
   const dbPath = process.env.DB_PATH ?? './release-log.sqlite';
   const refs = process.argv.slice(2).map((arg) => {
@@ -62,13 +72,7 @@ if (import.meta.main) {
   const outcomes = await reindex(openDb(dbPath), gh, refs);
   for (const [i, outcome] of outcomes.entries()) {
     const ref = refs[i];
-    const state = outcome.failed ? 'failed'
-      : outcome.skipped === 'no_installation' ? 'no installation'
-      : outcome.skipped === 'no_commits' ? 'no commits yet'
-      : outcome.frozen ? 'frozen'
-      : outcome.logId === null ? 'not a log'
-      : `${outcome.logId} (${outcome.fetched} fetched, ${outcome.errors} errors)`;
-    console.log(`${ref.owner}/${ref.repo}: ${state}`);
+    console.log(statusLine(ref, outcome));
   }
   if (outcomes.some((o) => o.failed)) process.exit(1);
 }
