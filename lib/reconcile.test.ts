@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from './db/client.ts';
 import { log } from './db/schema.ts';
-import { dueLogs, reconcileTick } from './reconcile.ts';
+import { dueLogs, reconcileTick, EVERY_MS, STALE_MS } from './reconcile.ts';
 import { syncQueue } from './syncQueue.ts';
 
 const NOW = Date.parse('2026-09-10T12:00:00.000Z');
@@ -113,6 +113,16 @@ test('(Finding 3) a frozen log just re-stamped is not due again until an hour pa
     const laterDue = dueLogs(db, NOW + 61 * 60_000).map((r) => r.repo);
     assert.ok(laterDue.includes('frozen'), 'due again once over an hour has passed');
   });
+});
+
+// The README documents "every 5 minutes" and "at least hourly" as this
+// system's actual behavior. Every other test in this file exercises the
+// staleness/tick rules through explicit everyMs/nowMs values without ever
+// reading these constants, so nothing else would catch one of them
+// silently drifting away from what's documented.
+test('the reconcile interval is 5 minutes and the staleness window is 1 hour', () => {
+  assert.equal(EVERY_MS, 5 * 60 * 1000);
+  assert.equal(STALE_MS, 60 * 60 * 1000);
 });
 
 test('a tick enqueues every due log and reports how many', async () => {

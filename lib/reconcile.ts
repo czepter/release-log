@@ -9,8 +9,12 @@ import { log } from './db/schema.ts';
 import type { RepoRef } from './github.ts';
 import type { Queue } from './syncQueue.ts';
 
-const STALE_MS = 60 * 60 * 1000;
-const EVERY_MS = 5 * 60 * 1000;
+// Exported so a test can pin the actual values (README documents them as
+// 5 minutes and 1 hour) — every other test passes an explicit
+// everyMs/nowMs instead of exercising these constants, so nothing else
+// would catch a silent drift here.
+export const STALE_MS = 60 * 60 * 1000;
+export const EVERY_MS = 5 * 60 * 1000;
 
 export function dueLogs(db: Db, nowMs: number): RepoRef[] {
   // Nach indexed_at aufsteigend, NULL zuerst — ein nie erfasster Log ist
