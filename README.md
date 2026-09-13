@@ -43,3 +43,26 @@ sie findet. `readConfig` verlangt vier Umgebungsvariablen:
 | `GITHUB_APP_PRIVATE_KEY` | Ihr privater Schlüssel, PEM, base64-kodiert |
 | `GITHUB_WEBHOOK_SECRET` | Das Webhook-Secret der App |
 | `BASE_URL` | Die öffentliche Basis-URL des Diensts |
+
+## Betrieb
+
+Der Dienst gleicht sich selbst ab. Zwei Auslöser stoßen dieselbe Funktion an:
+
+- **Webhook.** `POST /webhook`, signiert mit `GITHUB_WEBHOOK_SECRET`. Eine
+  Zustellung ohne gültige Signatur wird verworfen, bevor ihr Inhalt gelesen
+  wird. Der Dienst antwortet sofort mit 202; der Abgleich läuft danach.
+- **Reconcile.** Alle fünf Minuten der Log mit dem ältesten `indexed_at`,
+  dazu jeder Log, der länger als eine Stunde nicht erfasst wurde.
+  Eingefrorene Logs sind eingeschlossen — nur so taut ein Log wieder auf,
+  dessen Repository zurückkommt.
+
+Ein verlorener Webhook kostet damit höchstens eine Reconcile-Runde. Der
+Abgleich vergleicht git-Blob-SHAs, kein Ereignisprotokoll: „Webhook nie
+angekommen" und „Index von Null neu bauen" sind derselbe Fall.
+
+| Variable | Bedeutung |
+|---|---|
+| `DB_PATH` | Pfad der SQLite-Datei, Vorgabe `./release-log.sqlite` |
+| `PORT` | Port des Dienstes, Vorgabe 8787 |
+
+`GET /health` antwortet 200, ohne den Index anzufassen.

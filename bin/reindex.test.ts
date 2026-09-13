@@ -223,3 +223,21 @@ test('buildClient produces a GitHub client that talks through the given http', a
 test('buildClient reports a missing environment rather than failing later', () => {
   assert.throws(() => buildClient({ GITHUB_APP_ID: '1' }, fakeHttp({})), /GITHUB_APP_PRIVATE_KEY/);
 });
+
+test('reindex reports a repository the app is not installed on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rlh-re-'));
+  try {
+    const db = openDb(join(dir, 'i.sqlite'));
+    const uninstalled: GitHub = {
+      probe: async () => ({ kind: 'no_installation' }),
+      tree: async () => [],
+      blob: async () => null,
+    };
+    const [outcome] = await reindex(db, uninstalled, [{ owner: 'o', repo: 'r' }]);
+    assert.equal(outcome.skipped, 'no_installation');
+    assert.equal(outcome.failed, false, 'missing installation is not a failure');
+    assert.equal(outcome.frozen, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -63,6 +63,8 @@ if (import.meta.main) {
   for (const [i, outcome] of outcomes.entries()) {
     const ref = refs[i];
     const state = outcome.failed ? 'failed'
+      : outcome.skipped === 'no_installation' ? 'no installation'
+      : outcome.skipped === 'no_commits' ? 'no commits yet'
       : outcome.frozen ? 'frozen'
       : outcome.logId === null ? 'not a log'
       : `${outcome.logId} (${outcome.fetched} fetched, ${outcome.errors} errors)`;
