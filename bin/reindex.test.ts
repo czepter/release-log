@@ -253,3 +253,27 @@ test('statusLine displays no_commits as "no commits yet"', () => {
   const outcome = { logId: null, fetched: 0, errors: 0, frozen: false, skipped: 'no_commits' as const, failed: false };
   assert.equal(statusLine(ref, outcome), 'o/r: no commits yet');
 });
+
+test('statusLine displays a frozen outcome as "frozen"', () => {
+  const ref = { owner: 'o', repo: 'r' };
+  const outcome = { logId: 'abc123', fetched: 0, errors: 0, frozen: true, skipped: null, failed: false };
+  assert.equal(statusLine(ref, outcome), 'o/r: frozen');
+});
+
+test('statusLine displays a failed outcome as "failed"', () => {
+  const ref = { owner: 'o', repo: 'r' };
+  const outcome = { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: true };
+  assert.equal(statusLine(ref, outcome), 'o/r: failed');
+});
+
+test('statusLine displays a null logId with nothing else set as "not a log"', () => {
+  const ref = { owner: 'o', repo: 'r' };
+  const outcome = { logId: null, fetched: 0, errors: 0, frozen: false, skipped: null, failed: false };
+  assert.equal(statusLine(ref, outcome), 'o/r: not a log');
+});
+
+test('statusLine displays a normal sync as the logId with its fetched and error counts', () => {
+  const ref = { owner: 'o', repo: 'r' };
+  const outcome = { logId: 'abc123', fetched: 3, errors: 1, frozen: false, skipped: null, failed: false };
+  assert.equal(statusLine(ref, outcome), 'o/r: abc123 (3 fetched, 1 errors)');
+});
