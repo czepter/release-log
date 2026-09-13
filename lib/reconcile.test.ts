@@ -72,6 +72,21 @@ test('a due log is named once, not twice, when both rules pick it', async () => 
   });
 });
 
+test('every never-indexed log is due, not just the oldest', async () => {
+  // The null-indexed_at branch needs its own test: a single null row cannot
+  // distinguish "the null branch fires for every null row" from "only the
+  // oldest-always rule happens to catch the one null row." A bulk GitHub App
+  // install produces several never-synced logs at once; only the null branch
+  // — not the oldest rule — makes all of them due in the same round.
+  await withDb(async (db) => {
+    insert(db, 'never1', 'never1', null);
+    insert(db, 'never2', 'never2', null);
+    insert(db, 'never3', 'never3', null);
+    const due = dueLogs(db, NOW).map((r) => r.repo).sort();
+    assert.deepEqual(due, ['never1', 'never2', 'never3']);
+  });
+});
+
 test('an empty index has nothing due', async () => {
   await withDb(async (db) => {
     assert.deepEqual(dueLogs(db, NOW), []);
