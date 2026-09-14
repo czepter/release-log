@@ -15,6 +15,10 @@ const CONFIG: AppConfig = {
   privateKey,
   webhookSecret: 'shhh',
   baseUrl: 'https://example.test',
+  clientId: 'Iv1.test',
+  clientSecret: 'test-client-secret',
+  signingKey: 'test-signing-key',
+  adminLogins: ['tester'],
 };
 
 function parts(token: string): { header: Record<string, unknown>; payload: Record<string, unknown> } {
