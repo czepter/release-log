@@ -21,7 +21,7 @@ import { installations } from './lib/appAuth.ts';
 import { githubClient } from './lib/github.ts';
 import { withRetry } from './lib/http.ts';
 import type { Http } from './lib/http.ts';
-import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed } from './lib/session.ts';
+import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { exchangeCodeForIdentity } from './lib/login.ts';
 import { permissions } from './lib/permissions.ts';
 import { syncLog } from './lib/index.ts';
@@ -237,7 +237,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         location: '/me',
         'set-cookie': [
           'oauth_state=; Max-Age=0; Path=/auth/github',
-          `session=${session}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000; Path=/`,
+          `session=${session}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/`,
         ],
       });
       res.end();
