@@ -77,3 +77,26 @@ export function refsFor(delivery: Delivery): RepoRef[] {
       return [];
   }
 }
+
+// Eine eigene Funktion, bewusst getrennt von refsFor: 'member' darf nie
+// einen Inhalts-Abgleich auslösen, nur den Rechte-Cache treffen. Es in
+// refsFor mit hineinzunehmen zwänge jeden Aufrufer, es dort wieder
+// herauszufiltern.
+export function permissionInvalidationRefsFor(delivery: Delivery): RepoRef[] {
+  const payload = (delivery.payload ?? {}) as Record<string, unknown>;
+  if (typeof payload !== 'object') return [];
+
+  switch (delivery.event) {
+    case 'member': {
+      const ref = refOf(payload.repository);
+      return ref ? [ref] : [];
+    }
+    // Dieselbe Zuordnung, die refsFor für den Abgleich benutzt -- ein
+    // Installationswechsel kann Rechte genauso verändern wie er Inhalte
+    // erreichbar macht.
+    case 'installation_repositories':
+      return [...listOf(payload.repositories_added), ...listOf(payload.repositories_removed)];
+    default:
+      return [];
+  }
+}
