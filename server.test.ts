@@ -6,9 +6,14 @@ import { join } from 'node:path';
 import { connect } from 'node:net';
 import { createHmac } from 'node:crypto';
 import { createApp } from './server.ts';
-import type { Hooks } from './server.ts';
+import type { Hooks, Auth } from './server.ts';
 import { fileReader } from './lib/store.ts';
 import type { Reader } from './lib/store.ts';
+import { openDb } from './lib/db/client.ts';
+import { account } from './lib/db/schema.ts';
+import { eq } from 'drizzle-orm';
+import { fakeHttp } from './lib/http.ts';
+import { createSessionCookie } from './lib/session.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -45,8 +50,9 @@ async function withServer(
   reader: Reader,
   fn: (base: string) => Promise<void>,
   hooks?: Hooks,
+  auth?: Auth,
 ): Promise<void> {
-  const server = createApp(reader, hooks);
+  const server = createApp(reader, hooks, auth);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('no port');
@@ -428,5 +434,192 @@ test('without a webhook secret configured the route does not exist', async () =>
   await withServer(reader, async (base) => {
     const res = await deliver(base, 'push', body, signed(body));
     assert.equal(res.status, 404);
+  });
+});
+
+const SIGNING_KEY = 'test-signing-key';
+
+function withAuth(fn: (auth: Auth, db: ReturnType<typeof openDb>) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'rlh-auth-'));
+  const db = openDb(join(dir, 'test.sqlite'));
+  const http = fakeHttp({
+    'POST /login/oauth/access_token': { body: { access_token: 'gho_test' } },
+    'GET /user': { body: { id: 42, login: 'octocat', avatar_url: 'https://example.test/a.png' } },
+  });
+  return fn(
+    { db, clientId: 'client-id', clientSecret: 'client-secret', signingKey: SIGNING_KEY, adminLogins: ['octocat'], baseUrl: 'https://example.test', http },
+    db,
+  ).finally(() => { rmSync(dir, { recursive: true, force: true }); });
+}
+
+function cookieValue(setCookies: string[], name: string): string | undefined {
+  for (const line of setCookies) {
+    const [pair] = line.split(';');
+    const eq = pair.indexOf('=');
+    if (pair.slice(0, eq) === name) return pair.slice(eq + 1);
+  }
+  return undefined;
+}
+
+test('GET /auth/github/login sets a state cookie and redirects with the same state', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/login`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location') as string);
+      assert.equal(location.origin, 'https://github.com');
+      assert.equal(location.pathname, '/login/oauth/authorize');
+      assert.equal(location.searchParams.get('client_id'), 'client-id');
+      assert.equal(location.searchParams.get('redirect_uri'), 'https://example.test/auth/github/callback');
+      const state = location.searchParams.get('state');
+      assert.ok(state, 'a state parameter must be present');
+      const cookieState = cookieValue(res.headers.getSetCookie(), 'oauth_state');
+      assert.equal(cookieState, state);
+    }, undefined, auth);
+  });
+});
+
+test('two logins in a row get two different states', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const a = await fetch(`${base}/auth/github/login`, { redirect: 'manual' });
+      const b = await fetch(`${base}/auth/github/login`, { redirect: 'manual' });
+      const stateA = new URL(a.headers.get('location') as string).searchParams.get('state');
+      const stateB = new URL(b.headers.get('location') as string).searchParams.get('state');
+      assert.notEqual(stateA, stateB);
+    }, undefined, auth);
+  });
+});
+
+test('the callback rejects a state that does not match the cookie', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=wrong`, {
+        redirect: 'manual',
+        headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 400);
+      assert.equal(res.headers.getSetCookie().some((c) => c.startsWith('session=')), false);
+    }, undefined, auth);
+  });
+});
+
+test('a successful login for an allowed login sets a session cookie and redirects to /me', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual',
+        headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/me');
+      const sessionCookie = cookieValue(res.headers.getSetCookie(), 'session');
+      assert.ok(sessionCookie, 'a session cookie must be set');
+      const rows = db.select().from(account).where(eq(account.githubUserId, 42)).all();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].login, 'octocat');
+    }, undefined, auth);
+  });
+});
+
+test('a successful GitHub identity that is not allowed gets a denial page and no session', async () => {
+  await withAuth(async (auth) => {
+    // octocat is the only admin in this fixture -- swap it out so the
+    // login that comes back from the fake is nobody's admin and is not
+    // in the allowlist table either.
+    const deniedAuth = { ...auth, adminLogins: ['somebody-else'] };
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual',
+        headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 403);
+      assert.equal(res.headers.getSetCookie().some((c) => c.startsWith('session=')), false);
+    }, undefined, deniedAuth);
+  });
+});
+
+test('a failed token exchange yields a 502 and no session', async () => {
+  await withAuth(async (auth) => {
+    const brokenHttp = fakeHttp({ 'POST /login/oauth/access_token': { status: 401 } });
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual',
+        headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 502);
+      assert.equal(res.headers.getSetCookie().some((c) => c.startsWith('session=')), false);
+    }, undefined, { ...auth, http: brokenHttp });
+  });
+});
+
+test('GET /me without a session answers 401', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`);
+      assert.equal(res.status, 401);
+    }, undefined, auth);
+  });
+});
+
+test('GET /me with a valid session answers with the login and admin flag', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-14T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { login: 'octocat', isAdmin: true });
+    }, undefined, auth);
+  });
+});
+
+test('GET /me with a session whose account row is gone answers 401, not a throw', async () => {
+  await withAuth(async (auth) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 999);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 401);
+    }, undefined, auth);
+  });
+});
+
+test('POST /auth/logout clears the session cookie', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/logout`, { method: 'POST' });
+      const cleared = res.headers.getSetCookie().find((c) => c.startsWith('session='));
+      assert.ok(cleared, 'a session cookie must be sent to clear the old one');
+      assert.match(cleared as string, /Max-Age=0/);
+    }, undefined, auth);
+  });
+});
+
+test('without auth configured, the login and /me routes do not exist', async () => {
+  await withServer(reader, async (base) => {
+    assert.equal((await fetch(`${base}/auth/github/login`, { redirect: 'manual' })).status, 404);
+    assert.equal((await fetch(`${base}/me`)).status, 404);
+  });
+});
+
+test('a member webhook delivery calls onPermissionInvalidation, not onDelivery', async () => {
+  const delivered: unknown[] = [];
+  const invalidated: unknown[] = [];
+  const body = JSON.stringify({ action: 'added', repository: { full_name: 'o/r' } });
+  const secret = 'hook-secret';
+  const sig = `sha256=${createHmac('sha256', secret).update(Buffer.from(body, 'utf8')).digest('hex')}`;
+  await withServer(reader, async (base) => {
+    const res = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'x-github-event': 'member', 'x-hub-signature-256': sig },
+      body,
+    });
+    assert.equal(res.status, 202);
+    assert.deepEqual(delivered, []);
+    assert.deepEqual(invalidated, [{ owner: 'o', repo: 'r' }]);
+  }, {
+    webhookSecret: secret,
+    onDelivery: (refs) => { delivered.push(...refs); },
+    onPermissionInvalidation: (refs) => { invalidated.push(...refs); },
   });
 });
