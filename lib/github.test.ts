@@ -353,10 +353,15 @@ test('an unexpected server error throws rather than reading as no access', async
 });
 
 test('a login with characters a URL path cannot carry raw is encoded', async () => {
+  // A space alone would not distinguish this: WHATWG URL percent-encodes a
+  // raw space on its own, so that fixture passes whether or not the code
+  // calls encodeURIComponent. A slash does distinguish it -- left raw, it
+  // re-segments the request path and the lookup silently 404s to null
+  // instead of reaching the fixed route below.
   const http = fakeHttp({
-    'GET /repos/o/r/collaborators/weird%20name/permission': { body: { permission: 'admin' } },
+    'GET /repos/o/r/collaborators/a%2Fb/permission': { body: { permission: 'admin' } },
   });
-  const level = await githubClient(withToken('t'), http).collaboratorPermission(REF, 'weird name');
+  const level = await githubClient(withToken('t'), http).collaboratorPermission(REF, 'a/b');
   assert.equal(level, 'admin');
 });
 
