@@ -60,3 +60,32 @@ export const problem = sqliteTable('problem', {
   message: text('message').notNull(),
   at: text('at').notNull(),
 });
+
+// Whoever has signed in successfully. Admin right is not a column here —
+// it is ADMIN_LOGINS from the environment, checked fresh every time, never
+// stored (spec §5).
+export const account = sqliteTable('account', {
+  githubUserId: integer('github_user_id').primaryKey(),
+  login: text('login').notNull(),
+  avatarUrl: text('avatar_url'),
+  lastSeenAt: text('last_seen_at').notNull(),
+});
+
+// Who may sign in at all, beyond ADMIN_LOGINS. Starts empty; nothing in
+// this plan writes to it yet — only a future admin UI (Plan 6) does.
+export const allowlist = sqliteTable('allowlist', {
+  githubLogin: text('github_login').primaryKey(),
+  addedBy: text('added_by').notNull(),
+  addedAt: text('added_at').notNull(),
+  note: text('note'),
+});
+
+// A cached answer to "does this account have write access to this log's
+// repository", good for five minutes (spec §5). Keyed by the pair, not by
+// account alone: one person can hold different rights on different logs.
+export const repoPermission = sqliteTable('repo_permission', {
+  accountId: integer('account_id').notNull(),
+  logId: text('log_id').notNull(),
+  canWrite: integer('can_write', { mode: 'boolean' }).notNull(),
+  checkedAt: text('checked_at').notNull(),
+}, (t) => [primaryKey({ columns: [t.accountId, t.logId] })]);

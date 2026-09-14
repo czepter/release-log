@@ -15,6 +15,13 @@
       "when": 1788953814090,
       "tag": "0001_spicy_stardust",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789411704951,
+      "tag": "0002_familiar_blacklash",
+      "breakpoints": true
     }
   ]
 }
