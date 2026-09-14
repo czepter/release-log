@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { openDb } from './db/client.ts';
 import type { Db } from './db/client.ts';
-import { log, release, syncError, problem, media } from './db/schema.ts';
+import { log, release, syncError, problem, media, repoPermission } from './db/schema.ts';
 import type { GitHub } from './github.ts';
 import { fakeGitHub, blobSha } from './github.ts';
 import { syncLog } from './index.ts';
@@ -182,6 +182,13 @@ test("changing a repository's id retires its old log, releases, media and errors
     assert.equal(db.select().from(media).all().length, 1);
     assert.equal(db.select().from(syncError).all().length, 1);
 
+    // A cached permission row under the OLD id, the same way lib/permissions.ts
+    // would have left one behind for some account that once checked write
+    // access on this log.
+    db.insert(repoPermission).values({
+      accountId: 1, logId: 'abc123', canWrite: true, checkedAt: new Date().toISOString(),
+    }).run();
+
     // Same repository, but release-log.json's id field was hand-edited.
     const newConfig = JSON.stringify({ id: 'xyz789', product: 'Demo', view: 'full', visibility: 'public' });
     const after = { ...before, 'release-log.json': newConfig };
@@ -203,6 +210,9 @@ test("changing a repository's id retires its old log, releases, media and errors
     const errors = db.select().from(syncError).all();
     assert.equal(errors.length, 1, 'no orphaned sync_error row under the old id');
     assert.equal(errors[0].logId, 'xyz789');
+
+    const permissionRows = db.select().from(repoPermission).all();
+    assert.equal(permissionRows.length, 0, 'no orphaned repo_permission row under the old id');
   });
 });
 
