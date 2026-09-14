@@ -32,6 +32,10 @@ export type GitHub = {
   probe(ref: RepoRef): Promise<RepoState>;
   tree(ref: RepoRef, commit: string): Promise<TreeEntry[]>;
   blob(ref: RepoRef, sha: string): Promise<Buffer | null>;
+  // GitHub entscheidet über Rechte, nicht diese App (spec §5, Entscheidung
+  // 14). null heißt "keine Antwort möglich" -- der Aufrufer behandelt das
+  // wie 'none', nie wie Schreibrecht.
+  collaboratorPermission(ref: RepoRef, login: string): Promise<'admin' | 'write' | 'read' | 'none' | null>;
 };
 
 // git hashes a blob as sha1("blob <byte length>\0" + content).
@@ -76,6 +80,9 @@ export function fakeGitHub(repos: Record<string, Record<string, string | Buffer>
         if (blobSha(bytes) === sha) return bytes;
       }
       return null;
+    },
+    async collaboratorPermission(ref) {
+      return entriesOf(ref) === null ? null : 'write';
     },
   };
 }
@@ -184,6 +191,16 @@ export function githubClient(inst: Installations, http: Http): GitHub {
       // GitHub wraps base64 content at 60 characters; Buffer.from ignores
       // the newlines, but strip them so the input is what it claims to be.
       return Buffer.from(body.content.replace(/\n/g, ''), 'base64');
+    },
+
+    async collaboratorPermission(ref, login) {
+      const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/collaborators/${encodeURIComponent(login)}/permission`);
+      if (res === null || res.status === 404) return null;
+      if (!res.ok) throw new Error(`collaborator permission lookup failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { permission?: string };
+      return body.permission === 'admin' || body.permission === 'write' || body.permission === 'read'
+        ? body.permission
+        : 'none';
     },
   };
 }

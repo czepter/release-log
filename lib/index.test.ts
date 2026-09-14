@@ -223,6 +223,7 @@ function counting(gh: GitHub): { gh: GitHub; blobs: string[] } {
   return {
     blobs,
     gh: {
+      collaboratorPermission: (ref, login) => gh.collaboratorPermission(ref, login),
       probe: (ref) => gh.probe(ref),
       tree: (ref, commit) => gh.tree(ref, commit),
       blob: (ref, sha) => { blobs.push(sha); return gh.blob(ref, sha); },
@@ -256,6 +257,7 @@ test('a sync that throws partway through leaves head_sha at the previous value',
     const changed = { ...files, 'releases/2.0.0.json': second };
     const base = fakeGitHub({ 'o/r': changed });
     const failing: GitHub = {
+      collaboratorPermission: async () => null,
       probe: (ref) => base.probe(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async () => { throw new Error('rate limited'); },
@@ -530,6 +532,7 @@ test('an indexed media file whose blob comes back null on a later sync is droppe
     const editedSha = blobSha(edited);
     const base = fakeGitHub({ 'o/r': { 'release-log.json': CONFIG, 'media/shot.png': edited } });
     const missingBlob: GitHub = {
+      collaboratorPermission: async () => null,
       probe: (ref) => base.probe(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async (ref, sha) => (sha === editedSha ? null : base.blob(ref, sha)),
@@ -564,6 +567,7 @@ test('a sync without an installation leaves the stored node id alone', async () 
     let treeCalled = false;
     let blobCalled = false;
     const uninstalled: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'no_installation' }),
       tree: async (ref, commit) => { treeCalled = true; return base.tree(ref, commit); },
       blob: async (ref, sha) => { blobCalled = true; return base.blob(ref, sha); },
@@ -592,6 +596,7 @@ test('a repository the app is not installed on is skipped, not frozen', async ()
     // Spec §10: Installation suspendiert oder entfernt -> kein Abgleich,
     // Auslieferung läuft. Einfrieren wäre hier der teure Fehler.
     const uninstalled: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'no_installation' }),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
@@ -668,6 +673,7 @@ test('(Finding 3) a no_installation result stamps indexed_at on the existing row
     const before = Date.now();
 
     const uninstalled: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'no_installation' }),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
@@ -685,6 +691,7 @@ test('(Finding 3) a no_installation result stamps indexed_at on the existing row
 test('a repository with no commits is skipped without a problem row', async () => {
   await withDb(async (db) => {
     const empty: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'empty', nodeId: 'R_1' }),
       tree: async () => [],
       blob: async () => null,
@@ -708,6 +715,7 @@ test('a repository with no commits is skipped without a problem row', async () =
 test("a stale ref's sync converges the row on the canonical name probe() reports, not the ref it was called with", async () => {
   await withDb(async (db) => {
     const gh: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_1', owner: 'o', repo: 'new-name' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(CONFIG), size: CONFIG.length }],
       blob: async (_ref, sha) => (sha === blobSha(CONFIG) ? Buffer.from(CONFIG) : null),
@@ -729,6 +737,7 @@ test('a renamed repository keeps its log, anchored on the node id', async () => 
 
     // Dasselbe Repo unter neuem Namen: gleiche Node-ID, anderer Pfad.
     const renamed: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: before.repoNodeId as string }),
       tree: async () => fakeGitHub({ 'o/r': files }).tree(REF, 'c1'),
       blob: (ref, sha) => fakeGitHub({ 'o/r': files }).blob(REF, sha),
@@ -772,6 +781,7 @@ test('(b) the rightful holder re-syncing under a new name keeps its log', async 
     const before = db.select().from(log).all()[0];
 
     const renamed: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: before.repoNodeId as string }),
       tree: async () => fakeGitHub({ 'o/r': files }).tree(REF, 'c1'),
       blob: (ref, sha) => fakeGitHub({ 'o/r': files }).blob(REF, sha),
@@ -803,6 +813,7 @@ test('(c) a claimant row with a NULL node id is adopted, not refused', async () 
 
     const config = JSON.stringify({ id: 'legacy-id', product: 'Legacy', view: 'full', visibility: 'public' });
     const gh: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(config), size: config.length }],
       blob: async (_ref, sha) => (sha === blobSha(config) ? Buffer.from(config) : null),
@@ -842,6 +853,7 @@ test('a repository renamed onto a name a frozen log still holds is refused, not 
     // log-a's repository (unrelated to log-b) renames into the name
     // log-b's frozen log still holds.
     const renamed: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c-renamed', nodeId: rowA.repoNodeId as string }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configA), size: configA.length }],
       blob: async (_ref, sha) => (sha === blobSha(configA) ? Buffer.from(configA) : null),
@@ -881,6 +893,7 @@ test('a stale ref whose canonical name is already held by a frozen log is refuse
     // its canonical name has moved to 'o/new' — the same path log-b's
     // frozen row still holds.
     const gh: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_a', owner: 'o', repo: 'new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configA), size: configA.length }],
       blob: async (_ref, sha) => (sha === blobSha(configA) ? Buffer.from(configA) : null),
@@ -932,6 +945,7 @@ test('a rename onto a path an active row holds does not delete that row', async 
     // log-y legitimately holds — and synced.
     const configX = JSON.stringify({ id: 'log-x', product: 'X', view: 'full', visibility: 'public' });
     const renamed: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c-renamed', nodeId: 'R_x_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configX), size: configX.length }],
       blob: async (_ref, sha) => (sha === blobSha(configX) ? Buffer.from(configX) : null),
@@ -983,6 +997,7 @@ test('a legacy row synced under its own path is adopted and gets its node id fil
 
     let configBlobFetches = 0;
     const gh: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(config), size: config.length }],
       blob: async (_ref, sha) => {
@@ -1038,6 +1053,7 @@ test('a different repository synced onto a legacy NULL-node-id row\'s path is re
     // row occupies. Not a rename of the legacy repo: an unrelated one.
     const configOther = JSON.stringify({ id: 'other-id', product: 'Other', view: 'full', visibility: 'public' });
     const gh: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_other' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configOther), size: configOther.length }],
       blob: async (_ref, sha) => (sha === blobSha(configOther) ? Buffer.from(configOther) : null),
@@ -1069,6 +1085,7 @@ test('a rename onto a path a frozen row holds is refused when the incoming repos
     // record — nameHolder is the frozen row, known is null.
     const configB = JSON.stringify({ id: 'log-b', product: 'B', view: 'full', visibility: 'public' });
     const incoming: GitHub = {
+      collaboratorPermission: async () => null,
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_b_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configB), size: configB.length }],
       blob: async (_ref, sha) => (sha === blobSha(configB) ? Buffer.from(configB) : null),
