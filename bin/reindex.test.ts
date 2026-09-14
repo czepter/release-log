@@ -166,6 +166,10 @@ const PEM_ENV = {
   GITHUB_APP_PRIVATE_KEY: '',
   GITHUB_WEBHOOK_SECRET: 'shhh',
   BASE_URL: 'https://example.test',
+  GITHUB_CLIENT_ID: 'Iv1.test',
+  GITHUB_CLIENT_SECRET: 'test-client-secret',
+  SIGNING_KEY: 'test-signing-key',
+  ADMIN_LOGINS: 'tester',
 };
 
 test('buildClient produces a GitHub client that talks through the given http', async () => {
