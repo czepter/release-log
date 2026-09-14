@@ -52,6 +52,7 @@ export function verifySessionCookie(
   } catch {
     return null;
   }
+  if (payload === null || typeof payload !== 'object') return null;
   if (typeof payload.accountId !== 'number' || typeof payload.exp !== 'number') return null;
   if (payload.exp <= nowSeconds) return null;
   return { accountId: payload.accountId };
