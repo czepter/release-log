@@ -99,17 +99,35 @@ test('two different accounts on the same log are cached separately', async () =>
   });
 });
 
-test('invalidate clears the cache for every account on that log, keyed by repository', async () => {
+test('invalidate clears the cache for every account on that log, keyed by repository, and leaves other logs untouched', async () => {
   await withDb(async (db) => {
     insertLog(db, 'log1', 'o', 'r');
+    // A second log, with its own cached permission row -- if invalidate's
+    // delete were ever loosened to `db.delete(repoPermission).run()`
+    // (clearing the WHOLE table instead of just this log's rows), a test
+    // with only one log in the database could never catch that: there
+    // would be nothing else to leave behind.
+    const OTHER_REF = { owner: 'o2', repo: 'r2' };
+    insertLog(db, 'log2', OTHER_REF.owner, OTHER_REF.repo);
+
     const { gh, calls } = counting('write');
     const perms = permissions(db, gh, () => 1_000_000);
     await perms.canWrite(1, 'alice', 'log1', REF);
     await perms.canWrite(2, 'bob', 'log1', REF);
+    await perms.canWrite(3, 'carol', 'log2', OTHER_REF);
+    assert.equal(calls(), 3);
+
     perms.invalidate(REF);
+
+    // log1's cache is gone: both accounts must be re-checked, not just the
+    // one the event happened to name.
     await perms.canWrite(1, 'alice', 'log1', REF);
     await perms.canWrite(2, 'bob', 'log1', REF);
-    assert.equal(calls(), 4, 'both accounts must be re-checked, not just the one the event happened to name');
+    assert.equal(calls(), 5, 'both log1 accounts must be re-checked against GitHub');
+
+    // log2's cache must survive: re-checking it must NOT ask GitHub again.
+    await perms.canWrite(3, 'carol', 'log2', OTHER_REF);
+    assert.equal(calls(), 5, "invalidating log1 must not touch log2's cached row");
   });
 });
 
