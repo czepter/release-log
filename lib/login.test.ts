@@ -29,6 +29,36 @@ test('the user token reaches GET /user as a bearer header and nowhere else', asy
   assert.deepEqual(seen, ['', 'Bearer gho_secret_value']);
 });
 
+test('the token exchange POSTs to github.com with the full body GitHub expects', async () => {
+  // fakeHttp's routing key is METHOD + pathname + search only (see
+  // lib/http.ts's keyOf) -- it discards the host entirely, so no test
+  // built only on fakeHttp's routes can tell github.com apart from
+  // evil.example, and none of the existing tests inspect the request body
+  // at all. Capture both directly, on the raw url/init this module hands
+  // to http(), before fakeHttp ever sees them.
+  const calls: { url: string; body: string }[] = [];
+  const inner = fakeHttp({
+    'POST /login/oauth/access_token': { body: { access_token: 'gho_abc' } },
+    'GET /user': { body: { id: 42, login: 'octocat', avatar_url: null } },
+  });
+  const http = Object.assign(
+    (url: string, init?: RequestInit) => {
+      calls.push({ url, body: String(init?.body ?? '') });
+      return inner(url, init);
+    },
+    { calls: inner.calls },
+  );
+  await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/auth/github/callback');
+
+  assert.ok(calls[0].url.startsWith('https://github.com/'), `expected a github.com URL, got ${calls[0].url}`);
+  assert.deepEqual(JSON.parse(calls[0].body), {
+    client_id: 'client-id',
+    client_secret: 'client-secret',
+    code: 'the-code',
+    redirect_uri: 'https://example.test/auth/github/callback',
+  });
+});
+
 test('a missing avatar_url becomes null, not undefined or a throw', async () => {
   const http = fakeHttp({
     'POST /login/oauth/access_token': { body: { access_token: 't' } },
