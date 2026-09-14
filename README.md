@@ -84,3 +84,15 @@ Adminrecht kommt ausschließlich aus `ADMIN_LOGINS` — es gibt keine
 Datenbankspalte dafür. Wer sonst zugelassen ist, steht in der
 `allowlist`-Tabelle; ohne Dashboard (kommt in einem späteren Plan) lässt
 sie sich nur von Hand füllen.
+
+### Repo-Rechte
+
+Ob ein Konto Schreibzugriff auf das Repository hinter einem Log hat, wird
+gegen GitHub geprüft und fünf Minuten je (Konto, Log) im Cache gehalten.
+Der Cache wird früher invalidiert, wenn `member`, `installation_repositories`
+oder `installation` eintrifft — eine Mitgliedschafts- oder
+Installationsänderung kann genau dieses Recht betreffen. Eine Übertragung
+oder Löschung des Repositories (über das `repository`-Ereignis, das nur
+den Inhalts-Abgleich anstößt) tut das nicht: ein gecachtes „ja" kann bis zu
+fünf Minuten über ein solches Ereignis hinaus bestehen bleiben, dieselbe
+Fünf-Minuten-Obergrenze wie sonst auch.
