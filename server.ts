@@ -5,7 +5,7 @@
 // to live here, in transport, where the bytes actually get written.
 
 import { createServer } from 'node:http';
-import type { Server } from 'node:http';
+import type { Server, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { route } from './lib/public.ts';
 import type { Reader } from './lib/store.ts';
@@ -69,288 +69,328 @@ function htmlPage(title: string, body: string): string {
   return `<!doctype html><title>${title}</title><p>${body}</p>`;
 }
 
+// The last-resort net: log the message only (never the whole error object,
+// since some error shapes -- e.g. a failed fetch -- can carry request
+// internals) and answer 500 if nothing has gone out yet. Shared by the
+// outer listener wrapper below and the /webhook 'end' handler, which is a
+// separate callback the outer try/catch's dynamic scope has already
+// finished by the time it fires and so cannot catch on its own.
+function respondInternalError(res: ServerResponse, err: unknown): void {
+  console.error('request failed:', err instanceof Error ? err.message : err);
+  if (!res.headersSent) {
+    res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: 'internal_error' }));
+  }
+}
+
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
   return createServer(async (req, res) => {
-    const method = req.method ?? 'GET';
-
-    // Base is a constant: only pathname and searchParams are ever read from
-    // this URL, so req.headers.host (attacker-controlled) has no business
-    // being part of it. That alone is not enough — a malformed request
-    // target (e.g. "//[/x", which Node's HTTP parser passes through as
-    // req.url unvalidated) still throws here. Answer 400 instead of letting
-    // the exception escape the listener, which would crash the process.
-    let url: URL;
+    // Everything below runs inside one try/catch: a synchronous throw
+    // anywhere in here -- e.g. isAllowed's db.select() on a locked or
+    // corrupted sqlite file, which runs for every /auth/github/callback
+    // caller before the allowlist decision is even made -- would otherwise
+    // escape the listener as an unhandled rejection and crash the whole
+    // process, silently (no log line), for every in-flight request, not
+    // just the one that triggered it. This does NOT reach the /webhook
+    // branch's req.on('end', ...) callback below: that callback runs on a
+    // later tick, after this try's dynamic scope has already finished, so
+    // it carries its own try/catch (using the same respondInternalError).
     try {
-      url = new URL(req.url ?? '/', 'http://localhost');
-    } catch {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'bad_request' }));
-      return;
-    }
-    const pathname = url.pathname.replace(/\/+$/, '') || '/';
+      const method = req.method ?? 'GET';
 
-    if (pathname === '/health') {
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(method === 'HEAD' ? undefined : JSON.stringify({ ok: true }));
-      return;
-    }
-
-    if (pathname === '/webhook') {
-      // Falling through to route() here would answer 405 (it checks method
-      // before pathname), not 404 -- an unconfigured deployment would then
-      // leak that /webhook is a real route, just one that rejects the verb.
-      // The interface promises a route that plain does not exist without a
-      // secret, so that has to be decided right here, not by the generic
-      // fallback below.
-      if (!hooks || method !== 'POST') {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let refused = false;
-      req.on('data', (chunk: Buffer) => {
-        if (refused) return;
-        size += chunk.length;
-        if (size > WEBHOOK_MAX_BYTES) {
-          // Abort instead of reading on: the rest of the body is no use to
-          // anyone at that point, and buffering it anyway would be exactly
-          // what the limit exists to prevent.
-          refused = true;
-          res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'payload_too_large' }));
-          req.destroy();
-          return;
-        }
-        chunks.push(chunk);
-      });
-      req.on('end', () => {
-        if (refused) return;
-        const body = Buffer.concat(chunks);
-        // Verify before parsing (spec §10). Everything below this line
-        // handles bytes known to have come from GitHub; everything above it
-        // only touches them to count them.
-        if (!verifySignature(hooks.webhookSecret, body, req.headers['x-hub-signature-256'] as string | undefined)) {
-          res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'bad_signature' }));
-          return;
-        }
-        let payload: unknown;
-        try {
-          payload = JSON.parse(body.toString('utf8'));
-        } catch {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'bad_request' }));
-          return;
-        }
-        const event = String(req.headers['x-github-event'] ?? '');
-        // Accepted, not done: the reconcile runs afterward, off the queue.
-        // GitHub needs a fast answer, and whether the reconcile succeeds
-        // doesn't change the fact that the delivery arrived.
-        hooks.onDelivery(refsFor({ event, payload }));
-        hooks.onPermissionInvalidation?.(permissionInvalidationRefsFor({ event, payload }));
-        res.writeHead(202, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ accepted: true }));
-      });
-      return;
-    }
-
-    if (pathname === '/auth/github/login' && method === 'GET') {
-      if (!auth) {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'not_found' }));
-        return;
-      }
-      const state = randomBytes(32).toString('base64url');
-      const authorize = new URL('https://github.com/login/oauth/authorize');
-      authorize.searchParams.set('client_id', auth.clientId);
-      authorize.searchParams.set('redirect_uri', `${auth.baseUrl}/auth/github/callback`);
-      authorize.searchParams.set('state', state);
-      res.writeHead(302, {
-        location: authorize.toString(),
-        'set-cookie': `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`,
-      });
-      res.end();
-      return;
-    }
-
-    if (pathname === '/auth/github/callback' && method === 'GET') {
-      if (!auth) {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'not_found' }));
-        return;
-      }
-      const code = url.searchParams.get('code');
-      const state = url.searchParams.get('state');
-      const cookieState = cookieValue(req.headers.cookie, 'oauth_state');
-      // A random, cookie-bound value an attacker can neither read nor guess
-      // -- there is no secret here for a timing side-channel to extract, so
-      // plain equality is deliberate, not an oversight (plan, "Abweichungen").
-      if (!code || !state || !cookieState || state !== cookieState) {
-        res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(htmlPage('Anmeldung fehlgeschlagen', 'Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.'));
-        return;
-      }
-
-      // exchangeCodeForIdentity documents a returned null for every failure
-      // it recognizes, but a genuine network failure (fetch rejecting, the
-      // timeout firing, a non-JSON response body) surfaces as a REJECTED
-      // promise, not a null -- and this is the only file with a socket, so
-      // letting that escape the listener would crash the whole process on
-      // an attacker-controlled request (code/state are both unauthenticated
-      // input). To the caller a throw and a null mean the same thing --
-      // GitHub could not be reached correctly -- so both get the same 502.
-      let identity;
+      // Base is a constant: only pathname and searchParams are ever read from
+      // this URL, so req.headers.host (attacker-controlled) has no business
+      // being part of it. That alone is not enough — a malformed request
+      // target (e.g. "//[/x", which Node's HTTP parser passes through as
+      // req.url unvalidated) still throws here. Answer 400 instead of letting
+      // the exception escape the listener, which would crash the process.
+      let url: URL;
       try {
-        identity = await exchangeCodeForIdentity(
-          auth.http, auth.clientId, auth.clientSecret, code, `${auth.baseUrl}/auth/github/callback`,
-        );
+        url = new URL(req.url ?? '/', 'http://localhost');
       } catch {
-        identity = null;
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'bad_request' }));
+        return;
       }
-      if (!identity) {
-        res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(htmlPage('GitHub nicht erreichbar', 'Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.'));
+      const pathname = url.pathname.replace(/\/+$/, '') || '/';
+
+      if (pathname === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(method === 'HEAD' ? undefined : JSON.stringify({ ok: true }));
         return;
       }
 
-      // The allowlist check runs before anything is written: a denied
-      // person must leave zero trace -- no account row, no session cookie.
-      if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
-        res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(htmlPage('Kein Zugriff', 'Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen.'));
-        return;
-      }
-
-      const nowIso = new Date().toISOString();
-      auth.db.insert(account)
-        .values({ githubUserId: identity.id, login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso })
-        .onConflictDoUpdate({
-          target: account.githubUserId,
-          set: { login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso },
-        })
-        .run();
-
-      const session = createSessionCookie(auth.signingKey, identity.id);
-      res.writeHead(302, {
-        location: '/me',
-        'set-cookie': [
-          'oauth_state=; Max-Age=0; Path=/auth/github',
-          `session=${session}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/`,
-        ],
-      });
-      res.end();
-      return;
-    }
-
-    if (pathname === '/auth/logout' && method === 'POST') {
-      if (!auth) {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'not_found' }));
-        return;
-      }
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'set-cookie': 'session=; Max-Age=0; Path=/',
-      });
-      res.end(JSON.stringify({ loggedOut: true }));
-      return;
-    }
-
-    if (pathname === '/me' && method === 'GET') {
-      if (!auth) {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'not_found' }));
-        return;
-      }
-      const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
-      const row = session
-        ? auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0]
-        : undefined;
-      if (!row) {
-        res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'unauthorized' }));
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ login: row.login, isAdmin: isAdmin(row.login, auth.adminLogins) }));
-      return;
-    }
-
-    // Viewer is 'public' until sessions exist. Drafts and private logs stay
-    // invisible until then, which is the safe direction.
-    const viewer = 'public';
-
-    // url.pathname is percent-encoded (new URL never decodes it), so a media
-    // filename with a space or non-ASCII character only matches the file on
-    // disk once decoded. Decode the captured path exactly once, here, and
-    // never transform it again — a second decode is how a path guard gets
-    // bypassed (%252e%252e%252f survives one decode as %2e%2e%2f, and a
-    // second decode turns that into ../). decodeURIComponent throws on
-    // malformed input like %zz; that is a 404, not a crashed request.
-    const media = /^\/l\/([^/]+)\/media\/(.+)$/.exec(pathname);
-    if (media && (method === 'GET' || method === 'HEAD')) {
-      let mediaPath: string;
-      try {
-        mediaPath = decodeURIComponent(media[2]);
-      } catch {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
-        return;
-      }
-
-      // media[1] (the log id) is looked up undecoded, unlike mediaPath above.
-      // That is deliberate, not an oversight: undecoded is the safe
-      // direction here, since a decode could only ever turn a non-matching
-      // id into a different non-matching id. route() below makes the same
-      // choice for the log id segment it extracts from pathname. Do not
-      // add a decode here to "match" the media path -- that would be a
-      // second decode on a segment nothing has decoded once yet.
-      const config = reader.config(media[1]);
-      const blob = config && config.visibility === 'public'
-        ? reader.media(media[1], mediaPath)
-        : null;
-      if (blob) {
-        res.writeHead(200, {
-          'content-type': blob.type,
-          'content-length': blob.bytes.length,
-          'cache-control': MEDIA_CACHE,
-          'access-control-allow-origin': '*',
+      if (pathname === '/webhook') {
+        // Falling through to route() here would answer 405 (it checks method
+        // before pathname), not 404 -- an unconfigured deployment would then
+        // leak that /webhook is a real route, just one that rejects the verb.
+        // The interface promises a route that plain does not exist without a
+        // secret, so that has to be decided right here, not by the generic
+        // fallback below.
+        if (!hooks || method !== 'POST') {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        let refused = false;
+        req.on('data', (chunk: Buffer) => {
+          if (refused) return;
+          size += chunk.length;
+          if (size > WEBHOOK_MAX_BYTES) {
+            // Abort instead of reading on: the rest of the body is no use to
+            // anyone at that point, and buffering it anyway would be exactly
+            // what the limit exists to prevent.
+            refused = true;
+            res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'payload_too_large' }));
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
         });
-        res.end(method === 'HEAD' ? undefined : blob.bytes);
+        req.on('end', () => {
+          if (refused) return;
+          // This callback fires on its own later tick, outside the dynamic
+          // scope of the try/catch wrapping the rest of this listener (that
+          // try has already returned, via the `return` a few lines below the
+          // req.on registrations, by the time 'end' fires) -- so it needs its
+          // own net. hooks.onDelivery and onPermissionInvalidation both run
+          // synchronous sqlite statements with nothing above them catching a
+          // throw (e.g. a locked/corrupted database), which would otherwise
+          // crash the process from inside an event handler, silently.
+          try {
+            const body = Buffer.concat(chunks);
+            // Verify before parsing (spec §10). Everything below this line
+            // handles bytes known to have come from GitHub; everything above
+            // it only touches them to count them.
+            if (!verifySignature(hooks.webhookSecret, body, req.headers['x-hub-signature-256'] as string | undefined)) {
+              res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ error: 'bad_signature' }));
+              return;
+            }
+            let payload: unknown;
+            try {
+              payload = JSON.parse(body.toString('utf8'));
+            } catch {
+              res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ error: 'bad_request' }));
+              return;
+            }
+            const event = String(req.headers['x-github-event'] ?? '');
+            // Accepted, not done: the reconcile runs afterward, off the queue.
+            // GitHub needs a fast answer, and whether the reconcile succeeds
+            // doesn't change the fact that the delivery arrived.
+            hooks.onDelivery(refsFor({ event, payload }));
+            hooks.onPermissionInvalidation?.(permissionInvalidationRefsFor({ event, payload }));
+            res.writeHead(202, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ accepted: true }));
+          } catch (err) {
+            respondInternalError(res, err);
+          }
+        });
         return;
       }
-      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
-      return;
-    }
 
-    const reply = route(method, pathname, url.searchParams, reader, viewer);
-    // Only a served log gets the cross-origin header. A private or missing log
-    // answers 404 without it, so the two stay indistinguishable (spec §7).
-    const headers: Record<string, string | number> = {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': JSON_CACHE,
-    };
-    if (reply.status === 200) headers['access-control-allow-origin'] = '*';
-
-    // The ETag is the commit the log was read at, so it changes exactly
-    // when the content does. Only a served log gets one; a 404 must stay
-    // indistinguishable between "missing" and "private" (spec §7).
-    const logMatch = /^\/l\/([^/]+)\//.exec(pathname + '/');
-    const tag = reply.status === 200 && logMatch ? reader.etag(logMatch[1]) : null;
-    if (tag !== null) {
-      const quoted = `"${tag}"`;
-      headers['etag'] = quoted;
-      if (req.headers['if-none-match'] === quoted) {
-        res.writeHead(304, headers);
+      if (pathname === '/auth/github/login' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const state = randomBytes(32).toString('base64url');
+        const authorize = new URL('https://github.com/login/oauth/authorize');
+        authorize.searchParams.set('client_id', auth.clientId);
+        authorize.searchParams.set('redirect_uri', `${auth.baseUrl}/auth/github/callback`);
+        authorize.searchParams.set('state', state);
+        res.writeHead(302, {
+          location: authorize.toString(),
+          'set-cookie': `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`,
+        });
         res.end();
         return;
       }
+
+      if (pathname === '/auth/github/callback' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const cookieState = cookieValue(req.headers.cookie, 'oauth_state');
+        // A random, cookie-bound value an attacker can neither read nor guess
+        // -- there is no secret here for a timing side-channel to extract, so
+        // plain equality is deliberate, not an oversight (plan, "Abweichungen").
+        if (!code || !state || !cookieState || state !== cookieState) {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(htmlPage('Anmeldung fehlgeschlagen', 'Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.'));
+          return;
+        }
+
+        // exchangeCodeForIdentity documents a returned null for every failure
+        // it recognizes, but a genuine network failure (fetch rejecting, the
+        // timeout firing, a non-JSON response body) surfaces as a REJECTED
+        // promise, not a null -- and this is the only file with a socket, so
+        // letting that escape the listener would crash the whole process on
+        // an attacker-controlled request (code/state are both unauthenticated
+        // input). To the caller a throw and a null mean the same thing --
+        // GitHub could not be reached correctly -- so both get the same 502.
+        let identity;
+        try {
+          identity = await exchangeCodeForIdentity(
+            auth.http, auth.clientId, auth.clientSecret, code, `${auth.baseUrl}/auth/github/callback`,
+          );
+        } catch {
+          identity = null;
+        }
+        if (!identity) {
+          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(htmlPage('GitHub nicht erreichbar', 'Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.'));
+          return;
+        }
+
+        // The allowlist check runs before anything is written: a denied
+        // person must leave zero trace -- no account row, no session cookie.
+        if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(htmlPage('Kein Zugriff', 'Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen.'));
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        auth.db.insert(account)
+          .values({ githubUserId: identity.id, login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso })
+          .onConflictDoUpdate({
+            target: account.githubUserId,
+            set: { login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso },
+          })
+          .run();
+
+        const session = createSessionCookie(auth.signingKey, identity.id);
+        res.writeHead(302, {
+          location: '/me',
+          'set-cookie': [
+            'oauth_state=; Max-Age=0; Path=/auth/github',
+            `session=${session}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/`,
+          ],
+        });
+        res.end();
+        return;
+      }
+
+      if (pathname === '/auth/logout' && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'set-cookie': 'session=; Max-Age=0; Path=/',
+        });
+        res.end(JSON.stringify({ loggedOut: true }));
+        return;
+      }
+
+      if (pathname === '/me' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
+        const row = session
+          ? auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0]
+          : undefined;
+        if (!row) {
+          res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'unauthorized' }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ login: row.login, isAdmin: isAdmin(row.login, auth.adminLogins) }));
+        return;
+      }
+
+      // Viewer is 'public' until sessions exist. Drafts and private logs stay
+      // invisible until then, which is the safe direction.
+      const viewer = 'public';
+
+      // url.pathname is percent-encoded (new URL never decodes it), so a media
+      // filename with a space or non-ASCII character only matches the file on
+      // disk once decoded. Decode the captured path exactly once, here, and
+      // never transform it again — a second decode is how a path guard gets
+      // bypassed (%252e%252e%252f survives one decode as %2e%2e%2f, and a
+      // second decode turns that into ../). decodeURIComponent throws on
+      // malformed input like %zz; that is a 404, not a crashed request.
+      const media = /^\/l\/([^/]+)\/media\/(.+)$/.exec(pathname);
+      if (media && (method === 'GET' || method === 'HEAD')) {
+        let mediaPath: string;
+        try {
+          mediaPath = decodeURIComponent(media[2]);
+        } catch {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+
+        // media[1] (the log id) is looked up undecoded, unlike mediaPath above.
+        // That is deliberate, not an oversight: undecoded is the safe
+        // direction here, since a decode could only ever turn a non-matching
+        // id into a different non-matching id. route() below makes the same
+        // choice for the log id segment it extracts from pathname. Do not
+        // add a decode here to "match" the media path -- that would be a
+        // second decode on a segment nothing has decoded once yet.
+        const config = reader.config(media[1]);
+        const blob = config && config.visibility === 'public'
+          ? reader.media(media[1], mediaPath)
+          : null;
+        if (blob) {
+          res.writeHead(200, {
+            'content-type': blob.type,
+            'content-length': blob.bytes.length,
+            'cache-control': MEDIA_CACHE,
+            'access-control-allow-origin': '*',
+          });
+          res.end(method === 'HEAD' ? undefined : blob.bytes);
+          return;
+        }
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+
+      const reply = route(method, pathname, url.searchParams, reader, viewer);
+      // Only a served log gets the cross-origin header. A private or missing log
+      // answers 404 without it, so the two stay indistinguishable (spec §7).
+      const headers: Record<string, string | number> = {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': JSON_CACHE,
+      };
+      if (reply.status === 200) headers['access-control-allow-origin'] = '*';
+
+      // The ETag is the commit the log was read at, so it changes exactly
+      // when the content does. Only a served log gets one; a 404 must stay
+      // indistinguishable between "missing" and "private" (spec §7).
+      const logMatch = /^\/l\/([^/]+)\//.exec(pathname + '/');
+      const tag = reply.status === 200 && logMatch ? reader.etag(logMatch[1]) : null;
+      if (tag !== null) {
+        const quoted = `"${tag}"`;
+        headers['etag'] = quoted;
+        if (req.headers['if-none-match'] === quoted) {
+          res.writeHead(304, headers);
+          res.end();
+          return;
+        }
+      }
+      res.writeHead(reply.status, headers);
+      res.end(method === 'HEAD' ? undefined : JSON.stringify(reply.body));
+    } catch (err) {
+      respondInternalError(res, err);
     }
-    res.writeHead(reply.status, headers);
-    res.end(method === 'HEAD' ? undefined : JSON.stringify(reply.body));
   });
 }
 

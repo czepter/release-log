@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.ts",
-    "test": "node --test",
+    "test": "node --test --test-timeout=30000",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "reindex": "node --env-file-if-exists=.env bin/reindex.ts"
