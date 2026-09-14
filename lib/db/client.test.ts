@@ -139,3 +139,32 @@ test('a second repo_permission row for the same account and log is rejected', ()
     assert.throws(() => db.insert(repoPermission).values(row).run());
   });
 });
+
+test('the same account can hold different cached permissions on different logs', () => {
+  withDb((db) => {
+    // Insert two different logs with different repos to satisfy the unique index
+    db.insert(log).values({
+      publicId: 'log-perm-a', repoOwner: 'o', repoName: 'r-a', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: null, configBlobSha: null, indexedAt: null,
+    }).run();
+    db.insert(log).values({
+      publicId: 'log-perm-b', repoOwner: 'o', repoName: 'r-b', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: null, configBlobSha: null, indexedAt: null,
+    }).run();
+
+    // Same account, different logs — both inserts must succeed. A primary key
+    // narrowed to accountId alone would wrongly reject the second insert.
+    db.insert(repoPermission).values({
+      accountId: 99, logId: 'log-perm-a', canWrite: true, checkedAt: '2026-09-14T00:00:00.000Z',
+    }).run();
+    db.insert(repoPermission).values({
+      accountId: 99, logId: 'log-perm-b', canWrite: false, checkedAt: '2026-09-14T00:00:00.000Z',
+    }).run();
+
+    // Verify both rows exist
+    const rows = db.select().from(repoPermission).all();
+    assert.equal(rows.length, 2);
+  });
+});
