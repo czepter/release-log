@@ -4,7 +4,7 @@
 
 import { and, eq } from 'drizzle-orm';
 import type { Db } from './db/client.ts';
-import { log, release, syncError, problem, media } from './db/schema.ts';
+import { log, release, syncError, problem, media, repoPermission } from './db/schema.ts';
 import type { GitHub, RepoRef, TreeEntry } from './github.ts';
 import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig } from './document.ts';
@@ -242,6 +242,7 @@ export async function syncLog(db: Db, gh: GitHub, ref: RepoRef): Promise<SyncOut
     db.delete(release).where(eq(release.logId, oldId)).run();
     db.delete(media).where(eq(media.logId, oldId)).run();
     db.delete(syncError).where(eq(syncError.logId, oldId)).run();
+    db.delete(repoPermission).where(eq(repoPermission.logId, oldId)).run();
     db.delete(log).where(eq(log.publicId, oldId)).run();
   }
 
