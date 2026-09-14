@@ -164,6 +164,20 @@ test('installation_repositories names both what was added and what was removed',
   );
 });
 
+test('installation names every repository it carries', () => {
+  // The larger version of installation_repositories: the whole App leaving
+  // an account (typically action: 'deleted') can change rights on every
+  // repository it covered, not just the ones an installation_repositories
+  // delivery names individually.
+  assert.deepEqual(
+    permissionInvalidationRefsFor({
+      event: 'installation',
+      payload: { action: 'deleted', repositories: [{ full_name: 'o/a' }, { full_name: 'o/b' }] },
+    }),
+    [{ owner: 'o', repo: 'a' }, { owner: 'o', repo: 'b' }],
+  );
+});
+
 test('push and repository name nothing -- a content change is not a rights change', () => {
   assert.deepEqual(permissionInvalidationRefsFor({ event: 'push', payload: { repository: { full_name: 'o/r' } } }), []);
   assert.deepEqual(permissionInvalidationRefsFor({ event: 'repository', payload: { repository: { full_name: 'o/r' } } }), []);
