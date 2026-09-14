@@ -685,6 +685,36 @@ test('without auth configured, the login and /me routes do not exist', async () 
   });
 });
 
+test('a synchronous throw from the database during the callback answers 500, not a crashed connection', async () => {
+  // Reproduces a locked/corrupted sqlite file: isAllowed's db.select() runs
+  // for every /auth/github/callback caller, allowlisted or not, before the
+  // allowlist decision is even made. Route through a login that is NOT an
+  // admin, so isAllowed actually reaches the allowlist table instead of
+  // short-circuiting on ADMIN_LOGINS.
+  await withAuth(async (auth) => {
+    const throwingDb = new Proxy(auth.db, {
+      get(target, prop, receiver) {
+        if (prop === 'select') return () => { throw new Error('database is locked'); };
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual',
+        headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 500);
+      assert.deepEqual(await res.json(), { error: 'internal_error' });
+
+      // The assertion that matters: the process is still alive to answer
+      // the next request, exactly like the malformed-request-target test
+      // above.
+      const health = await fetch(`${base}/health`);
+      assert.equal(health.status, 200);
+    }, undefined, { ...auth, adminLogins: ['somebody-else'], db: throwingDb });
+  });
+});
+
 test('a member webhook delivery calls onPermissionInvalidation, not onDelivery', async () => {
   const delivered: unknown[] = [];
   const invalidated: unknown[] = [];
