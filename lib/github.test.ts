@@ -314,3 +314,54 @@ test('a 401 that survives the retry is reported, not retried forever', async () 
   const repoCalls = http.calls.filter((c) => c === 'GET /repos/o/r');
   assert.equal(repoCalls.length, 2, 'genau ein Wiederholungsversuch, nicht mehr');
 });
+
+test('collaboratorPermission maps the response to the four known levels', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/collaborators/alice/permission': { body: { permission: 'write' } },
+  });
+  const level = await githubClient(withToken('t'), http).collaboratorPermission(REF, 'alice');
+  assert.equal(level, 'write');
+});
+
+test('an unrecognised permission value normalises to none, not a throw', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/collaborators/alice/permission': { body: { permission: 'triage' } },
+  });
+  const level = await githubClient(withToken('t'), http).collaboratorPermission(REF, 'alice');
+  assert.equal(level, 'none');
+});
+
+test('a 404 on the collaborator lookup yields null, not a throw', async () => {
+  const http = fakeHttp({});
+  const level = await githubClient(withToken('t'), http).collaboratorPermission(REF, 'alice');
+  assert.equal(level, null);
+});
+
+test('no installation token yields null, without a request', async () => {
+  const http = fakeHttp({});
+  const level = await githubClient(withToken(null), http).collaboratorPermission(REF, 'alice');
+  assert.equal(level, null);
+  assert.deepEqual(http.calls, []);
+});
+
+test('an unexpected server error throws rather than reading as no access', async () => {
+  const http = fakeHttp({ 'GET /repos/o/r/collaborators/alice/permission': { status: 500 } });
+  await assert.rejects(
+    () => githubClient(withToken('t'), http).collaboratorPermission(REF, 'alice'),
+    /HTTP 500/,
+  );
+});
+
+test('a login with characters a URL path cannot carry raw is encoded', async () => {
+  const http = fakeHttp({
+    'GET /repos/o/r/collaborators/weird%20name/permission': { body: { permission: 'admin' } },
+  });
+  const level = await githubClient(withToken('t'), http).collaboratorPermission(REF, 'weird name');
+  assert.equal(level, 'admin');
+});
+
+test('fakeGitHub grants write on a repository it knows, null on one it does not', async () => {
+  const gh = fakeGitHub({ 'o/r': { 'release-log.json': '{}' } });
+  assert.equal(await gh.collaboratorPermission({ owner: 'o', repo: 'r' }, 'anyone'), 'write');
+  assert.equal(await gh.collaboratorPermission({ owner: 'o', repo: 'gone' }, 'anyone'), null);
+});
