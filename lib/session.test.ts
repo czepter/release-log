@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHmac } from 'node:crypto';
 import { openDb } from './db/client.ts';
 import { allowlist } from './db/schema.ts';
 import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed } from './session.ts';
@@ -75,4 +76,11 @@ test('isAllowed says no for a login in neither place', () => {
     db.insert(allowlist).values({ githubLogin: 'someone', addedBy: 'czepter', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
     assert.equal(isAllowed(db, 'a-stranger', ['czepter']), false);
   });
+});
+
+test('a null JSON payload does not throw, but returns null', () => {
+  const encoded = Buffer.from('null', 'utf8').toString('base64url');
+  const sig = createHmac('sha256', KEY).update(encoded).digest('base64url');
+  const cookie = `${encoded}.${sig}`;
+  assert.equal(verifySessionCookie(KEY, cookie, NOW), null);
 });
