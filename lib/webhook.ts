@@ -96,6 +96,13 @@ export function permissionInvalidationRefsFor(delivery: Delivery): RepoRef[] {
     // erreichbar macht.
     case 'installation_repositories':
       return [...listOf(payload.repositories_added), ...listOf(payload.repositories_removed)];
+    // Die größere Version derselben Begründung: die ganze App wird einem
+    // Konto entzogen (typisch action: 'deleted'), nicht nur einzelne
+    // Repositories daraus -- dieselben Rechte betroffen, derselbe Cache
+    // veraltet. refsFor liest dasselbe Feld (payload.repositories) für
+    // dieses Ereignis.
+    case 'installation':
+      return listOf(payload.repositories);
     default:
       return [];
   }
