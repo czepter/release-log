@@ -553,6 +553,24 @@ test('a failed token exchange yields a 502 and no session', async () => {
   });
 });
 
+test('a network failure during token exchange yields a 502, not a crashed connection', async () => {
+  // fakeHttp only ever returns a Response -- it can never reject. A real
+  // network failure (fetch throwing, a timeout firing) rejects the promise
+  // instead, and that is the shape this test needs to reproduce: a
+  // hand-built Http that throws directly.
+  const rejectingHttp = async () => { throw new Error('boom'); };
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual',
+        headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 502);
+      assert.equal(res.headers.getSetCookie().some((c) => c.startsWith('session=')), false);
+    }, undefined, { ...auth, http: rejectingHttp });
+  });
+});
+
 test('GET /me without a session answers 401', async () => {
   await withAuth(async (auth) => {
     await withServer(reader, async (base) => {
