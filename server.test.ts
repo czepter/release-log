@@ -523,7 +523,7 @@ test('a successful login for an allowed login sets a session cookie and redirect
 });
 
 test('a successful GitHub identity that is not allowed gets a denial page and no session', async () => {
-  await withAuth(async (auth) => {
+  await withAuth(async (auth, db) => {
     // octocat is the only admin in this fixture -- swap it out so the
     // login that comes back from the fake is nobody's admin and is not
     // in the allowlist table either.
@@ -535,6 +535,10 @@ test('a successful GitHub identity that is not allowed gets a denial page and no
       });
       assert.equal(res.status, 403);
       assert.equal(res.headers.getSetCookie().some((c) => c.startsWith('session=')), false);
+      // "Zero trace" means the account row too, not just the cookie -- a
+      // denied person must not end up recorded in the database either.
+      const rows = db.select().from(account).where(eq(account.githubUserId, 42)).all();
+      assert.equal(rows.length, 0);
     }, undefined, deniedAuth);
   });
 });
@@ -588,6 +592,36 @@ test('GET /me with a valid session answers with the login and admin flag', async
       const res = await fetch(`${base}/me`, { headers: { cookie: `session=${cookie}` } });
       assert.equal(res.status, 200);
       assert.deepEqual(await res.json(), { login: 'octocat', isAdmin: true });
+    }, undefined, auth);
+  });
+});
+
+test('GET /me with a login not in ADMIN_LOGINS answers with isAdmin: false', async () => {
+  await withAuth(async (auth, db) => {
+    // auth's adminLogins fixture is ['octocat'] -- this account's login is
+    // deliberately someone else, so a route that always says isAdmin: true
+    // (or derives it any other way than checking ADMIN_LOGINS) gets caught.
+    db.insert(account).values({ githubUserId: 7, login: 'not-an-admin', avatarUrl: null, lastSeenAt: '2026-09-14T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 7);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { login: 'not-an-admin', isAdmin: false });
+    }, undefined, auth);
+  });
+});
+
+test('GET /me with a forged session signature answers 401, not authenticated', async () => {
+  await withAuth(async (auth, db) => {
+    // A real cookie for a real account -- but with the signature replaced,
+    // so this can only pass if the route actually verifies the signature
+    // rather than trusting the payload it decodes.
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-14T00:00:00.000Z' }).run();
+    const real = createSessionCookie(SIGNING_KEY, 42);
+    const forged = `${real.slice(0, real.indexOf('.'))}.not-the-real-signature`;
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { headers: { cookie: `session=${forged}` } });
+      assert.equal(res.status, 401);
     }, undefined, auth);
   });
 });
