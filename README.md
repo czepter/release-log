@@ -64,5 +64,23 @@ angekommen" und „Index von Null neu bauen" sind derselbe Fall.
 |---|---|
 | `DB_PATH` | Pfad der SQLite-Datei, Vorgabe `./release-log.sqlite` |
 | `PORT` | Port des Dienstes, Vorgabe 8787 |
+| `GITHUB_CLIENT_ID` | Client-ID der GitHub App, für die Anmeldung |
+| `GITHUB_CLIENT_SECRET` | Client-Secret der GitHub App, für die Anmeldung |
+| `SIGNING_KEY` | signiert das Session-Cookie |
+| `ADMIN_LOGINS` | GitHub-Logins mit Adminrecht, kommagetrennt — mindestens einer ist Pflicht |
 
 `GET /health` antwortet 200, ohne den Index anzufassen.
+
+### Anmeldung
+
+- `GET /auth/github/login` leitet zu GitHub weiter.
+- `GET /auth/github/callback` (bei GitHub als Callback-URL hinterlegt) nimmt
+  die Antwort entgegen, prüft die Zulassungsliste, setzt bei Erfolg ein
+  Session-Cookie (30 Tage) und leitet auf `/me` weiter.
+- `POST /auth/logout` löscht das Cookie.
+- `GET /me` antwortet `{login, isAdmin}` für eine gültige Session, sonst 401.
+
+Adminrecht kommt ausschließlich aus `ADMIN_LOGINS` — es gibt keine
+Datenbankspalte dafür. Wer sonst zugelassen ist, steht in der
+`allowlist`-Tabelle; ohne Dashboard (kommt in einem späteren Plan) lässt
+sie sich nur von Hand füllen.
