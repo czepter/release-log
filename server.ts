@@ -6,16 +6,24 @@
 
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { route } from './lib/public.ts';
 import type { Reader } from './lib/store.ts';
-import { verifySignature, refsFor } from './lib/webhook.ts';
+import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/webhook.ts';
 import type { RepoRef } from './lib/github.ts';
 import { openDb } from './lib/db/client.ts';
+import type { Db } from './lib/db/client.ts';
+import { account } from './lib/db/schema.ts';
+import { eq } from 'drizzle-orm';
 import { indexReader } from './lib/indexReader.ts';
 import { readConfig } from './lib/config.ts';
 import { installations } from './lib/appAuth.ts';
 import { githubClient } from './lib/github.ts';
 import { withRetry } from './lib/http.ts';
+import type { Http } from './lib/http.ts';
+import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed } from './lib/session.ts';
+import { exchangeCodeForIdentity } from './lib/login.ts';
+import { permissions } from './lib/permissions.ts';
 import { syncLog } from './lib/index.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
@@ -31,10 +39,38 @@ const WEBHOOK_MAX_BYTES = 1024 * 1024;
 export type Hooks = {
   webhookSecret: string;
   onDelivery(refs: RepoRef[]): void;
+  onPermissionInvalidation?(refs: RepoRef[]): void;
 };
 
-export function createApp(reader: Reader, hooks?: Hooks): Server {
-  return createServer((req, res) => {
+export type Auth = {
+  db: Db;
+  clientId: string;
+  clientSecret: string;
+  signingKey: string;
+  adminLogins: string[];
+  baseUrl: string;
+  http: Http;
+};
+
+// A tiny request-cookie parser: Node's IncomingMessage never splits the
+// `cookie` header for you, and pulling in a dependency for "find one
+// name=value pair" would be the opposite of lazy.
+function cookieValue(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
+}
+
+function htmlPage(title: string, body: string): string {
+  return `<!doctype html><title>${title}</title><p>${body}</p>`;
+}
+
+export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
+  return createServer(async (req, res) => {
     const method = req.method ?? 'GET';
 
     // Base is a constant: only pathname and searchParams are ever read from
@@ -113,9 +149,119 @@ export function createApp(reader: Reader, hooks?: Hooks): Server {
         // GitHub needs a fast answer, and whether the reconcile succeeds
         // doesn't change the fact that the delivery arrived.
         hooks.onDelivery(refsFor({ event, payload }));
+        hooks.onPermissionInvalidation?.(permissionInvalidationRefsFor({ event, payload }));
         res.writeHead(202, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ accepted: true }));
       });
+      return;
+    }
+
+    if (pathname === '/auth/github/login' && method === 'GET') {
+      if (!auth) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      const state = randomBytes(32).toString('base64url');
+      const authorize = new URL('https://github.com/login/oauth/authorize');
+      authorize.searchParams.set('client_id', auth.clientId);
+      authorize.searchParams.set('redirect_uri', `${auth.baseUrl}/auth/github/callback`);
+      authorize.searchParams.set('state', state);
+      res.writeHead(302, {
+        location: authorize.toString(),
+        'set-cookie': `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`,
+      });
+      res.end();
+      return;
+    }
+
+    if (pathname === '/auth/github/callback' && method === 'GET') {
+      if (!auth) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const cookieState = cookieValue(req.headers.cookie, 'oauth_state');
+      // A random, cookie-bound value an attacker can neither read nor guess
+      // -- there is no secret here for a timing side-channel to extract, so
+      // plain equality is deliberate, not an oversight (plan, "Abweichungen").
+      if (!code || !state || !cookieState || state !== cookieState) {
+        res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(htmlPage('Anmeldung fehlgeschlagen', 'Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.'));
+        return;
+      }
+
+      const identity = await exchangeCodeForIdentity(
+        auth.http, auth.clientId, auth.clientSecret, code, `${auth.baseUrl}/auth/github/callback`,
+      );
+      if (!identity) {
+        res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(htmlPage('GitHub nicht erreichbar', 'Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.'));
+        return;
+      }
+
+      // The allowlist check runs before anything is written: a denied
+      // person must leave zero trace -- no account row, no session cookie.
+      if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
+        res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(htmlPage('Kein Zugriff', 'Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen.'));
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      auth.db.insert(account)
+        .values({ githubUserId: identity.id, login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso })
+        .onConflictDoUpdate({
+          target: account.githubUserId,
+          set: { login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso },
+        })
+        .run();
+
+      const session = createSessionCookie(auth.signingKey, identity.id);
+      res.writeHead(302, {
+        location: '/me',
+        'set-cookie': [
+          'oauth_state=; Max-Age=0; Path=/auth/github',
+          `session=${session}; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000; Path=/`,
+        ],
+      });
+      res.end();
+      return;
+    }
+
+    if (pathname === '/auth/logout' && method === 'POST') {
+      if (!auth) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'set-cookie': 'session=; Max-Age=0; Path=/',
+      });
+      res.end(JSON.stringify({ loggedOut: true }));
+      return;
+    }
+
+    if (pathname === '/me' && method === 'GET') {
+      if (!auth) {
+        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
+      const row = session
+        ? auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0]
+        : undefined;
+      if (!row) {
+        res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ login: row.login, isAdmin: isAdmin(row.login, auth.adminLogins) }));
       return;
     }
 
@@ -217,12 +363,24 @@ if (import.meta.main) {
   );
   startReconcile(db, queue);
 
+  const perms = permissions(db, gh);
+  const authHttp: Http = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+
   // Bind an explicit address: without a host Node listens on :: and takes
   // IPv4 only while nothing else holds it, so a busy port turns into a
   // silent IPv6-only start instead of an error (spec §12).
   createApp(indexReader(db), {
     webhookSecret: config.webhookSecret,
     onDelivery: (refs) => { for (const ref of refs) queue.enqueue(ref); },
+    onPermissionInvalidation: (refs) => { for (const ref of refs) perms.invalidate(ref); },
+  }, {
+    db,
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+    signingKey: config.signingKey,
+    adminLogins: config.adminLogins,
+    baseUrl: config.baseUrl,
+    http: authHttp,
   }).listen(port, '127.0.0.1', () => {
     console.log(`release-log-hub on http://127.0.0.1:${port}, index at ${dbPath}`);
   });
