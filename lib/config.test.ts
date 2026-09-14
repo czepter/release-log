@@ -117,11 +117,18 @@ test('readConfig names all four new variables when missing, alongside the old on
 });
 
 test('the thrown message never contains the client secret or signing key on missing variables', () => {
+  // GITHUB_CLIENT_SECRET stays present (from COMPLETE) so its real value is
+  // genuinely in play here -- BASE_URL is the one that's missing, to
+  // trigger the error. The old version of this test set
+  // GITHUB_CLIENT_SECRET: undefined to trigger the error, which meant the
+  // secret's value was never in the input to begin with: no implementation
+  // could have leaked it, so that half of the test's name was vacuous.
   try {
-    readConfig({ ...COMPLETE, GITHUB_CLIENT_SECRET: undefined, BASE_URL: undefined });
+    readConfig({ ...COMPLETE, BASE_URL: undefined });
     assert.fail('expected readConfig to throw');
   } catch (err) {
     const message = (err as Error).message;
+    assert.ok(!message.includes('client-secret-value'), 'the client secret must not appear in an error');
     assert.ok(!message.includes('a-long-random-signing-key'), 'the signing key must not appear in an error');
   }
 });
