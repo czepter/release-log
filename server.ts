@@ -193,9 +193,22 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         return;
       }
 
-      const identity = await exchangeCodeForIdentity(
-        auth.http, auth.clientId, auth.clientSecret, code, `${auth.baseUrl}/auth/github/callback`,
-      );
+      // exchangeCodeForIdentity documents a returned null for every failure
+      // it recognizes, but a genuine network failure (fetch rejecting, the
+      // timeout firing, a non-JSON response body) surfaces as a REJECTED
+      // promise, not a null -- and this is the only file with a socket, so
+      // letting that escape the listener would crash the whole process on
+      // an attacker-controlled request (code/state are both unauthenticated
+      // input). To the caller a throw and a null mean the same thing --
+      // GitHub could not be reached correctly -- so both get the same 502.
+      let identity;
+      try {
+        identity = await exchangeCodeForIdentity(
+          auth.http, auth.clientId, auth.clientSecret, code, `${auth.baseUrl}/auth/github/callback`,
+        );
+      } catch {
+        identity = null;
+      }
       if (!identity) {
         res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
         res.end(htmlPage('GitHub nicht erreichbar', 'Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.'));
