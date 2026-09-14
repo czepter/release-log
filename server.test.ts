@@ -13,7 +13,7 @@ import { openDb } from './lib/db/client.ts';
 import { account } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { fakeHttp } from './lib/http.ts';
-import { createSessionCookie } from './lib/session.ts';
+import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -461,6 +461,14 @@ function cookieValue(setCookies: string[], name: string): string | undefined {
   return undefined;
 }
 
+// cookieValue above strips everything but the value -- exactly the part
+// that can never carry HttpOnly/Secure/SameSite/Max-Age. Those flags only
+// ever show up on the RAW Set-Cookie line, so a test that wants to check
+// them has to keep the whole line, not the parsed pair.
+function rawSetCookie(setCookies: string[], name: string): string | undefined {
+  return setCookies.find((line) => line.startsWith(`${name}=`));
+}
+
 test('GET /auth/github/login sets a state cookie and redirects with the same state', async () => {
   await withAuth(async (auth) => {
     await withServer(reader, async (base) => {
@@ -475,6 +483,17 @@ test('GET /auth/github/login sets a state cookie and redirects with the same sta
       assert.ok(state, 'a state parameter must be present');
       const cookieState = cookieValue(res.headers.getSetCookie(), 'oauth_state');
       assert.equal(cookieState, state);
+
+      // The parsed value alone says nothing about HttpOnly/Secure/SameSite/
+      // Max-Age -- those flags only exist on the raw Set-Cookie line, and a
+      // string that strips down to `session=${session}; Path=/` would still
+      // pass every assertion above this one.
+      const rawLine = rawSetCookie(res.headers.getSetCookie(), 'oauth_state');
+      assert.ok(rawLine, 'a raw oauth_state Set-Cookie line must be present');
+      assert.match(rawLine as string, /HttpOnly/);
+      assert.match(rawLine as string, /Secure/);
+      assert.match(rawLine as string, /SameSite=Lax/);
+      assert.match(rawLine as string, /Max-Age=600/);
     }, undefined, auth);
   });
 });
@@ -515,6 +534,18 @@ test('a successful login for an allowed login sets a session cookie and redirect
       assert.equal(res.headers.get('location'), '/me');
       const sessionCookie = cookieValue(res.headers.getSetCookie(), 'session');
       assert.ok(sessionCookie, 'a session cookie must be set');
+
+      // Same reasoning as the oauth_state cookie above: the parsed value
+      // proves nothing about the security attributes spec §5 names --
+      // HttpOnly, Secure, SameSite=Lax, and a Max-Age tied to
+      // SESSION_MAX_AGE_SECONDS, not a bare literal that could drift from it.
+      const rawLine = rawSetCookie(res.headers.getSetCookie(), 'session');
+      assert.ok(rawLine, 'a raw session Set-Cookie line must be present');
+      assert.match(rawLine as string, /HttpOnly/);
+      assert.match(rawLine as string, /Secure/);
+      assert.match(rawLine as string, /SameSite=Lax/);
+      assert.match(rawLine as string, new RegExp(`Max-Age=${SESSION_MAX_AGE_SECONDS}`));
+
       const rows = db.select().from(account).where(eq(account.githubUserId, 42)).all();
       assert.equal(rows.length, 1);
       assert.equal(rows[0].login, 'octocat');

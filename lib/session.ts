@@ -10,8 +10,10 @@ import { allowlist } from './db/schema.ts';
 
 export type SessionPayload = { accountId: number };
 
-// 30 Tage, wörtlich aus Spec §5.
-const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+// 30 Tage, wörtlich aus Spec §5. Exported so server.ts's Set-Cookie header
+// interpolates this value instead of carrying its own copy of the literal —
+// two copies of "2592000" can drift, one export cannot.
+export const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 function sign(signingKey: string, data: string): string {
   return createHmac('sha256', signingKey).update(data).digest('base64url');
