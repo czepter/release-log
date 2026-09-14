@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { verifySignature, refsFor } from './webhook.ts';
+import { verifySignature, refsFor, permissionInvalidationRefsFor } from './webhook.ts';
 
 const SECRET = 'not-the-real-secret';
 
@@ -141,4 +141,41 @@ test('a realistic owner/repo with dots, underscores, and hyphens still comes thr
     refsFor({ event: 'push', payload: { repository: { full_name: 'some-org/my_repo.v2' } } }),
     [{ owner: 'some-org', repo: 'my_repo.v2' }],
   );
+});
+
+test('member names the one repository it happened on', () => {
+  assert.deepEqual(
+    permissionInvalidationRefsFor({ event: 'member', payload: { action: 'added', repository: { full_name: 'o/r' } } }),
+    [{ owner: 'o', repo: 'r' }],
+  );
+});
+
+test('installation_repositories names both what was added and what was removed', () => {
+  assert.deepEqual(
+    permissionInvalidationRefsFor({
+      event: 'installation_repositories',
+      payload: {
+        action: 'removed',
+        repositories_added: [{ full_name: 'o/added' }],
+        repositories_removed: [{ full_name: 'o/removed' }],
+      },
+    }),
+    [{ owner: 'o', repo: 'added' }, { owner: 'o', repo: 'removed' }],
+  );
+});
+
+test('push and repository name nothing -- a content change is not a rights change', () => {
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'push', payload: { repository: { full_name: 'o/r' } } }), []);
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'repository', payload: { repository: { full_name: 'o/r' } } }), []);
+});
+
+test('ping and anything unknown name nothing', () => {
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'ping', payload: {} }), []);
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'star', payload: { repository: { full_name: 'o/r' } } }), []);
+});
+
+test('a malformed member payload names nothing instead of throwing', () => {
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'member', payload: null }), []);
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'member', payload: {} }), []);
+  assert.deepEqual(permissionInvalidationRefsFor({ event: 'member', payload: { repository: { full_name: 'not-a-valid-name' } } }), []);
 });
