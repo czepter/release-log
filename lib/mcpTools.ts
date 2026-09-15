@@ -30,10 +30,33 @@ export type McpToolDeps = {
   db: Db; reader: Reader; perms: Permissions; gh: GitHub; onRepoWrite: (ref: RepoRef) => void; baseUrl: string;
 };
 
+// Der Kurationsteil des Vorbild-Skills, wörtlich aus spec §6.
+const INSTRUCTIONS = `
+Rohstoff ist nie Ergebnis. Ein Release ist fertig, wenn kein Eintrag mehr wie eine Commit-Nachricht liest.
+Ein Eintrag ist ein Thema, kein Commit. 15 Commits werden zu drei bis fünf Themen.
+Der Lesertest: ein Satz bleibt, wenn der Leser das auf seinem Bildschirm bemerken kann. Klassennamen, Tabellen, Spalten, Framework- und Paketnamen fallen raus; sichtbar gewordene technische Aussagen bleiben.
+title ist ein Substantivstück, kein Imperativ, keine Route, kein Ticketkürzel. description sind mehrere Absätze: was jetzt geht, warum es so entschieden wurde, was nebenbei behoben wurde.
+headline benennt, sie bewertet nicht. body nennt Richtungen des Release, statt die Einträge nachzuerzählen.
+Typen: feat -> Neu, perf -> Änderungen, fix -> Behoben.
+breaking: true setzen, wenn der Leser handeln muss. Die Handlungsanweisung gehört in description.
+covered nie von Hand anfassen.
+
+Ablauf:
+1. list_logs, dann get_log -- liefert jüngste Version und deren covered.
+2. Lies lokal "git log" ab diesen Commits.
+3. Verwandte Commits zu Themen bündeln, Prosa schreiben.
+4. write_release mit published_at: null -- ein Entwurf.
+5. Der Mensch liest den Permalink, den der Aufruf zurückgibt.
+6. publish_release.
+`.trim();
+
 export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
   const { db, reader, perms, gh, onRepoWrite, baseUrl } = deps;
   return async (ctx) => {
-    const server = new McpServer({ name: 'release-log-hub', version: '1.0.0' });
+    const server = new McpServer(
+      { name: 'release-log-hub', version: '1.0.0' },
+      { capabilities: { tools: {}, prompts: {} }, instructions: INSTRUCTIONS },
+    );
     const rawToken = ctx.authInfo?.token;
     const who = rawToken ? lookupAccessToken(db, rawToken) : null;
     const scopes = ctx.authInfo?.scopes ?? [];
@@ -158,6 +181,64 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
         onRepoWrite(ref);
         return toolOk({ commit_sha: result.sha, permalink: `${baseUrl}/l/${log_id}/r/${encodeURIComponent(version)}` });
       },
+    );
+
+    // publish_release/unpublish_release teilen sich diese Mechanik: die
+    // bestehende Version existiert per Definition schon, also gibt es hier
+    // (anders als bei write_release) kein base_blob_sha-Konzept -- die
+    // aktuell bekannte blobSha ist immer die expectedSha.
+    async function togglePublish(logId: string, version: string, publishedAt: string | null): Promise<CallToolResult> {
+      if (!scopes.includes('logs:write')) return toolError('forbidden', 'logs:write scope required');
+      const row = db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+      if (!row) return toolError('not_found', `no such log: ${logId}`);
+      const ref = { owner: row.repoOwner, repo: row.repoName };
+      const canWriteThis = who !== null && await perms.canWrite(who.accountId, who.login, row.publicId, ref);
+      if (!canWriteThis) return toolError('forbidden', 'no write access to this repository');
+      if (row.state === 'frozen') return toolError('log_frozen', 'this log is frozen; its repository is unreachable');
+
+      const existing = db.select().from(releaseTable)
+        .where(and(eq(releaseTable.logId, logId), eq(releaseTable.version, version))).all()[0];
+      if (!existing) return toolError('not_found', `no such version: ${version}`);
+
+      const doc = { ...JSON.parse(existing.doc), published_at: publishedAt };
+      const path = `releases/${version}.json`;
+      const content = Buffer.from(JSON.stringify(doc, null, 2), 'utf8');
+      const message = `${publishedAt !== null ? 'publish' : 'unpublish'} release ${version} via MCP`;
+      const result = await gh.putFile(ref, path, content, message, existing.blobSha);
+      if (result.kind === 'no_installation') return toolError('no_installation', 'the GitHub App is not installed on this repository');
+      if (result.kind === 'conflict') {
+        return toolError('conflict', 'the release changed since it was last read; call get_release and try again');
+      }
+      onRepoWrite(ref);
+      return toolOk({ commit_sha: result.sha, permalink: `${baseUrl}/l/${logId}/r/${encodeURIComponent(version)}` });
+    }
+
+    server.registerTool(
+      'publish_release',
+      { description: 'Setzt published_at auf jetzt.', inputSchema: z.object({ log_id: z.string(), version: z.string() }) },
+      ({ log_id, version }) => togglePublish(log_id, version, new Date().toISOString()),
+    );
+
+    server.registerTool(
+      'unpublish_release',
+      { description: 'Setzt published_at auf null.', inputSchema: z.object({ log_id: z.string(), version: z.string() }) },
+      ({ log_id, version }) => togglePublish(log_id, version, null),
+    );
+
+    server.registerPrompt(
+      'release-kuratieren',
+      { title: 'Release kuratieren', description: 'Stößt den Kurationsablauf für ein Log an.', argsSchema: z.object({ log_id: z.string().optional() }) },
+      ({ log_id }) => ({
+        messages: [{
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: log_id
+              ? `Kuratiere das nächste Release für Log ${log_id}. Beginne mit get_log.`
+              : 'Kuratiere das nächste Release. Beginne mit list_logs, um die verfügbaren Logs zu sehen.',
+          },
+        }],
+      }),
     );
 
     return server;
