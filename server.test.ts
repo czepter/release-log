@@ -1403,3 +1403,112 @@ test('a mixed-case extension is accepted and the filename is committed byte-for-
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
+
+test('a media upload hitting a path conflict answers 409 and enqueues nothing', async () => {
+  // Mirrors the settings route's own conflict test (Task 5): the two write
+  // routes share the same CommitResult shape, so a regression that fires
+  // onRepoWrite before checking the branch must be caught on both, not
+  // just one.
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { return { kind: 'conflict' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', TINY_PNG, 'screenshot.png', cookie);
+      assert.equal(res.status, 409);
+      assert.equal(enqueued, null, 'a conflict must not trigger a resync enqueue');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+test('a media upload reporting no_installation answers 502 and enqueues nothing', async () => {
+  // Mirrors the settings route's own no_installation test (Task 5); see
+  // the comment above for why this branch needs its own coverage here too.
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { return { kind: 'no_installation' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', TINY_PNG, 'screenshot.png', cookie);
+      assert.equal(res.status, 502);
+      assert.equal(enqueued, null, 'a write that never happened must not trigger a resync enqueue');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+test('the log page renders the media upload button and file input', async () => {
+  // No prior test touched the Task-6 inline-script markup at all -- this
+  // just proves it renders, the same shallow html.includes(...) check the
+  // settings-form fields already get on this same page.
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }), collaboratorPermission: async () => 'write',
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('id="media-file"'), 'the file input must render');
+      assert.ok(html.includes('id="media-submit"'), 'the upload button must render');
+      assert.ok(html.includes('/dashboard/logs/log1/media'), 'the upload script must target this log\'s media route');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a malformed percent-sequence in x-filename answers 400, not a crash', async () => {
+  // decodeURIComponent throws on an unpaired/invalid %-escape (e.g. a lone
+  // "%"). The route wraps that in try/catch and answers 400 -- nothing
+  // previously sent input malformed enough to exercise that catch block.
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1/media`, {
+        method: 'POST',
+        headers: { 'content-type': 'image/png', 'x-filename': '%zz.png', cookie: `session=${cookie}` },
+        body: TINY_PNG,
+      });
+      assert.equal(res.status, 400);
+      assert.equal(called, false);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
