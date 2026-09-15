@@ -158,3 +158,87 @@ test('redeeming a code twice fails the second time and revokes every token that 
     assert.notEqual(tokenRow.revokedAt, null, 'the token minted from this code must be revoked');
   });
 });
+
+test('a replay of an already-consumed code still revokes the family, even with the wrong code_verifier', () => {
+  withDb((db) => {
+    const code = mintAuthorizationCode(db, {
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      accountId: 42, scope: 'logs:read',
+    });
+    const first = redeemAuthorizationCode(db, {
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+    });
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    db.insert(oauthToken).values({
+      id: 'tok-wrong-verifier', familyId: first.value.familyId, clientId: 'c1', accountId: 42, scope: 'logs:read',
+      kind: 'access', tokenHash: 'irrelevant-hash-1', expiresAt: '2099-01-01T00:00:00.000Z', revokedAt: null, createdAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+
+    // Replay with a WRONG code_verifier -- revocation must still fire,
+    // because consumedAt !== null is checked before PKCE.
+    const second = redeemAuthorizationCode(db, {
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'a-completely-wrong-verifier',
+    });
+    assert.equal(second.ok, false, 'a second redemption must fail even with the wrong verifier');
+
+    const tokenRow = db.select().from(oauthToken).where(eq(oauthToken.id, 'tok-wrong-verifier')).all()[0];
+    assert.notEqual(tokenRow.revokedAt, null, 'the family must be revoked regardless of what the replay supplies');
+  });
+});
+
+test('revoking one family on replay does not touch a different family\'s token', () => {
+  withDb((db) => {
+    const codeA = mintAuthorizationCode(db, {
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      accountId: 42, scope: 'logs:read',
+    });
+    const codeB = mintAuthorizationCode(db, {
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      accountId: 42, scope: 'logs:read',
+    });
+    const firstA = redeemAuthorizationCode(db, {
+      code: codeA, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+    });
+    const firstB = redeemAuthorizationCode(db, {
+      code: codeB, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+    });
+    assert.equal(firstA.ok, true);
+    assert.equal(firstB.ok, true);
+    if (!firstA.ok || !firstB.ok) return;
+    assert.notEqual(firstA.value.familyId, firstB.value.familyId, 'two mints must produce two distinct families');
+
+    db.insert(oauthToken).values({
+      id: 'tok-family-a', familyId: firstA.value.familyId, clientId: 'c1', accountId: 42, scope: 'logs:read',
+      kind: 'access', tokenHash: 'irrelevant-hash-a', expiresAt: '2099-01-01T00:00:00.000Z', revokedAt: null, createdAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    db.insert(oauthToken).values({
+      id: 'tok-family-b', familyId: firstB.value.familyId, clientId: 'c1', accountId: 42, scope: 'logs:read',
+      kind: 'access', tokenHash: 'irrelevant-hash-b', expiresAt: '2099-01-01T00:00:00.000Z', revokedAt: null, createdAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+
+    // Replay only code A a second time.
+    const secondA = redeemAuthorizationCode(db, {
+      code: codeA, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+    });
+    assert.equal(secondA.ok, false);
+
+    const tokenA = db.select().from(oauthToken).where(eq(oauthToken.id, 'tok-family-a')).all()[0];
+    const tokenB = db.select().from(oauthToken).where(eq(oauthToken.id, 'tok-family-b')).all()[0];
+    assert.notEqual(tokenA.revokedAt, null, 'family A\'s token must be revoked');
+    assert.equal(tokenB.revokedAt, null, 'family B\'s token must be untouched');
+  });
+});
+
+test('a wrong client_id is rejected, even with the right redirect_uri, code and verifier', () => {
+  withDb((db) => {
+    const code = mintAuthorizationCode(db, {
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      accountId: 42, scope: 'logs:read',
+    });
+    const result = redeemAuthorizationCode(db, {
+      code, clientId: 'attacker-client', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+    });
+    assert.equal(result.ok, false);
+  });
+});
