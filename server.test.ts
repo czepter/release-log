@@ -17,6 +17,7 @@ import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { fakeGitHub } from './lib/github.ts';
 import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
+import type { Permissions } from './lib/permissions.ts';
 import { log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 import { mintTokenPair } from './lib/oauth.ts';
 import { indexReader } from './lib/indexReader.ts';
@@ -821,6 +822,69 @@ test('a frozen log is hidden from a non-admin account without write access', asy
       const html = await res.text();
       assert.ok(!html.includes('Product frozen-two'), 'a frozen log stays hidden from a non-admin who cannot write to it');
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+// Issues #5/#6: beide Listen -- Dashboard und Zustimmungsbildschirm --
+// fragten Schreibrecht nacheinander ab (`await` je Zeile in der Schleife),
+// also N GitHub-Umläufe hintereinander vor dem ersten gerenderten Byte.
+// Eine Permissions-Attrappe, die ihre eigene Gleichzeitigkeit mitzählt, ist
+// die einzige Art, "zusammen" von "nacheinander" zu unterscheiden: an der
+// gerenderten Seite sieht man keinen Unterschied. Das await im canWrite ist
+// dafür entscheidend -- ohne echten Task-Wechsel liefe jede Antwort
+// synchron durch und maxInFlight bliebe auch bei paralleler Verdrahtung 1.
+function tracingPerms(answer: (logId: string) => boolean): { perms: Permissions; state: { maxInFlight: number; asked: string[] } } {
+  const state = { inFlight: 0, maxInFlight: 0, asked: [] as string[] };
+  const perms: Permissions = {
+    async canWrite(_accountId, _login, logId) {
+      state.asked.push(logId);
+      state.inFlight += 1;
+      state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      state.inFlight -= 1;
+      return answer(logId);
+    },
+    invalidate() {},
+  };
+  return { perms, state };
+}
+
+test('GET /dashboard checks every log\'s write access in one round, not one after another', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'one', 'o', 'repo-one');
+    insertLog(db, 'two', 'o', 'repo-two');
+    insertLog(db, 'three', 'o', 'repo-three');
+    const { perms, state } = tracingPerms(() => true);
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      for (const id of ['one', 'two', 'three']) assert.ok(html.includes(`Product ${id}`), `${id} must be listed`);
+      assert.equal(state.maxInFlight, 3, 'all three permission checks must be in flight together');
+    }, undefined, { ...auth, perms });
+  });
+});
+
+test('GET /dashboard never asks GitHub about a frozen log an admin sees anyway', async () => {
+  // Die alte Schleife sprang für diesen Fall vor dem canWrite-Aufruf ab.
+  // Eine Sammelabfrage, die stumpf jede Zeile fragt, würde den Umlauf
+  // wieder einführen, den die Ausnahme gerade vermeidet -- und er kann nur
+  // scheitern, das Repo ist ja weg.
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'frozen-three', 'o', 'gone-repo-3', 'frozen');
+    insertLog(db, 'live-one', 'o', 'live-repo');
+    const { perms, state } = tracingPerms(() => true);
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      // 'octocat' ist der Admin dieser Fixture (s. withAuth).
+      assert.ok(html.includes('Product frozen-three'), 'an admin still sees the frozen log');
+      assert.deepEqual(state.asked, ['live-one'], 'only the live log may cost a permission lookup');
+    }, undefined, { ...auth, perms });
   });
 });
 
@@ -2031,6 +2095,27 @@ test('GET /oauth/authorize with a session shows the consent screen naming the cl
       assert.ok(html.includes('Test Client'));
       assert.ok(html.includes('logs:read'));
     }, undefined, auth);
+  });
+});
+
+test('the consent screen checks every log\'s write access in one round, not one after another', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'one', 'o', 'repo-one');
+    insertLog(db, 'two', 'o', 'repo-two');
+    insertLog(db, 'three', 'o', 'repo-three');
+    const { perms, state } = tracingPerms((logId) => logId !== 'two');
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:write`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Product one') && html.includes('Product three'), 'writable logs are named');
+      assert.ok(!html.includes('Product two'), 'a log without write access is not named');
+      assert.equal(state.maxInFlight, 3, 'all three permission checks must be in flight together');
+    }, undefined, { ...auth, perms });
   });
 });
 

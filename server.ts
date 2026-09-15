@@ -92,6 +92,30 @@ function currentAccount(req: import('node:http').IncomingMessage, auth: Auth): L
   return row ? { accountId: session.accountId, login: row.login } : null;
 }
 
+// Schreibrecht für eine ganze Liste von Logs auf einmal. Zwei Seiten
+// brauchen das -- die Log-Liste des Dashboards und der
+// Zustimmungsbildschirm von /oauth/authorize -- und beide fragten es
+// nacheinander ab: ein `await` je Zeile in einer Schleife, also N
+// GitHub-Roundtrips hintereinander, bevor die Seite überhaupt zu rendern
+// beginnt (bei kaltem Cache spürbar, sonst gar nicht). Die Abfragen hängen
+// nicht voneinander ab, also laufen sie zusammen. Was jede einzelne
+// entscheidet, bleibt unverändert: `perms.canWrite` fragt GitHub, nicht
+// diese Datei.
+//
+// Das Ergebnis kommt als Map je publicId zurück, nicht als Array parallel
+// zur Eingabe: der Aufrufer darf Zeilen weglassen, für die er ohnehin nicht
+// fragen will (das Dashboard tut genau das für eingefrorene Logs eines
+// Admins), ohne dass ein Index verrutscht.
+async function canWriteEach(
+  perms: Permissions, who: LoggedIn, rows: Array<typeof log.$inferSelect>,
+): Promise<Map<string, boolean>> {
+  const answers = await Promise.all(rows.map(async (row) => [
+    row.publicId,
+    await perms.canWrite(who.accountId, who.login, row.publicId, { owner: row.repoOwner, repo: row.repoName }),
+  ] as const));
+  return new Map(answers);
+}
+
 // A tiny request-cookie parser: Node's IncomingMessage never splits the
 // `cookie` header for you, and pulling in a dependency for "find one
 // name=value pair" would be the opposite of lazy.
@@ -444,17 +468,18 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         }
         const isTheAdmin = isAdmin(who.login, auth.adminLogins);
         const allLogs = auth.db.select().from(log).all();
+        // A frozen log is never "writable" for anyone -- GitHub answers a
+        // permission lookup on a deleted repo with 404, which
+        // collaboratorPermission reads as null. Without this exception a
+        // frozen log would become permanently unreachable in the
+        // dashboard, including for deletion (spec, plan deviation 7). Für
+        // genau diese Zeilen wird deshalb gar nicht erst gefragt -- der
+        // Aufruf könnte nur scheitern.
+        const adminSeesFrozen = (row: typeof log.$inferSelect): boolean => row.state === 'frozen' && isTheAdmin;
+        const writable = await canWriteEach(auth.perms, who, allLogs.filter((row) => !adminSeesFrozen(row)));
         const rows: string[] = [];
         for (const row of allLogs) {
-          const ref = { owner: row.repoOwner, repo: row.repoName };
-          // A frozen log is never "writable" for anyone -- GitHub answers a
-          // permission lookup on a deleted repo with 404, which
-          // collaboratorPermission reads as null. Without this exception a
-          // frozen log would become permanently unreachable in the
-          // dashboard, including for deletion (spec, plan deviation 7).
-          const visible = row.state === 'frozen' && isTheAdmin
-            ? true
-            : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
+          const visible = adminSeesFrozen(row) || writable.get(row.publicId) === true;
           if (!visible) continue;
           rows.push(`<tr><td><a href="/dashboard/logs/${encodeURIComponent(row.publicId)}">${escapeHtml(row.product)}</a></td><td class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)}</td><td>${row.state === 'frozen' ? '<span class="badge">eingefroren</span>' : ''}</td></tr>`);
         }
@@ -1154,13 +1179,10 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // enforcement stays live against GitHub (as in the dashboard, plan
         // 6) and never depends on this display.
         const allLogs = auth.db.select().from(log).all();
-        const affected: string[] = [];
-        for (const row of allLogs) {
-          const ref = { owner: row.repoOwner, repo: row.repoName };
-          if (await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref)) {
-            affected.push(`<li>${escapeHtml(row.product)} (${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)})</li>`);
-          }
-        }
+        const writable = await canWriteEach(auth.perms, who, allLogs);
+        const affected = allLogs
+          .filter((row) => writable.get(row.publicId) === true)
+          .map((row) => `<li>${escapeHtml(row.product)} (${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)})</li>`);
         const body = `
           <h1>${escapeHtml(client.clientName)} verbinden</h1>
           <p>Dieser Client möchte Zugriff mit folgenden Rechten: <strong>${escapeHtml(scope)}</strong></p>
