@@ -82,8 +82,8 @@ angekommen" und „Index von Null neu bauen" sind derselbe Fall.
 
 Adminrecht kommt ausschließlich aus `ADMIN_LOGINS` — es gibt keine
 Datenbankspalte dafür. Wer sonst zugelassen ist, steht in der
-`allowlist`-Tabelle; ohne Dashboard (kommt in einem späteren Plan) lässt
-sie sich nur von Hand füllen.
+`allowlist`-Tabelle; Admins verwalten sie über das Dashboard (siehe unten,
+`GET`/`POST /admin/allowlist`).
 
 ### Repo-Rechte
 

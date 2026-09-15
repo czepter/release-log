@@ -87,10 +87,6 @@ function cookieValue(header: string | undefined, name: string): string | undefin
   return undefined;
 }
 
-function htmlPage(title: string, body: string): string {
-  return `<!doctype html><title>${title}</title><p>${body}</p>`;
-}
-
 // The last-resort net: log the message only (never the whole error object,
 // since some error shapes -- e.g. a failed fetch -- can carry request
 // internals) and answer 500 if nothing has gone out yet. Shared by the
@@ -261,7 +257,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // plain equality is deliberate, not an oversight (plan, "Abweichungen").
         if (!code || !state || !cookieState || state !== cookieState) {
           res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(htmlPage('Anmeldung fehlgeschlagen', 'Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.'));
+          res.end(page('Anmeldung fehlgeschlagen', '<p>Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.</p>'));
           return;
         }
 
@@ -283,7 +279,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         }
         if (!identity) {
           res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(htmlPage('GitHub nicht erreichbar', 'Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.'));
+          res.end(page('GitHub nicht erreichbar', '<p>Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.</p>'));
           return;
         }
 
@@ -291,7 +287,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // person must leave zero trace -- no account row, no session cookie.
         if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
           res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(htmlPage('Kein Zugriff', 'Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen.'));
+          res.end(page('Kein Zugriff', '<p>Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen.</p>'));
           return;
         }
 
@@ -410,10 +406,27 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           `<tr><td>${escapeHtml(e.path)}</td><td>${escapeHtml(e.message)}</td></tr>`,
         ).join('');
 
+        const releases = auth.db.select().from(release).where(eq(release.logId, logId)).all();
+        const releaseRows = releases.map((r) =>
+          `<tr><td>${escapeHtml(r.version)}</td><td>${escapeHtml(r.date)}</td><td>${r.publishedAt ? 'Veröffentlicht' : 'Entwurf'}</td></tr>`,
+        ).join('');
+
+        // Nur hier, hinter canWrite/der frozen-admin-Ausnahme oben: diese
+        // Route ist nicht die anonyme Fläche, für die Spec §7 identische
+        // 404s verlangt (lib/github.ts's Kommentar dazu) -- ein angemeldetes,
+        // berechtigtes Konto darf den Installationsstand live sehen (Plan,
+        // Abweichung 5).
+        const probeResult = await auth.gh.probe(ref);
+        const installationLabel = probeResult.kind === 'no_installation'
+          ? 'keine Installation'
+          : probeResult.kind === 'gone'
+          ? 'Repo nicht mehr auffindbar'
+          : 'erreichbar';
+
         const body = `
           <p><a href="/dashboard">&larr; alle Logs</a></p>
           <h1>${escapeHtml(row.product)}</h1>
-          <p class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)} &middot; ${row.state === 'frozen' ? 'eingefroren' : 'aktiv'} &middot; zuletzt abgeglichen: ${row.indexedAt ? escapeHtml(row.indexedAt) : 'nie'}</p>
+          <p class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)} &middot; ${row.state === 'frozen' ? 'eingefroren' : 'aktiv'} &middot; zuletzt abgeglichen: ${row.indexedAt ? escapeHtml(row.indexedAt) : 'nie'} &middot; <span class="badge">${installationLabel}</span></p>
 
           <h2>Einstellungen</h2>
           <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/settings">
@@ -435,6 +448,10 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
 
           ${errors.length > 0
             ? `<h2>Abgleichfehler</h2><table><thead><tr><th>Pfad</th><th>Meldung</th></tr></thead><tbody>${errorRows}</tbody></table>`
+            : ''}
+
+          ${releases.length > 0
+            ? `<h2>Releases</h2><table><thead><tr><th>Version</th><th>Datum</th><th>Status</th></tr></thead><tbody>${releaseRows}</tbody></table>`
             : ''}
 
           <h2>Medien</h2>
