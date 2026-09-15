@@ -179,3 +179,91 @@ test('get_log on a log the caller can write to includes draft versions and cover
     assert.deepEqual(body.covered, ['abc123']);
   }, gh);
 });
+
+// Review finding [Important 1]: get_release's own `!reached` gate had zero
+// dedicated coverage -- every existing get_release test used a public log,
+// so a future edit that let get_release diverge from get_log's reachability
+// check (e.g. fetching the release row before checking reach()) could leak a
+// whole release document from a private log and nothing here would notice.
+// Published on purpose: this isolates the reachability gate from the
+// separate draft-hiding check ("hides a draft" above already covers that).
+test('get_release on a private log answers not_found without write access, even for a published release', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+      view: 'full', visibility: 'private', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: '2026-09-02T00:00:00.000Z', blobSha: 'r1',
+      path: 'releases/1.0.0.json', doc: JSON.stringify({
+        version: '1.0.0', tag: null, date: '2026-09-01', published_at: '2026-09-02T00:00:00.000Z', commits: 1,
+        headline: 'TOP SECRET RELEASE NOTES', body: [], image: null, covered: [], changes: [],
+      }),
+    }).run();
+    const result = await callTool(factory, { token: 'irrelevant', clientId: 'c1', scopes: ['logs:read'] }, 'get_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'not_found');
+  });
+});
+
+// Review finding [Important 2]: get_log's draft-filtering was only tested
+// for a caller who CAN write (drafts included) -- the inverse, a non-writer
+// who must NOT see drafts, had no test. A draft dated newer than the
+// published release means a broken filter would surface it as both an
+// extra entry in `versions` and (wrongly) the source of `covered`.
+test('get_log omits a draft from versions and covered for a caller without write access', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: '2026-09-01T00:00:00.000Z', blobSha: 'r1',
+      path: 'releases/1.0.0.json', doc: JSON.stringify({
+        version: '1.0.0', tag: null, date: '2026-09-01', published_at: '2026-09-01T00:00:00.000Z', commits: 1,
+        headline: 'published', body: [], image: null, covered: ['pub123'], changes: [],
+      }),
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '2.0.0', date: '2026-09-10', publishedAt: null, blobSha: 'r2',
+      path: 'releases/2.0.0.json', doc: JSON.stringify({
+        version: '2.0.0', tag: null, date: '2026-09-10', published_at: null, commits: 1,
+        headline: 'draft', body: [], image: null, covered: ['draft456'], changes: [],
+      }),
+    }).run();
+    const result = await callTool(factory, { token: 'irrelevant', clientId: 'c1', scopes: ['logs:read'] }, 'get_log', { log_id: 'log1' });
+    const body = JSON.parse(result.content[0].text);
+    assert.deepEqual(body.versions.map((v: { version: string }) => v.version), ['1.0.0']);
+    assert.deepEqual(body.covered, ['pub123']);
+  });
+});
+
+// Review finding [Important 3]: the `scopes.includes('logs:read')` forbidden
+// gate is identical, hand-copied code in all three tools -- untested on any
+// of them, so a copy-paste regression (e.g. checking the wrong scope string)
+// on any one tool would ship silently.
+test('list_logs is forbidden for a token without logs:read scope', async () => {
+  await withServerFor(async (factory) => {
+    const result = await callTool(factory, { token: 'irrelevant', clientId: 'c1', scopes: ['logs:write'] }, 'list_logs', {});
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+  });
+});
+
+test('get_log is forbidden for a token without logs:read scope', async () => {
+  await withServerFor(async (factory) => {
+    const result = await callTool(factory, { token: 'irrelevant', clientId: 'c1', scopes: ['logs:write'] }, 'get_log', { log_id: 'log1' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+  });
+});
+
+test('get_release is forbidden for a token without logs:read scope', async () => {
+  await withServerFor(async (factory) => {
+    const result = await callTool(factory, { token: 'irrelevant', clientId: 'c1', scopes: ['logs:write'] }, 'get_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+  });
+});
