@@ -191,10 +191,13 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
       if (!scopes.includes('logs:write')) return toolError('forbidden', 'logs:write scope required');
       const row = db.select().from(log).where(eq(log.publicId, logId)).all()[0];
       if (!row) return toolError('not_found', `no such log: ${logId}`);
+      // Frozen ist unconditional (wie write_release, Task 16): das Repo ist
+      // unerreichbar, also wird nicht erst ein GitHub-Aufruf riskiert, um
+      // Schreibrecht zu prüfen, der ohnehin nur scheitern kann.
+      if (row.state === 'frozen') return toolError('log_frozen', 'this log is frozen; its repository is unreachable');
       const ref = { owner: row.repoOwner, repo: row.repoName };
       const canWriteThis = who !== null && await perms.canWrite(who.accountId, who.login, row.publicId, ref);
       if (!canWriteThis) return toolError('forbidden', 'no write access to this repository');
-      if (row.state === 'frozen') return toolError('log_frozen', 'this log is frozen; its repository is unreachable');
 
       const existing = db.select().from(releaseTable)
         .where(and(eq(releaseTable.logId, logId), eq(releaseTable.version, version))).all()[0];
