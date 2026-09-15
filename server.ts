@@ -503,7 +503,11 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         }
 
         const content = Buffer.from(JSON.stringify(parsed.value, null, 2) + '\n', 'utf8');
-        const expectedSha = form.get('expected_sha');
+        // URLSearchParams.get returns '' (never null) for a present-but-empty
+        // field, but putFile treats null as "create new" and anything else
+        // (including '') as a sha to check against GitHub -- so an empty
+        // submitted value must become null here, not pass through as "".
+        const expectedSha = form.get('expected_sha') || null;
         const result = await auth.gh.putFile(
           ref, 'release-log.json', content, 'update release-log.json settings via dashboard', expectedSha,
         );
