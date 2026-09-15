@@ -1886,3 +1886,48 @@ test('POST /admin/allowlist/:login/delete with a malformed percent-sequence answ
     }, undefined, auth);
   });
 });
+
+test('POST /oauth/register with a valid redirect_uri returns 201 and a client_id', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/oauth/register`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: ['https://client.example/cb'], client_name: 'Test' }),
+      });
+      assert.equal(res.status, 201);
+      const body = await res.json() as { client_id: string; token_endpoint_auth_method: string };
+      assert.ok(typeof body.client_id === 'string' && body.client_id.length > 0);
+      assert.equal(body.token_endpoint_auth_method, 'none');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/register without redirect_uris returns 400', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/oauth/register`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+      });
+      assert.equal(res.status, 400);
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/register is rate-limited after 10 requests from the same IP', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      for (let i = 0; i < 10; i++) {
+        const res = await fetch(`${base}/oauth/register`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ redirect_uris: ['https://client.example/cb'] }),
+        });
+        assert.equal(res.status, 201, `request ${i + 1} of 10 must succeed`);
+      }
+      const eleventh = await fetch(`${base}/oauth/register`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: ['https://client.example/cb'] }),
+      });
+      assert.equal(eleventh.status, 429);
+    }, undefined, auth);
+  });
+});
