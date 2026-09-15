@@ -350,6 +350,29 @@ test('write_release with a stale base_blob_sha maps GitHub\'s own conflict, does
   }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'conflict' }; } });
 });
 
+// Review finding [Important]: the no_installation branch of CommitResult had
+// zero test coverage -- only 'conflict' was proven to leave onRepoWriteCalls
+// empty. A brand-new version (no local release row) reaches putFile without
+// tripping the local pre-check, so this isolates the no_installation mapping
+// and its onRepoWrite-scoping from the conflict-branch test above.
+test('write_release maps GitHub\'s no_installation to an error, does not enqueue a resync', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'no_installation');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'no_installation' }; } });
+});
+
 test('write_release rejects an invalid document before calling putFile', async () => {
   await withServerFor(async (factory, db) => {
     db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
