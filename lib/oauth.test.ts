@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { openDb } from './db/client.ts';
 import { oauthClient, oauthToken } from './db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, revokeFamily, mintTokenPair, lookupAccessToken } from './oauth.ts';
+import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, revokeFamily, mintTokenPair, lookupAccessToken, rotateRefreshToken } from './oauth.ts';
 import { account } from './db/schema.ts';
 
 function withDb(fn: (db: ReturnType<typeof openDb>) => void): void {
@@ -290,5 +290,55 @@ test('lookupAccessToken returns expiresAt in seconds, not milliseconds', () => {
     assert.ok(looked);
     const expiresAtMs = looked!.expiresAt * 1000;
     assert.ok(Math.abs(expiresAtMs - (before + 3_600_000)) < 5000, `expiresAt should be ~1 hour out in seconds, got ${looked!.expiresAt}`);
+  });
+});
+
+test('a valid refresh token rotates to a fresh access/refresh pair', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const first = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    const result = rotateRefreshToken(db, first.refreshToken);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.notEqual(result.value.refreshToken, first.refreshToken, 'rotation must mint a NEW refresh token');
+    assert.notEqual(result.value.accessToken, first.accessToken);
+    assert.equal(result.value.scope, 'logs:read');
+    assert.equal(result.value.accountId, 42);
+  });
+});
+
+test('the old refresh token no longer rotates after one use', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const first = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    rotateRefreshToken(db, first.refreshToken);
+    const second = rotateRefreshToken(db, first.refreshToken);
+    assert.equal(second.ok, false);
+  });
+});
+
+test('reusing an already-rotated refresh token revokes the whole family, including the access token minted alongside it', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const first = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    const rotated = rotateRefreshToken(db, first.refreshToken);
+    assert.equal(rotated.ok, true);
+
+    // Reuse the OLD refresh token -- already rotated away.
+    rotateRefreshToken(db, first.refreshToken);
+
+    if (!rotated.ok) return;
+    assert.equal(lookupAccessToken(db, rotated.value.accessToken), null, 'the access token from the rotation must be revoked too, same family');
+  });
+});
+
+test('an expired refresh token is rejected without rotating', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    let now = 0;
+    const first = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' }, () => new Date(now).toISOString());
+    now = 30 * 24 * 60 * 60 * 1000 + 1;
+    const result = rotateRefreshToken(db, first.refreshToken, () => now);
+    assert.equal(result.ok, false);
   });
 });

@@ -166,3 +166,29 @@ export function lookupAccessToken(db: Db, rawToken: string, nowMs: () => number 
     expiresAt: Math.floor(Date.parse(row.expiresAt) / 1000),
   };
 }
+
+export type RotateResult =
+  | { ok: true; value: TokenPair & { scope: string; accountId: number } }
+  | { ok: false; error: 'invalid_grant' };
+
+export function rotateRefreshToken(db: Db, rawRefreshToken: string, nowMs: () => number = Date.now): RotateResult {
+  const now = nowMs();
+  const row = db.select().from(oauthToken).where(eq(oauthToken.tokenHash, sha256Hex(rawRefreshToken))).all()[0];
+  if (!row || row.kind !== 'refresh') return { ok: false, error: 'invalid_grant' };
+
+  if (row.revokedAt !== null) {
+    // Ein bereits rotiertes Refresh-Token taucht wieder auf -- genau die
+    // Wiederverwendung, vor der spec §5 warnt. Die ganze Kette wird
+    // widerrufen, nicht nur dieser eine Versuch abgelehnt.
+    revokeFamily(db, row.familyId, new Date(now).toISOString());
+    return { ok: false, error: 'invalid_grant' };
+  }
+  if (Date.parse(row.expiresAt) <= now) return { ok: false, error: 'invalid_grant' };
+
+  db.update(oauthToken).set({ revokedAt: new Date(now).toISOString() }).where(eq(oauthToken.id, row.id)).run();
+  const pair = mintTokenPair(
+    db, { clientId: row.clientId, accountId: row.accountId, scope: row.scope, familyId: row.familyId },
+    () => new Date(now).toISOString(),
+  );
+  return { ok: true, value: { ...pair, scope: row.scope, accountId: row.accountId } };
+}
