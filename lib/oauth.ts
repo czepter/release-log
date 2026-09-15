@@ -17,7 +17,10 @@ export function sha256Hex(value: string): string {
 }
 
 function isLoopbackHost(hostname: string): boolean {
-  return hostname === '127.0.0.1' || hostname === '::1' || hostname === 'localhost';
+  // WHATWG URL.hostname returns the bracketed form for an IPv6 host
+  // ('[::1]', not '::1') -- both are checked so an already-unbracketed
+  // value from a future caller still matches.
+  return hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]' || hostname === 'localhost';
 }
 
 // http ist nur für Loopback erlaubt (native Clients, RFC 8252) -- jeder

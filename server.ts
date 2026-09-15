@@ -143,7 +143,9 @@ function redirectUriMatches(registered: string[], presented: string): boolean {
     return false;
   }
   if (presentedUrl.protocol !== 'http:') return false;
-  if (!['127.0.0.1', '::1', 'localhost'].includes(presentedUrl.hostname)) return false;
+  // URL.hostname returns the bracketed form for IPv6 ('[::1]', not '::1');
+  // both are listed so an already-unbracketed value still matches.
+  if (!['127.0.0.1', '::1', '[::1]', 'localhost'].includes(presentedUrl.hostname)) return false;
   return registered.some((r) => {
     try {
       const reg = new URL(r);
