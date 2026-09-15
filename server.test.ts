@@ -959,3 +959,33 @@ test('a sync error path and message containing HTML-meaningful characters are ea
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
+
+test('product, repoOwner, repoName and configBlobSha are each escaped independently on the log page', async () => {
+  await withAuth(async (auth, db) => {
+    // /dashboard/logs/:id is a separate route with its own template literal
+    // from the /dashboard list -- it calls the same escapeHtml function, but
+    // that is not the same as sharing a call site. Four distinct tag pairs,
+    // one per field, so the test can tell which escapeHtml call was dropped
+    // if only one of the four ever is.
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: '<i>owner-x</i>', repoName: '<u>repo-x</u>', repoNodeId: 'R_log1',
+      product: '<b>Odd Product</b>', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: '<s>sha-x</s>', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh = fakeGitHub({ '<i>owner-x</i>/<u>repo-x</u>': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<b>Odd Product</b>'), 'the raw product tag must never appear unescaped');
+      assert.ok(!html.includes('<i>owner-x</i>'), 'the raw repoOwner tag must never appear unescaped');
+      assert.ok(!html.includes('<u>repo-x</u>'), 'the raw repoName tag must never appear unescaped');
+      assert.ok(!html.includes('<s>sha-x</s>'), 'the raw configBlobSha tag must never appear unescaped');
+      assert.ok(html.includes('&lt;b&gt;Odd Product&lt;/b&gt;'), 'product must appear escaped instead');
+      assert.ok(html.includes('&lt;i&gt;owner-x&lt;/i&gt;'), 'repoOwner must appear escaped instead');
+      assert.ok(html.includes('&lt;u&gt;repo-x&lt;/u&gt;'), 'repoName must appear escaped instead');
+      assert.ok(html.includes('&lt;s&gt;sha-x&lt;/s&gt;'), 'configBlobSha must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
