@@ -424,6 +424,199 @@ test('write_release on a frozen log answers log_frozen', async () => {
   }, { probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => null, async putFile() { throw new Error('must not be called'); } });
 });
 
+function insertPublishableRelease(db: ReturnType<typeof openDb>, publishedAt: string | null): void {
+  db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+  db.insert(log).values({
+    publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+    view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+    configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+  }).run();
+  db.insert(release).values({
+    logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt, blobSha: 'r1',
+    path: 'releases/1.0.0.json', doc: JSON.stringify({ ...VALID_DOC, tag: null, published_at: publishedAt, commits: 0, image: null, covered: [] }),
+  }).run();
+}
+
+test('publish_release sets published_at and commits with the release\'s known blob sha', async () => {
+  // committedExpectedSha/committedDoc must be declared OUTSIDE withServerFor:
+  // its two arguments (the test body, and this gh fixture) are siblings, not
+  // nested -- a `let` declared inside the first argument's callback is not in
+  // scope for the second argument's `putFile` closure.
+  let committedExpectedSha: string | null = null;
+  let committedDoc: Record<string, unknown> | null = null;
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, null);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'publish_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, undefined);
+    assert.equal(committedExpectedSha, 'r1');
+    assert.equal((committedDoc as { published_at: unknown }).published_at !== null, true);
+    assert.deepEqual(deps.onRepoWriteCalls, [{ owner: 'o', repo: 'repo1' }]);
+  }, {
+    probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null,
+    collaboratorPermission: async () => 'write',
+    async putFile(_ref, _path, content, _message, expectedSha) {
+      committedExpectedSha = expectedSha;
+      committedDoc = JSON.parse(content.toString('utf8'));
+      return { kind: 'committed', sha: 'newsha' };
+    },
+  });
+});
+
+test('unpublish_release sets published_at back to null', async () => {
+  let committedDoc: Record<string, unknown> | null = null; // s. Kommentar im Test davor
+  await withServerFor(async (factory, db) => {
+    insertPublishableRelease(db, '2026-09-01T00:00:00.000Z');
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'unpublish_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, undefined);
+    assert.equal((committedDoc as { published_at: unknown } | null)?.published_at, null);
+  }, {
+    probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null,
+    collaboratorPermission: async () => 'write',
+    async putFile(_ref, _path, content) {
+      committedDoc = JSON.parse(content.toString('utf8'));
+      return { kind: 'committed', sha: 'newsha' };
+    },
+  });
+});
+
+test('publish_release on an unknown version answers not_found', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'publish_release', { log_id: 'log1', version: 'nope' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'not_found');
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { throw new Error('must not be called'); } });
+});
+
+// publish_release and unpublish_release both delegate to the same shared
+// togglePublish helper, but each is wired up through its own, independent
+// server.registerTool call -- nothing stops a future edit from adding
+// tool-specific logic to one wrapper's callback (e.g. a special case before
+// or after calling togglePublish) without touching the other. The four
+// tests below prove the conflict/no_installation mapping and the
+// onRepoWrite-only-on-success rule hold for BOTH registered tools, not just
+// one with the other assumed identical by inspection.
+test('publish_release maps GitHub\'s conflict to an error, does not enqueue a resync', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, null);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'publish_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'conflict');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'conflict' }; } });
+});
+
+test('publish_release maps GitHub\'s no_installation to an error, does not enqueue a resync', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, null);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'publish_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'no_installation');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'no_installation' }; } });
+});
+
+test('unpublish_release maps GitHub\'s conflict to an error, does not enqueue a resync', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, '2026-09-01T00:00:00.000Z');
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'unpublish_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'conflict');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'conflict' }; } });
+});
+
+test('unpublish_release maps GitHub\'s no_installation to an error, does not enqueue a resync', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, '2026-09-01T00:00:00.000Z');
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'unpublish_release', { log_id: 'log1', version: '1.0.0' });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'no_installation');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'no_installation' }; } });
+});
+
+// The brief's own placeholder for this test only asserted that
+// `server.server` exists on the McpServer instance -- true of every McpServer
+// regardless of whether instructions or a prompt were ever registered, so it
+// could not fail. Probing the installed SDK (@modelcontextprotocol/server)
+// directly showed the real, externally-observable shapes instead:
+//   - the `initialize` JSON-RPC response's `result.instructions` is a plain
+//     string, exactly the ServerOptions.instructions constructor argument,
+//     word for word (confirmed by dumping the actual response).
+//   - `prompts/list`'s `result.prompts` is an array of
+//     { name, title, description, arguments }, with `arguments` derived from
+//     the Zod argsSchema's shape (an optional field becomes
+//     { name: 'log_id', required: false }, no `description` key on the
+//     argument itself since the schema carries none).
+//   - `prompts/get` runs the registered callback and returns
+//     { messages: [{ role, content: { type, text } }] }, matching the
+//     literal object registerPrompt's callback returns.
+// This test drives the same InMemoryTransport initialize/notify pattern
+// callTool() uses internally, but stays with the raw exchange (rather than
+// calling callTool, which discards the initialize response) so it can
+// inspect `result.instructions` and issue a `prompts/list` request of its own.
+test('the MCP server surfaces non-empty instructions in initialize, and registers the release-kuratieren prompt', async () => {
+  await withServerFor(async (factory) => {
+    const server = await factory({ era: 'modern' });
+    const [peerTx, serverTx] = InMemoryTransport.createLinkedPair();
+    const waiters = new Map<string | number, (message: JSONRPCMessage) => void>();
+    peerTx.onmessage = (message) => {
+      const id = (message as { id?: string | number }).id;
+      const waiter = id === undefined ? undefined : waiters.get(id);
+      if (id !== undefined && waiter) {
+        waiters.delete(id);
+        waiter(message);
+      }
+    };
+    await server.connect(serverTx);
+    await peerTx.start();
+    const request = (message: JSONRPCRequest): Promise<JSONRPCMessage> =>
+      new Promise((resolve) => {
+        waiters.set(message.id, resolve);
+        void peerTx.send(message);
+      });
+    const notify = (message: JSONRPCNotification): Promise<void> => peerTx.send(message);
+
+    const initResponse = await request({
+      jsonrpc: '2.0', id: 0, method: 'initialize',
+      params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'test', version: '1.0' } },
+    });
+    if (!isJSONRPCResultResponse(initResponse)) throw new Error(`initialize failed: ${JSON.stringify(initResponse)}`);
+    const instructions = (initResponse.result as { instructions?: string }).instructions;
+    assert.ok(typeof instructions === 'string' && instructions.length > 0, 'instructions must be a non-empty string');
+    assert.match(instructions, /publish_release/);
+
+    await notify({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+    const promptsListResponse = await request({ jsonrpc: '2.0', id: 1, method: 'prompts/list', params: {} });
+    if (!isJSONRPCResultResponse(promptsListResponse)) throw new Error(`prompts/list failed: ${JSON.stringify(promptsListResponse)}`);
+    const prompts = (promptsListResponse.result as { prompts: Array<{ name: string }> }).prompts;
+    assert.ok(prompts.some((p) => p.name === 'release-kuratieren'), 'release-kuratieren must be registered');
+
+    const promptsGetResponse = await request({
+      jsonrpc: '2.0', id: 2, method: 'prompts/get', params: { name: 'release-kuratieren', arguments: { log_id: 'log1' } },
+    });
+    if (!isJSONRPCResultResponse(promptsGetResponse)) throw new Error(`prompts/get failed: ${JSON.stringify(promptsGetResponse)}`);
+    const messages = (promptsGetResponse.result as { messages: Array<{ content: { text: string } }> }).messages;
+    assert.match(messages[0].content.text, /log1/);
+
+    await server.close();
+  });
+});
+
 test('write_release without the logs:write scope answers forbidden, even with write access', async () => {
   await withServerFor(async (factory, db) => {
     db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
