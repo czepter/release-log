@@ -32,6 +32,8 @@ import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
+import { registerClient } from './lib/oauth.ts';
+import { rateLimiter } from './lib/rateLimit.ts';
 
 const MEDIA_CACHE = 'public, max-age=31536000, immutable';
 const JSON_CACHE = 'public, max-age=60';
@@ -114,7 +116,29 @@ function readFormBody(req: import('node:http').IncomingMessage): Promise<URLSear
   });
 }
 
+// Inkrementelles Lesen mit Obergrenze -- dasselbe Muster wie /webhook und
+// der Medien-Upload: die Größe wird beim Lesen geprüft, nicht erst danach,
+// damit ein zu großer Body nie vollständig im Speicher landet.
+function readRawBody(req: import('node:http').IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        req.destroy();
+        reject(new Error('payload_too_large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
+  const oauthRegisterLimiter = rateLimiter(10, 60 * 60 * 1000); // 10 je Stunde
   return createServer(async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
@@ -815,6 +839,43 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         auth.db.delete(allowlist).where(eq(allowlist.githubLogin, targetLogin)).run();
         res.writeHead(302, { location: '/admin/allowlist' });
         res.end();
+        return;
+      }
+
+      if (pathname === '/oauth/register' && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const ip = req.socket.remoteAddress ?? 'unknown';
+        if (!oauthRegisterLimiter.check(ip)) {
+          res.writeHead(429, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'rate_limited' }));
+          return;
+        }
+        let body: unknown;
+        try {
+          const raw = await readRawBody(req, 64 * 1024);
+          body = JSON.parse(raw.toString('utf8'));
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'invalid_request', error_description: 'body must be valid JSON' }));
+          return;
+        }
+        const result = registerClient(auth.db, body);
+        if (!result.ok) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'invalid_client_metadata', error_description: result.errors.join('; ') }));
+          return;
+        }
+        res.writeHead(201, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          client_id: result.value.clientId,
+          client_name: result.value.clientName,
+          redirect_uris: result.value.redirectUris,
+          token_endpoint_auth_method: 'none',
+        }));
         return;
       }
 
