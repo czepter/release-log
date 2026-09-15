@@ -5,7 +5,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { eq, and, isNull } from 'drizzle-orm';
 import type { Db } from './db/client.ts';
-import { oauthClient, oauthCode, oauthToken } from './db/schema.ts';
+import { oauthClient, oauthCode, oauthToken, account } from './db/schema.ts';
 import { verifyPkce } from './pkce.ts';
 
 export function randomToken(bytes = 32): string {
@@ -126,4 +126,43 @@ export function revokeFamily(db: Db, familyId: string, nowIsoValue: string): voi
   db.update(oauthToken).set({ revokedAt: nowIsoValue })
     .where(and(eq(oauthToken.familyId, familyId), isNull(oauthToken.revokedAt)))
     .run();
+}
+
+const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 Stunde (spec §5)
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 Tage (spec §5)
+
+export type MintTokenPairInput = { clientId: string; accountId: number; scope: string; familyId: string };
+export type TokenPair = { accessToken: string; refreshToken: string; expiresIn: number };
+
+export function mintTokenPair(
+  db: Db, input: MintTokenPairInput, nowIso: () => string = () => new Date().toISOString(),
+): TokenPair {
+  const now = Date.parse(nowIso());
+  const accessToken = randomToken();
+  const refreshToken = randomToken();
+  db.insert(oauthToken).values({
+    id: randomToken(8), familyId: input.familyId, clientId: input.clientId, accountId: input.accountId,
+    scope: input.scope, kind: 'access', tokenHash: sha256Hex(accessToken),
+    expiresAt: new Date(now + ACCESS_TOKEN_TTL_MS).toISOString(), revokedAt: null, createdAt: nowIso(),
+  }).run();
+  db.insert(oauthToken).values({
+    id: randomToken(8), familyId: input.familyId, clientId: input.clientId, accountId: input.accountId,
+    scope: input.scope, kind: 'refresh', tokenHash: sha256Hex(refreshToken),
+    expiresAt: new Date(now + REFRESH_TOKEN_TTL_MS).toISOString(), revokedAt: null, createdAt: nowIso(),
+  }).run();
+  return { accessToken, refreshToken, expiresIn: Math.floor(ACCESS_TOKEN_TTL_MS / 1000) };
+}
+
+export type LookedUpToken = { accountId: number; login: string; clientId: string; scope: string; expiresAt: number };
+
+export function lookupAccessToken(db: Db, rawToken: string, nowMs: () => number = Date.now): LookedUpToken | null {
+  const row = db.select().from(oauthToken).where(eq(oauthToken.tokenHash, sha256Hex(rawToken))).all()[0];
+  if (!row || row.kind !== 'access' || row.revokedAt !== null) return null;
+  if (Date.parse(row.expiresAt) <= nowMs()) return null;
+  const acct = db.select().from(account).where(eq(account.githubUserId, row.accountId)).all()[0];
+  if (!acct) return null;
+  return {
+    accountId: row.accountId, login: acct.login, clientId: row.clientId, scope: row.scope,
+    expiresAt: Math.floor(Date.parse(row.expiresAt) / 1000),
+  };
 }

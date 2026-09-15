@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { openDb } from './db/client.ts';
 import { oauthClient, oauthToken } from './db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, revokeFamily } from './oauth.ts';
+import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, revokeFamily, mintTokenPair, lookupAccessToken } from './oauth.ts';
+import { account } from './db/schema.ts';
 
 function withDb(fn: (db: ReturnType<typeof openDb>) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'rlh-oauth-'));
@@ -240,5 +241,42 @@ test('a wrong client_id is rejected, even with the right redirect_uri, code and 
       code, clientId: 'attacker-client', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
     });
     assert.equal(result.ok, false);
+  });
+});
+
+test('a minted access token looks up to the right account, client and scope', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read logs:write', familyId: 'fam1' });
+    const looked = lookupAccessToken(db, pair.accessToken);
+    assert.ok(looked);
+    assert.equal(looked!.accountId, 42);
+    assert.equal(looked!.login, 'octocat');
+    assert.equal(looked!.clientId, 'c1');
+    assert.equal(looked!.scope, 'logs:read logs:write');
+  });
+});
+
+test('the refresh token does not look up as an access token', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    assert.equal(lookupAccessToken(db, pair.refreshToken), null);
+  });
+});
+
+test('an expired access token is rejected', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    let now = 0;
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' }, () => new Date(now).toISOString());
+    now = 60 * 60 * 1000 + 1; // one millisecond past the one-hour lifetime
+    assert.equal(lookupAccessToken(db, pair.accessToken, () => now), null);
+  });
+});
+
+test('an unknown token is rejected', () => {
+  withDb((db) => {
+    assert.equal(lookupAccessToken(db, 'never-issued'), null);
   });
 });
