@@ -1,8 +1,10 @@
 // The only file with a socket. Everything it decides is decided in
 // lib/public.ts, with one exception: the media route below checks
-// config.visibility itself. A media response is bytes, not a route() reply,
+// visibility itself. A media response is bytes, not a route() reply,
 // so there is no JSON shape to carry that decision through — the check has
-// to live here, in transport, where the bytes actually get written.
+// to live here, in transport, where the bytes actually get written. It
+// applies the same rule as every other content route (public, or signed in
+// with write access), reading the `viewer` this handler already computed.
 
 import { createServer } from 'node:http';
 import type { Server, ServerResponse } from 'node:http';
@@ -46,6 +48,10 @@ import type { AuthInfo, OAuthTokenVerifier } from '@modelcontextprotocol/server'
 import { toNodeHandler } from '@modelcontextprotocol/node';
 
 const MEDIA_CACHE = 'public, max-age=31536000, immutable';
+// Die Bytes eines privaten Logs hängen an der Session des Abrufenden, nicht
+// am Pfad: ein geteilter Cache darf sie nie aufbewahren, und auch der
+// Browser soll sie nicht ein Jahr lang behalten, nachdem der Zugriff endet.
+const MEDIA_CACHE_PRIVATE = 'private, no-store';
 const JSON_CACHE = 'public, max-age=60';
 
 // A GitHub delivery is typically a few kilobytes; one megabyte is generous
@@ -1355,14 +1361,23 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // add a decode here to "match" the media path -- that would be a
         // second decode on a segment nothing has decoded once yet.
         const config = reader.config(mediaMatch[1]);
-        const blob = config && config.visibility === 'public'
+        // Dieselbe Sichtbarkeitsregel wie jede andere Inhaltsroute dieses
+        // Logs (JSON-Feed, gehostete Seite): öffentlich, oder angemeldet mit
+        // Schreibrecht -- genau das, was `viewer` oben schon entschieden hat.
+        // Vorher prüfte diese Route nur 'public' und ließ damit die Bilder
+        // eines privaten Logs für JEDEN verschwinden, auch für das Mitglied,
+        // das dessen Entwürfe ohnehin sieht. Seit die gehostete Seite
+        // <img>-Tags auf diese Route rendert, war das als kaputtes Bild
+        // sichtbar.
+        const isPublic = config !== null && config.visibility === 'public';
+        const blob = config && (isPublic || viewer === 'member')
           ? reader.media(mediaMatch[1], mediaPath)
           : null;
         if (blob) {
           res.writeHead(200, {
             'content-type': blob.type,
             'content-length': blob.bytes.length,
-            'cache-control': MEDIA_CACHE,
+            'cache-control': isPublic ? MEDIA_CACHE : MEDIA_CACHE_PRIVATE,
             'access-control-allow-origin': '*',
           });
           res.end(method === 'HEAD' ? undefined : blob.bytes);
