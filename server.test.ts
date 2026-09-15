@@ -840,3 +840,24 @@ test('a product name containing HTML-meaningful characters is escaped in the lis
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
+
+test('a repoOwner and repoName containing HTML-meaningful characters are each escaped independently', async () => {
+  await withAuth(async (auth, db) => {
+    // Two distinct tags, not one shared value: if only one of the two
+    // escapeHtml calls in the row template were ever dropped, a shared
+    // fixture could still pass by coincidence. Distinct values make each
+    // field's escaping provable on its own.
+    insertLog(db, 'xss-owner-repo', '<b>owner</b>', '<i>repo</i>');
+    const gh = fakeGitHub({ '<b>owner</b>/<i>repo</i>': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<b>owner</b>'), 'the raw repoOwner tag must never appear unescaped');
+      assert.ok(!html.includes('<i>repo</i>'), 'the raw repoName tag must never appear unescaped');
+      assert.ok(html.includes('&lt;b&gt;owner&lt;/b&gt;'), 'repoOwner must appear escaped instead');
+      assert.ok(html.includes('&lt;i&gt;repo&lt;/i&gt;'), 'repoName must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
