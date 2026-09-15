@@ -332,6 +332,23 @@ test('reusing an already-rotated refresh token revokes the whole family, includi
   });
 });
 
+test('reusing a rotated-away refresh token does not touch a different family\'s access token', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const pairA = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam-a' });
+    const pairB = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam-b' });
+
+    const rotatedA = rotateRefreshToken(db, pairA.refreshToken);
+    assert.equal(rotatedA.ok, true);
+
+    // Replay the OLD family-A refresh token -- triggers reuse detection.
+    rotateRefreshToken(db, pairA.refreshToken);
+
+    assert.equal(lookupAccessToken(db, pairA.accessToken), null, 'family A\'s original access token must be revoked');
+    assert.ok(lookupAccessToken(db, pairB.accessToken), 'family B\'s access token must be untouched by family A\'s revocation');
+  });
+});
+
 test('an expired refresh token is rejected without rotating', () => {
   withDb((db) => {
     db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
