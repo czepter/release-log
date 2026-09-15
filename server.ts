@@ -39,6 +39,7 @@ import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
 import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
 import { isValidCodeChallenge } from './lib/pkce.ts';
+import { redeemUploadToken } from './lib/uploads.ts';
 import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
@@ -206,6 +207,40 @@ function readRawBody(req: import('node:http').IncomingMessage, maxBytes: number)
     });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
+  });
+}
+
+// Wie readRawBody, aber für Routen, die eine Ablehnung noch beantworten
+// können sollen: Die 413 geht raus, BEVOR die Verbindung fällt -- wer
+// hochlädt, sieht sonst nur einen Abbruch ohne Grund. null heißt "schon
+// beantwortet", nicht "leerer Body".
+function readBodyWithin(
+  req: import('node:http').IncomingMessage, res: ServerResponse, maxBytes: number,
+): Promise<Buffer | null> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let refused = false;
+    req.on('data', (chunk: Buffer) => {
+      if (refused) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        // Abbrechen statt weiterlesen: der Rest des Bodys nützt niemandem
+        // mehr, und ihn trotzdem zu puffern wäre genau das, was die Grenze
+        // verhindern soll.
+        refused = true;
+        res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'payload_too_large' }));
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => { if (!refused) resolve(Buffer.concat(chunks)); });
+    // Nach req.destroy() folgt oft noch ein 'error' -- das ist der Abbruch,
+    // den diese Funktion selbst ausgelöst hat, kein neuer Fehler.
+    req.on('error', (err) => { if (!refused) reject(err); });
   });
 }
 
@@ -743,53 +778,98 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           return;
         }
 
-        const chunks: Buffer[] = [];
-        let size = 0;
-        let refused = false;
-        req.on('data', (chunk: Buffer) => {
-          if (refused) return;
-          size += chunk.length;
-          if (size > MEDIA_MAX_BYTES) {
-            refused = true;
-            res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ error: 'payload_too_large' }));
-            req.destroy();
-            return;
-          }
-          chunks.push(chunk);
-        });
-        req.on('end', () => {
-          if (refused) return;
-          (async () => {
-            try {
-              const bytes = Buffer.concat(chunks);
-              // expectedSha: null -- ein Medien-Upload legt immer eine neue
-              // Datei an, nie ersetzt er eine bestehende. Existiert der
-              // Pfad schon, lehnt GitHub mit 422 ab (dieselbe Ablehnung,
-              // die add_media als path_exists kennt, spec §6): ein
-              // überschriebenes Bild würde sonst jedes veröffentlichte
-              // Release stillschweigend ändern, das darauf zeigt.
-              const result = await auth.gh.putFile(
-                ref, `media/${filename}`, bytes, `add media/${filename} via dashboard`, null,
-              );
-              if (result.kind === 'conflict') {
-                res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ error: 'path_exists' }));
-                return;
-              }
-              if (result.kind === 'no_installation') {
-                res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ error: 'not_installed' }));
-                return;
-              }
-              auth.onRepoWrite(ref);
-              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-              res.end(JSON.stringify({ ok: true }));
-            } catch (err) {
-              respondInternalError(res, err);
-            }
-          })();
-        });
+        const bytes = await readBodyWithin(req, res, MEDIA_MAX_BYTES);
+        if (bytes === null) return;
+        // expectedSha: null -- ein Medien-Upload legt immer eine neue
+        // Datei an, nie ersetzt er eine bestehende. Existiert der Pfad
+        // schon, lehnt GitHub mit 422 ab (dieselbe Ablehnung, die add_media
+        // als path_exists kennt, spec §6): ein überschriebenes Bild würde
+        // sonst jedes veröffentlichte Release stillschweigend ändern, das
+        // darauf zeigt.
+        const result = await auth.gh.putFile(
+          ref, `media/${filename}`, bytes, `add media/${filename} via dashboard`, null,
+        );
+        if (result.kind === 'conflict') {
+          res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'path_exists' }));
+          return;
+        }
+        if (result.kind === 'no_installation') {
+          res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_installed' }));
+          return;
+        }
+        auth.onRepoWrite(ref);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // Der Upload-Weg von add_media (spec §6): das Token in der URL IST
+      // der Ausweis -- kein Cookie, kein Bearer. Es ist einmalig, zehn
+      // Minuten gültig und an Log, Zielpfad und Konto gebunden, und was es
+      // erlaubt, wird hier noch einmal live geprüft: ein Konto, dem das
+      // Schreibrecht in der Zwischenzeit entzogen wurde, lädt nicht hoch.
+      const uploadMatch = /^\/upload\/([A-Za-z0-9_-]+)$/.exec(pathname);
+      if (uploadMatch && method === 'PUT') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const redeemed = redeemUploadToken(auth.db, uploadMatch[1]);
+        if (!redeemed.ok) {
+          // Unbekannt, abgelaufen, schon benutzt -- eine Antwort für alle
+          // drei. Was davon zutrifft, hilft nur dem, der rät.
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'invalid_token', message: 'this upload URL is unknown, expired or already used; call add_media again' }));
+          return;
+        }
+        const { logId, path: mediaPath, accountId, contentType } = redeemed.value;
+        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+        if (!row) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        if (row.state === 'frozen') {
+          res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'log_frozen' }));
+          return;
+        }
+        const uploader = auth.db.select().from(account).where(eq(account.githubUserId, accountId)).all()[0];
+        const ref = { owner: row.repoOwner, repo: row.repoName };
+        const allowed = uploader !== undefined
+          && await auth.perms.canWrite(accountId, uploader.login, row.publicId, ref);
+        if (!allowed) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+
+        const bytes = await readBodyWithin(req, res, MEDIA_MAX_BYTES);
+        if (bytes === null) return;
+        if (bytes.length === 0) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'empty_body' }));
+          return;
+        }
+        // Denselben expectedSha-null-Grund wie beim Dashboard-Upload: ein
+        // Bild wird angelegt, nie ersetzt.
+        const result = await auth.gh.putFile(ref, mediaPath, bytes, `add ${mediaPath} via MCP`, null);
+        if (result.kind === 'conflict') {
+          res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'path_exists' }));
+          return;
+        }
+        if (result.kind === 'no_installation') {
+          res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'no_installation' }));
+          return;
+        }
+        auth.onRepoWrite(ref);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, path: mediaPath, content_type: contentType, commit_sha: result.sha }));
         return;
       }
 

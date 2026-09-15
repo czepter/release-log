@@ -138,3 +138,21 @@ export const oauthToken = sqliteTable('oauth_token', {
 }, (t) => [
   uniqueIndex('oauth_token_hash_unique').on(t.tokenHash),
 ]);
+
+// Eine ausgestellte, noch nicht benutzte Upload-Erlaubnis (spec §6,
+// "Medien-Upload"): einmalig, zehn Minuten gültig, an Log, Zielpfad und
+// Konto gebunden. Wie jedes Token dieses Systems liegt nur der Hash hier --
+// der Wert selbst steht einmal in der URL, die add_media zurückgibt, und
+// danach nirgends mehr. contentType wird beim Ausstellen entschieden, nicht
+// beim Hochladen: der Pfad benennt den Typ, und wer die Bytes schickt, soll
+// darüber nicht mitbestimmen.
+export const uploadToken = sqliteTable('upload_token', {
+  tokenHash: text('token_hash').primaryKey(),
+  logId: text('log_id').notNull(),
+  path: text('path').notNull(),
+  accountId: integer('account_id').notNull(),
+  contentType: text('content_type').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  consumedAt: text('consumed_at'),
+  createdAt: text('created_at').notNull(),
+});

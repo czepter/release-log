@@ -20,6 +20,7 @@ import { permissions } from './lib/permissions.ts';
 import type { Permissions } from './lib/permissions.ts';
 import { log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 import { mintTokenPair } from './lib/oauth.ts';
+import { mintUploadToken, UPLOAD_TOKEN_TTL_MS } from './lib/uploads.ts';
 import { indexReader } from './lib/indexReader.ts';
 
 const reader: Reader = {
@@ -1410,6 +1411,205 @@ test('POST media commits the file under media/<filename> and triggers a resync',
       assert.equal(committed!.sha, null, 'a new media file must be created, not replace an unrelated sha');
       assert.deepEqual(enqueued, { owner: 'o', repo: 'repo1' });
     }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+// PUT /upload/<token> -- der Weg, den add_media aufmacht (Issue #2,
+// spec §6). Die Erlaubnis wird hier direkt geprägt statt über das Werkzeug:
+// was add_media entscheidet, steht in lib/mcpTools.test.ts; hier steht, was
+// die Route mit einer fertigen Erlaubnis macht.
+function insertUploadableLog(db: ReturnType<typeof openDb>, state = 'active'): void {
+  db.insert(log).values({
+    publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+    product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+    state, headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+  }).run();
+  db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+}
+
+const UPLOAD_BINDING = { logId: 'log1', path: 'media/screenshot.png', accountId: 42, contentType: 'image/png' };
+
+async function putUpload(base: string, token: string, bytes: Buffer): Promise<Response> {
+  return fetch(`${base}/upload/${token}`, { method: 'PUT', headers: { 'content-type': 'image/png' }, body: bytes });
+}
+
+test('PUT /upload/<token> commits the bytes under the token\'s path and triggers a resync', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let committed: { path: string; content: Buffer; sha: string | null } | null = null;
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile(_ref, path, content, _message, expectedSha) {
+        committed = { path, content, sha: expectedSha };
+        return { kind: 'committed', sha: 'media-sha' };
+      },
+    };
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, token, TINY_PNG);
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), {
+        ok: true, path: 'media/screenshot.png', content_type: 'image/png', commit_sha: 'media-sha',
+      });
+      assert.ok(committed, 'putFile must have been called');
+      // Der Pfad kommt aus dem Token, nicht aus der Anfrage: der
+      // Hochladende bestimmt nur die Bytes.
+      assert.equal(committed!.path, 'media/screenshot.png');
+      assert.deepEqual(committed!.content, TINY_PNG);
+      assert.equal(committed!.sha, null, 'a new media file is created, never an overwrite');
+      assert.deepEqual(enqueued, { owner: 'o', repo: 'repo1' });
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+test('an upload token works exactly once', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let commits = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { commits += 1; return { kind: 'committed', sha: 'media-sha' }; },
+    };
+    await withServer(reader, async (base) => {
+      assert.equal((await putUpload(base, token, TINY_PNG)).status, 200);
+      const second = await putUpload(base, token, TINY_PNG);
+      assert.equal(second.status, 403);
+      assert.equal(((await second.json()) as { error: string }).error, 'invalid_token');
+      assert.equal(commits, 1, 'the second attempt must not reach GitHub at all');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('an expired upload token is refused', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const longAgo = new Date(Date.now() - UPLOAD_TOKEN_TTL_MS - 1000).toISOString();
+    const { token } = mintUploadToken(db, UPLOAD_BINDING, () => longAgo);
+    let commits = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { commits += 1; return { kind: 'committed', sha: 'media-sha' }; },
+    };
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, token, TINY_PNG);
+      assert.equal(res.status, 403);
+      assert.equal(commits, 0);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('an unknown upload token is refused the same way an expired one is', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, 'never-minted-anywhere', TINY_PNG);
+      assert.equal(res.status, 403);
+      assert.equal(((await res.json()) as { error: string }).error, 'invalid_token');
+    }, undefined, auth);
+  });
+});
+
+test('an upload by an account that lost write access in the meantime is refused', async () => {
+  // Die Erlaubnis wurde ausgestellt, als das Konto schreiben durfte. Sie
+  // gilt zehn Minuten -- die Rechteprüfung gilt bis zum Commit (spec §5:
+  // GitHub entscheidet, live, nicht das ausgestellte Papier).
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let commits = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'read',
+      async putFile() { commits += 1; return { kind: 'committed', sha: 'media-sha' }; },
+    };
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, token, TINY_PNG);
+      assert.equal(res.status, 403);
+      assert.equal(((await res.json()) as { error: string }).error, 'forbidden');
+      assert.equal(commits, 0);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('an upload to a log that froze after the token was issued is refused', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db, 'frozen');
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let commits = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => null,
+      async putFile() { commits += 1; return { kind: 'committed', sha: 'media-sha' }; },
+    };
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, token, TINY_PNG);
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { error: string }).error, 'log_frozen');
+      assert.equal(commits, 0);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('an oversized upload is refused with 413 and never reaches GitHub', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let commits = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { commits += 1; return { kind: 'committed', sha: 'media-sha' }; },
+    };
+    await withServer(reader, async (base) => {
+      const status = await putUpload(base, token, Buffer.alloc(11 * 1024 * 1024))
+        .then((res) => res.status)
+        .catch(() => 0);
+      assert.notEqual(status, 200);
+      assert.ok(status === 413 || status === 0, `unexpected status ${status}`);
+      assert.equal(commits, 0, 'an oversized body must never reach putFile');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GitHub refusing the path (it already exists) comes back as path_exists', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { return { kind: 'conflict' }; },
+    };
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, token, TINY_PNG);
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { error: string }).error, 'path_exists');
+      assert.equal(enqueued, null, 'nothing was committed, so nothing needs resyncing');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+test('an empty upload body is refused before any commit', async () => {
+  await withAuth(async (auth, db) => {
+    insertUploadableLog(db);
+    const { token } = mintUploadToken(db, UPLOAD_BINDING);
+    let commits = 0;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { commits += 1; return { kind: 'committed', sha: 'media-sha' }; },
+    };
+    await withServer(reader, async (base) => {
+      const res = await putUpload(base, token, Buffer.alloc(0));
+      assert.equal(res.status, 400);
+      assert.equal(commits, 0);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
 

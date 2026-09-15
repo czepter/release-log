@@ -15,6 +15,9 @@ import { sortReleases, latestOf } from './order.ts';
 import { lookupAccessToken } from './oauth.ts';
 import { parseRelease } from './document.ts';
 import type { GitHub, RepoRef } from './github.ts';
+import { mediaTypeOf } from './mediaTypes.ts';
+import { MEDIA_MAX_BYTES } from './index.ts';
+import { mintUploadToken, normalizeMediaPath } from './uploads.ts';
 
 type CallToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -45,9 +48,10 @@ Ablauf:
 1. list_logs, dann get_log -- liefert jüngste Version und deren covered.
 2. Lies lokal "git log" ab diesen Commits.
 3. Verwandte Commits zu Themen bündeln, Prosa schreiben.
-4. write_release mit published_at: null -- ein Entwurf.
-5. Der Mensch liest den Permalink, den der Aufruf zurückgibt.
-6. publish_release.
+4. Bilder mit add_media hochladen: das Werkzeug liefert eine Upload-URL, die Bytes gehen per PUT dorthin, und image.src im Dokument ist danach der zurückgegebene Pfad.
+5. write_release mit published_at: null -- ein Entwurf.
+6. Der Mensch liest den Permalink, den der Aufruf zurückgibt.
+7. publish_release.
 `.trim();
 
 export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
@@ -226,6 +230,63 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
       'unpublish_release',
       { description: 'Setzt published_at auf null.', inputSchema: z.object({ log_id: z.string(), version: z.string() }) },
       ({ log_id, version }) => togglePublish(log_id, version, null),
+    );
+
+    // add_media stellt nur die Erlaubnis aus; die Bytes gehen per PUT an
+    // die Upload-Route (server.ts) und laufen so nie durch den Kontext des
+    // Agenten -- 5 MB Bild wären als Base64 rund 6,7 MB Text (spec §6).
+    //
+    // Zwei Fehlernamen stehen nicht in spec §6's Liste: bad_filename und
+    // unsupported_type. Beide gibt es schon, mit genau dieser Bedeutung, im
+    // Dashboard-Upload (server.ts) -- ein zweiter Name für dieselbe
+    // Ablehnung wäre die schlechtere Wahl als eine Liste, die zwei
+    // Eingabefehler des Transports nicht vorhergesehen hat.
+    server.registerTool(
+      'add_media',
+      {
+        description: 'Liefert eine einmalige Upload-URL für ein Bild unter media/<Dateiname>. Die Bytes gehen per PUT dorthin, nicht durch dieses Werkzeug.',
+        inputSchema: z.object({ log_id: z.string(), path: z.string() }),
+      },
+      async ({ log_id, path }) => {
+        if (!scopes.includes('logs:write')) return toolError('forbidden', 'logs:write scope required');
+        const row = db.select().from(log).where(eq(log.publicId, log_id)).all()[0];
+        if (!row) return toolError('not_found', `no such log: ${log_id}`);
+        // Frozen zuerst, wie write_release und togglePublish: das Repo ist
+        // unerreichbar, also wird kein GitHub-Aufruf riskiert, der ohnehin
+        // nur scheitern kann.
+        if (row.state === 'frozen') return toolError('log_frozen', 'this log is frozen; its repository is unreachable');
+        const ref = { owner: row.repoOwner, repo: row.repoName };
+        const canWriteThis = who !== null && await perms.canWrite(who.accountId, who.login, row.publicId, ref);
+        if (!canWriteThis) return toolError('forbidden', 'no write access to this repository');
+
+        const target = normalizeMediaPath(path);
+        if (target === null) {
+          return toolError('bad_filename', `not a media path: "${path}" -- pass a bare filename such as "screenshot.png"`);
+        }
+        const contentType = mediaTypeOf(target);
+        if (contentType === null) {
+          return toolError('unsupported_type', `unsupported media type for "${target}" -- .png, .jpg and .webp only`);
+        }
+        // Existiert der Pfad schon, gibt es gar keine URL: ein
+        // überschriebenes Bild würde stillschweigend jedes bereits
+        // veröffentlichte Release ändern, das darauf zeigt (spec §6). Die
+        // Upload-Route lehnt denselben Fall beim Commit noch einmal ab --
+        // hier steht der Index, dort GitHub selbst.
+        if (reader.media(log_id, target) !== null) {
+          return toolError('path_exists', `${target} already exists in this log; pick another filename`);
+        }
+
+        const { token, expiresAt } = mintUploadToken(db, {
+          logId: log_id, path: target, accountId: who.accountId, contentType,
+        });
+        return toolOk({
+          upload_url: `${baseUrl}/upload/${token}`,
+          path: target,
+          content_type: contentType,
+          expires_at: expiresAt,
+          max_bytes: MEDIA_MAX_BYTES,
+        });
+      },
     );
 
     server.registerPrompt(
