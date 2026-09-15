@@ -1658,7 +1658,11 @@ if (import.meta.main) {
     gh,
     perms,
     users,
-    createRepo: userRepoCreator(withRetry(authHttp)),
+    // Ohne withRetry, anders als jeder andere GitHub-Aufruf hier: ein
+    // Wiederholungsversuch auf POST /user/repos kann ein zweites Repo
+    // anlegen (oder das erste als „Name vergeben" zurückmelden), wenn die
+    // erste Antwort unterwegs verloren ging. Anlegen ist nicht idempotent.
+    createRepo: userRepoCreator(authHttp),
     onRepoWrite: (ref) => { queue.enqueue(ref); },
     // Durch dieselbe Warteschlange wie jeder andere Abgleich, nur
     // abgewartet: zwei Läufe auf demselben Repo würden einander die Sweeps
