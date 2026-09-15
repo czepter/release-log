@@ -32,7 +32,7 @@ import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
-import { registerClient } from './lib/oauth.ts';
+import { registerClient, findClient, mintAuthorizationCode } from './lib/oauth.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 
 const MEDIA_CACHE = 'public, max-age=31536000, immutable';
@@ -113,6 +113,35 @@ function readFormBody(req: import('node:http').IncomingMessage): Promise<URLSear
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => resolve(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))));
     req.on('error', reject);
+  });
+}
+
+const ALLOWED_SCOPES = ['logs:read', 'logs:write'];
+
+// Task 4's isAcceptableRedirectUri checks a value being REGISTERED (must be
+// https, or http on loopback). This checks a value PRESENTED at /oauth/authorize
+// against what was registered -- exact match, except the redirect_uri's port
+// may vary from what was registered when both are loopback (RFC 8252): a
+// native client picks its callback port at OS-assigned random each run, so
+// pinning one exact port at registration time would be unusable.
+function redirectUriMatches(registered: string[], presented: string): boolean {
+  if (registered.includes(presented)) return true;
+  let presentedUrl: URL;
+  try {
+    presentedUrl = new URL(presented);
+  } catch {
+    return false;
+  }
+  if (presentedUrl.protocol !== 'http:') return false;
+  if (!['127.0.0.1', '::1', 'localhost'].includes(presentedUrl.hostname)) return false;
+  return registered.some((r) => {
+    try {
+      const reg = new URL(r);
+      return reg.protocol === 'http:' && reg.hostname === presentedUrl.hostname
+        && reg.pathname === presentedUrl.pathname && reg.search === presentedUrl.search;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -893,6 +922,116 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           redirect_uris: result.value.redirectUris,
           token_endpoint_auth_method: 'none',
         }));
+        return;
+      }
+
+      if (pathname === '/oauth/authorize' && (method === 'GET' || method === 'POST')) {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const params = method === 'GET' ? url.searchParams : await readFormBody(req);
+        const clientId = params.get('client_id') ?? '';
+        const redirectUri = params.get('redirect_uri') ?? '';
+        const client = findClient(auth.db, clientId);
+        // Unknown client or an unregistered redirect_uri: never redirect --
+        // there is no validated destination to send the error to (spec §5,
+        // "redirect URIs are checked exactly").
+        if (!client) {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Unbekannter Client', '<p>Dieser Client ist nicht registriert.</p>'));
+          return;
+        }
+        if (!redirectUriMatches(client.redirectUris, redirectUri)) {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Ungültige Redirect-URI', '<p>Diese Redirect-URI ist für diesen Client nicht registriert.</p>'));
+          return;
+        }
+
+        // From here on redirectUri is validated -- every further error may go there.
+        const state = params.get('state') ?? '';
+        const redirectWithError = (error: string): void => {
+          const target = new URL(redirectUri);
+          target.searchParams.set('error', error);
+          if (state) target.searchParams.set('state', state);
+          res.writeHead(302, { location: target.toString() });
+          res.end();
+        };
+
+        const codeChallenge = params.get('code_challenge') ?? '';
+        const codeChallengeMethod = params.get('code_challenge_method') ?? '';
+        // response_type only applies to the initial request (GET) -- it is
+        // not one of the fields the consent form round-trips (see the hidden
+        // fields below), so requiring it again on POST would reject every
+        // decision submission before it ever reaches the allow/deny check.
+        if ((method === 'GET' && params.get('response_type') !== 'code') || codeChallenge === '' || codeChallengeMethod !== 'S256') {
+          redirectWithError('invalid_request');
+          return;
+        }
+        const scope = params.get('scope') ?? '';
+        const scopes = scope.split(' ').filter((s) => s !== '');
+        if (scopes.length === 0 || !scopes.every((s) => ALLOWED_SCOPES.includes(s))) {
+          redirectWithError('invalid_scope');
+          return;
+        }
+
+        const who = currentAccount(req, auth);
+        if (!who) {
+          const next = `/oauth/authorize?${url.search.slice(1)}`;
+          res.writeHead(302, { location: `/auth/github/login?next=${encodeURIComponent(next)}` });
+          res.end();
+          return;
+        }
+
+        if (method === 'POST') {
+          const decision = params.get('decision');
+          if (decision !== 'allow') {
+            redirectWithError('access_denied');
+            return;
+          }
+          const code = mintAuthorizationCode(auth.db, {
+            clientId: client.clientId, redirectUri, codeChallenge, accountId: who.accountId, scope,
+          });
+          const target = new URL(redirectUri);
+          target.searchParams.set('code', code);
+          if (state) target.searchParams.set('state', state);
+          res.writeHead(302, { location: target.toString() });
+          res.end();
+          return;
+        }
+
+        // GET, signed in: consent screen. Lists the logs this account
+        // currently has write access to -- purely informational, the actual
+        // enforcement stays live against GitHub (as in the dashboard, plan
+        // 6) and never depends on this display.
+        const allLogs = auth.db.select().from(log).all();
+        const affected: string[] = [];
+        for (const row of allLogs) {
+          const ref = { owner: row.repoOwner, repo: row.repoName };
+          if (await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref)) {
+            affected.push(`<li>${escapeHtml(row.product)} (${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)})</li>`);
+          }
+        }
+        const body = `
+          <h1>${escapeHtml(client.clientName)} verbinden</h1>
+          <p>Dieser Client möchte Zugriff mit folgenden Rechten: <strong>${escapeHtml(scope)}</strong></p>
+          ${affected.length > 0
+            ? `<p>Betroffene Logs:</p><ul>${affected.join('')}</ul>`
+            : '<p class="muted">Aktuell keine Logs mit Schreibrecht.</p>'}
+          <form method="POST" action="/oauth/authorize">
+            <input type="hidden" name="client_id" value="${escapeHtml(client.clientId)}">
+            <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">
+            <input type="hidden" name="code_challenge" value="${escapeHtml(codeChallenge)}">
+            <input type="hidden" name="code_challenge_method" value="S256">
+            <input type="hidden" name="state" value="${escapeHtml(state)}">
+            <input type="hidden" name="scope" value="${escapeHtml(scope)}">
+            <button type="submit" name="decision" value="allow">Zulassen</button>
+            <button type="submit" name="decision" value="deny">Ablehnen</button>
+          </form>
+        `;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page('Verbindung erlauben', body));
         return;
       }
 

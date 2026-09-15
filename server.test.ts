@@ -1990,3 +1990,137 @@ test('a callback with no login_next cookie still redirects to /me (unchanged def
     }, undefined, auth);
   });
 });
+
+async function registerTestClient(base: string, redirectUri = 'https://client.example/cb'): Promise<string> {
+  const res = await fetch(`${base}/oauth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ redirect_uris: [redirectUri], client_name: 'Test Client' }),
+  });
+  const body = await res.json() as { client_id: string };
+  return body.client_id;
+}
+
+const AUTHORIZE_CHALLENGE = 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8'; // s. Task 2/6
+
+test('GET /oauth/authorize without a session redirects to login with next set', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const location = res.headers.get('location')!;
+      assert.ok(location.startsWith('/auth/github/login?next='));
+      assert.ok(location.includes(encodeURIComponent('/oauth/authorize?')));
+    }, undefined, auth);
+  });
+});
+
+test('GET /oauth/authorize with a session shows the consent screen naming the client and scope', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Test Client'));
+      assert.ok(html.includes('logs:read'));
+    }, undefined, auth);
+  });
+});
+
+test('GET /oauth/authorize with an unknown client_id is refused without redirecting anywhere', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=nonexistent&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 400, 'an unknown client must never produce a redirect -- there is nowhere trusted to send it');
+    }, undefined, auth);
+  });
+});
+
+test('GET /oauth/authorize with a redirect_uri not registered for this client answers 400, not a redirect', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base, 'https://client.example/cb');
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://attacker.example/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 400);
+    }, undefined, auth);
+  });
+});
+
+test('GET /oauth/authorize with code_challenge_method=plain redirects back with error, never issuing a code', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=abc&code_challenge_method=plain&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location')!);
+      assert.equal(location.searchParams.get('error'), 'invalid_request');
+      assert.equal(location.searchParams.get('state'), 'xyz');
+    }, undefined, auth);
+  });
+});
+
+test('GET /oauth/authorize with an unknown scope redirects back with invalid_scope', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:delete`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location')!);
+      assert.equal(location.searchParams.get('error'), 'invalid_scope');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/authorize with decision=allow redirects to redirect_uri with a code and the original state', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const res = await postForm(base, '/oauth/authorize', {
+        decision: 'allow', client_id: clientId, redirect_uri: 'https://client.example/cb',
+        code_challenge: AUTHORIZE_CHALLENGE, code_challenge_method: 'S256', state: 'xyz', scope: 'logs:read',
+      }, cookie);
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location')!);
+      assert.equal(location.origin + location.pathname, 'https://client.example/cb');
+      assert.ok(location.searchParams.get('code'));
+      assert.equal(location.searchParams.get('state'), 'xyz');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/authorize with decision=deny redirects with access_denied, no code issued', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const res = await postForm(base, '/oauth/authorize', {
+        decision: 'deny', client_id: clientId, redirect_uri: 'https://client.example/cb',
+        code_challenge: AUTHORIZE_CHALLENGE, code_challenge_method: 'S256', state: 'xyz', scope: 'logs:read',
+      }, cookie);
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location')!);
+      assert.equal(location.searchParams.get('error'), 'access_denied');
+      assert.equal(location.searchParams.get('code'), null);
+    }, undefined, auth);
+  });
+});
