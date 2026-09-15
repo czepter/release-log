@@ -548,6 +548,53 @@ test('unpublish_release maps GitHub\'s no_installation to an error, does not enq
   }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'no_installation' }; } });
 });
 
+// Review finding [Important]: togglePublish checked canWrite (a GitHub API
+// call) BEFORE row.state === 'frozen', the opposite order from write_release
+// (Task 16), which checks frozen FIRST specifically so a repo already known
+// to be unreachable never risks a network call, and so log_frozen is
+// answered unconditionally regardless of the caller's actual write access.
+// The reviewer proved this live: on a frozen log, collaboratorPermission
+// returning null (the real behavior once the GitHub App is uninstalled --
+// exactly what happens to a frozen log) made publish_release/unpublish_release
+// answer 'forbidden' instead of 'log_frozen', a strictly less actionable
+// error than what write_release gives on the exact same log. These two
+// tests reuse write_release's own frozen-log fixture shape verbatim
+// (probe: 'gone', collaboratorPermission: null, putFile throws) to prove
+// the reordered check now matches.
+test('publish_release on a frozen log answers log_frozen, regardless of write access', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'frozen', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'publish_release', {
+      log_id: 'log1', version: '1.0.0',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'log_frozen');
+  }, { probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => null, async putFile() { throw new Error('must not be called'); } });
+});
+
+test('unpublish_release on a frozen log answers log_frozen, regardless of write access', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'frozen', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'unpublish_release', {
+      log_id: 'log1', version: '1.0.0',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'log_frozen');
+  }, { probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => null, async putFile() { throw new Error('must not be called'); } });
+});
+
 // The brief's own placeholder for this test only asserted that
 // `server.server` exists on the McpServer instance -- true of every McpServer
 // regardless of whether instructions or a prompt were ever registered, so it
