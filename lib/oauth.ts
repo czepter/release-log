@@ -192,3 +192,27 @@ export function rotateRefreshToken(db: Db, rawRefreshToken: string, nowMs: () =>
   );
   return { ok: true, value: { ...pair, scope: row.scope, accountId: row.accountId } };
 }
+
+// Scoped by accountId AND clientId -- a user revoking "their" connection to a
+// client must never revoke a different user's connection to the same client.
+export function revokeAllForClient(db: Db, accountId: number, clientId: string, nowIsoValue: string): void {
+  db.update(oauthToken).set({ revokedAt: nowIsoValue })
+    .where(and(eq(oauthToken.accountId, accountId), eq(oauthToken.clientId, clientId), isNull(oauthToken.revokedAt)))
+    .run();
+}
+
+export function listConnectedClients(
+  db: Db, accountId: number, nowMs: () => number = Date.now,
+): Array<{ clientId: string; clientName: string; scope: string }> {
+  const now = nowMs();
+  const rows = db.select().from(oauthToken)
+    .where(and(eq(oauthToken.accountId, accountId), eq(oauthToken.kind, 'refresh'), isNull(oauthToken.revokedAt)))
+    .all()
+    .filter((row) => Date.parse(row.expiresAt) > now);
+  const seen = new Map<string, string>();
+  for (const row of rows) if (!seen.has(row.clientId)) seen.set(row.clientId, row.scope);
+  return [...seen].map(([clientId, scope]) => {
+    const client = findClient(db, clientId);
+    return { clientId, clientName: client?.clientName ?? clientId, scope };
+  });
+}

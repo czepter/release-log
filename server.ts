@@ -32,7 +32,7 @@ import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
-import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair } from './lib/oauth.ts';
+import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient } from './lib/oauth.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 
 const MEDIA_CACHE = 'public, max-age=31536000, immutable';
@@ -432,6 +432,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
             : `<p class="muted">Keine Logs, auf die du gerade Schreibrechte hast.</p>`}
           ${isTheAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
           <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
+          <p><a href="/dashboard/connections">Verbundene Clients</a></p>
         `;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(page('Dashboard', body));
@@ -889,6 +890,61 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         return;
       }
 
+      if (pathname === '/dashboard/connections' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        const clients = listConnectedClients(auth.db, who.accountId);
+        const rows = clients.map((c) =>
+          `<tr><td>${escapeHtml(c.clientName)}</td><td class="muted">${escapeHtml(c.scope)}</td><td><form method="POST" action="/dashboard/connections/${encodeURIComponent(c.clientId)}/revoke"><button type="submit">Trennen</button></form></td></tr>`,
+        ).join('');
+        const body = `
+          <p><a href="/dashboard">&larr; Dashboard</a></p>
+          <h1>Verbundene Clients</h1>
+          ${clients.length > 0
+            ? `<table><thead><tr><th>Client</th><th>Rechte</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+            : '<p class="muted">Keine verbundenen Clients.</p>'}
+        `;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page('Verbundene Clients', body));
+        return;
+      }
+
+      const connectionRevokeMatch = /^\/dashboard\/connections\/([^/]+)\/revoke$/.exec(pathname);
+      if (connectionRevokeMatch && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        let clientId: string;
+        try {
+          clientId = decodeURIComponent(connectionRevokeMatch[1]);
+        } catch {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Ungültiger Client', '<p>Der Client-Bezeichner ist ungültig.</p>'));
+          return;
+        }
+        revokeAllForClient(auth.db, who.accountId, clientId, new Date().toISOString());
+        res.writeHead(302, { location: '/dashboard/connections' });
+        res.end();
+        return;
+      }
+
       if (pathname === '/oauth/register' && method === 'POST') {
         if (!auth) {
           res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
@@ -1074,7 +1130,21 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           return;
         }
 
-        // Task 11 ergänzt hier einen "refresh_token"-Zweig.
+        if (grantType === 'refresh_token') {
+          const refreshToken = form.get('refresh_token') ?? '';
+          const rotated = rotateRefreshToken(auth.db, refreshToken);
+          if (!rotated.ok) {
+            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'invalid_grant' }));
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            access_token: rotated.value.accessToken, refresh_token: rotated.value.refreshToken,
+            token_type: 'Bearer', expires_in: rotated.value.expiresIn, scope: rotated.value.scope,
+          }));
+          return;
+        }
 
         res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: 'unsupported_grant_type' }));
