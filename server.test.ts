@@ -1931,3 +1931,62 @@ test('POST /oauth/register is rate-limited after 10 requests from the same IP', 
     }, undefined, auth);
   });
 });
+
+test('GET /auth/github/login with next=/oauth/authorize?... stores it in a cookie', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/login?next=${encodeURIComponent('/oauth/authorize?client_id=abc')}`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const setCookies = res.headers.getSetCookie?.() ?? [res.headers.get('set-cookie') ?? ''];
+      const loginNext = setCookies.find((c) => c.startsWith('login_next='));
+      assert.ok(loginNext, 'login_next cookie must be set');
+      assert.ok(loginNext!.includes(encodeURIComponent('/oauth/authorize?client_id=abc')));
+    }, undefined, auth);
+  });
+});
+
+test('GET /auth/github/login with a next that is not /oauth/authorize is ignored, no cookie set', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/login?next=${encodeURIComponent('https://evil.example/steal')}`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const setCookies = res.headers.getSetCookie?.() ?? [res.headers.get('set-cookie') ?? ''];
+      assert.equal(setCookies.some((c) => c.startsWith('login_next=')), false, 'an out-of-scope next must never reach a cookie');
+    }, undefined, auth);
+  });
+});
+
+test('a successful callback redirects to the stored login_next instead of /me, and clears the cookie', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const loginRes = await fetch(`${base}/auth/github/login?next=${encodeURIComponent('/oauth/authorize?client_id=abc')}`, { redirect: 'manual' });
+      const setCookies = loginRes.headers.getSetCookie?.() ?? [];
+      const stateCookie = setCookies.find((c) => c.startsWith('oauth_state='))!.split(';')[0];
+      const nextCookie = setCookies.find((c) => c.startsWith('login_next='))!.split(';')[0];
+      const state = stateCookie.split('=')[1];
+
+      const cbRes = await fetch(`${base}/auth/github/callback?code=abc&state=${state}`, {
+        redirect: 'manual', headers: { cookie: `${stateCookie}; ${nextCookie}` },
+      });
+      assert.equal(cbRes.status, 302);
+      assert.equal(cbRes.headers.get('location'), '/oauth/authorize?client_id=abc');
+      const cbSetCookies = cbRes.headers.getSetCookie?.() ?? [];
+      assert.ok(cbSetCookies.some((c) => c.startsWith('login_next=;') || c.startsWith('login_next=; ')), 'login_next must be cleared after use');
+    }, undefined, auth);
+  });
+});
+
+test('a callback with no login_next cookie still redirects to /me (unchanged default)', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const loginRes = await fetch(`${base}/auth/github/login`, { redirect: 'manual' });
+      const setCookies = loginRes.headers.getSetCookie?.() ?? [];
+      const stateCookie = setCookies.find((c) => c.startsWith('oauth_state='))!.split(';')[0];
+      const state = stateCookie.split('=')[1];
+      const cbRes = await fetch(`${base}/auth/github/callback?code=abc&state=${state}`, {
+        redirect: 'manual', headers: { cookie: stateCookie },
+      });
+      assert.equal(cbRes.headers.get('location'), '/me');
+    }, undefined, auth);
+  });
+});

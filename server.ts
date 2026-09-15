@@ -258,10 +258,19 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         const authorize = new URL('https://github.com/login/oauth/authorize');
         authorize.searchParams.set('client_id', auth.clientId);
         authorize.searchParams.set('redirect_uri', `${auth.baseUrl}/auth/github/callback`);
+        const nextParam = url.searchParams.get('next');
+        // Genau ein Ziel ist erlaubt: /oauth/authorize mit seiner eigenen
+        // Query. Kein allgemeiner Rückweg -- der wäre ein offenes
+        // Weiterleitungsziel (Abweichung 8).
+        const loginNextCookie = nextParam !== null && nextParam.startsWith('/oauth/authorize?')
+          ? `login_next=${encodeURIComponent(nextParam)}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`
+          : null;
         authorize.searchParams.set('state', state);
         res.writeHead(302, {
           location: authorize.toString(),
-          'set-cookie': `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`,
+          'set-cookie': loginNextCookie
+            ? [`oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`, loginNextCookie]
+            : `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`,
         });
         res.end();
         return;
@@ -324,11 +333,19 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           })
           .run();
 
+        const rawNext = cookieValue(req.headers.cookie, 'login_next');
+        let redirectLocation = '/me';
+        if (rawNext !== undefined) {
+          const decoded = decodeURIComponent(rawNext);
+          if (decoded.startsWith('/oauth/authorize?')) redirectLocation = decoded;
+        }
+
         const session = createSessionCookie(auth.signingKey, identity.id);
         res.writeHead(302, {
-          location: '/me',
+          location: redirectLocation,
           'set-cookie': [
             'oauth_state=; Max-Age=0; Path=/auth/github',
+            'login_next=; Max-Age=0; Path=/auth/github',
             `session=${session}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/`,
           ],
         });
