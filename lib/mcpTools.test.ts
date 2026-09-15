@@ -595,6 +595,40 @@ test('unpublish_release on a frozen log answers log_frozen, regardless of write 
   }, { probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => null, async putFile() { throw new Error('must not be called'); } });
 });
 
+// Der frozen-Fall oben und write_release's eigener "no write access"-Fall
+// waren getestet, togglePublish's canWrite-Gate selbst aber nie: auf einem
+// aktiven Log mit Leserecht lief kein bleibender Test. Genau diese Lücke
+// (Issue #8) schließen die zwei hier -- collaboratorPermission: 'read' ist
+// dieselbe Fixture-Form, mit der write_release seinen forbidden-Fall prüft,
+// und putFile wirft, damit ein durchgerutschter Aufruf auffällt statt still
+// zu committen. Wie bei conflict/no_installation je Werkzeug einzeln, weil
+// publish_release und unpublish_release getrennt registriert sind.
+test('publish_release on an active log without write access answers forbidden', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, null);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'publish_release', {
+      log_id: 'log1', version: '1.0.0',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'read', async putFile() { throw new Error('must not be called'); } });
+});
+
+test('unpublish_release on an active log without write access answers forbidden', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    insertPublishableRelease(db, '2026-09-01T00:00:00.000Z');
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'unpublish_release', {
+      log_id: 'log1', version: '1.0.0',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'read', async putFile() { throw new Error('must not be called'); } });
+});
+
 // The brief's own placeholder for this test only asserted that
 // `server.server` exists on the McpServer instance -- true of every McpServer
 // regardless of whether instructions or a prompt were ever registered, so it
