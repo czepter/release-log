@@ -1702,3 +1702,55 @@ test('an allowlist login containing HTML-meaningful characters is escaped', asyn
     }, undefined, auth);
   });
 });
+
+test('re-adding an existing allowlist login with a different note updates the row', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(allowlist).values({ githubLogin: 'alice', addedBy: 'octocat', addedAt: '2026-09-14T00:00:00.000Z', note: 'old note' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/admin/allowlist', { github_login: 'alice', note: 'new note' }, cookie);
+      assert.equal(res.status, 302);
+      const row = db.select().from(allowlist).where(eq(allowlist.githubLogin, 'alice')).all()[0];
+      assert.equal(row.note, 'new note', 'note should be updated on conflict');
+      assert.equal(row.addedBy, 'octocat', 'addedBy should be updated to current admin on conflict');
+    }, undefined, auth);
+  });
+});
+
+test('an allowlist note containing HTML-meaningful characters is escaped', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(allowlist).values({ githubLogin: 'someone', addedBy: 'octocat', addedAt: '2026-09-14T00:00:00.000Z', note: '<img src=x>' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<img src=x>'));
+    }, undefined, auth);
+  });
+});
+
+test('an allowlist addedBy containing HTML-meaningful characters is escaped', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(allowlist).values({ githubLogin: 'someone', addedBy: '<script>admin</script>', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<script>admin</script>'));
+    }, undefined, auth);
+  });
+});
+
+test('POST /admin/allowlist/:login/delete with a malformed percent-sequence answers 400', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist/%zz/delete`, { method: 'POST', headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 400);
+    }, undefined, auth);
+  });
+});

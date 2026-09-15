@@ -787,7 +787,14 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
           return;
         }
-        const targetLogin = decodeURIComponent(allowlistDeleteMatch[1]);
+        let targetLogin: string;
+        try {
+          targetLogin = decodeURIComponent(allowlistDeleteMatch[1]);
+        } catch {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Ungültige Anfrage', '<p>Der Login in der URL ist kein gültiges Percent-Encoding.</p>'));
+          return;
+        }
         auth.db.delete(allowlist).where(eq(allowlist.githubLogin, targetLogin)).run();
         res.writeHead(302, { location: '/admin/allowlist' });
         res.end();
