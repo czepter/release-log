@@ -2439,3 +2439,74 @@ test('GET /l/<id>/versions with a session that has NO write access still hides t
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
+
+test('GET /l/<id> on a public log renders 200 HTML with the product name', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    // db-backed reader: the module-level `reader` fixture above only knows
+    // 'abc123' and would answer 404 regardless of the visibility check --
+    // the same reason the Task 14 /versions tests just above use this.
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Auri CRM'));
+      assert.ok(!html.includes('noindex'));
+    }, undefined, auth);
+  });
+});
+
+test('GET /l/<id> on a private log is 404 to an anonymous request', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1`);
+      assert.equal(res.status, 404);
+    }, undefined, auth);
+  });
+});
+
+test('GET /l/<id>/r/<version> on a draft is 404 to an anonymous request, 200 to a write-access holder', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '2.0.0-draft', date: '2026-09-14', publishedAt: null, blobSha: 'r2',
+      path: 'releases/2.0.0-draft.json', doc: JSON.stringify({
+        version: '2.0.0-draft', tag: null, date: '2026-09-14', published_at: null, commits: 1,
+        headline: 'unreleased', body: [], image: null, covered: [], changes: [],
+      }),
+    }).run();
+    const reader = indexReader(db);
+    const anon = await (async () => {
+      const server = createApp(reader, undefined, auth);
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+      const address = server.address() as { port: number };
+      try {
+        return await fetch(`http://127.0.0.1:${address.port}/l/log1/r/2.0.0-draft`);
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()));
+      }
+    })();
+    assert.equal(anon.status, 404);
+
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'write' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/r/2.0.0-draft`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('unreleased'));
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});

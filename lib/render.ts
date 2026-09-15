@@ -17,7 +17,7 @@ export function escapeHtml(s: string): string {
 // Kein Framework, kein Build-Schritt (Entscheidung 19) -- eine Zeichenkette
 // als Hülle reicht für ein internes Werkzeug. prefers-color-scheme deckt
 // den dunklen Modus ab, ohne dass irgendwer ihn umschalten muss.
-const STYLE = `
+export const STYLE = `
 body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.5}
 h1,h2{font-weight:600}
 form{margin:1rem 0}

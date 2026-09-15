@@ -17,6 +17,8 @@ import type { Db } from './lib/db/client.ts';
 import { account, log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { escapeHtml, page } from './lib/render.ts';
+import { publicPage, renderReleaseFull, renderTimeline } from './lib/renderPublic.ts';
+import { sortReleases } from './lib/order.ts';
 import type { GitHub } from './lib/github.ts';
 import type { Permissions } from './lib/permissions.ts';
 import { indexReader } from './lib/indexReader.ts';
@@ -1273,6 +1275,61 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
       // bypassed (%252e%252e%252f survives one decode as %2e%2e%2f, and a
       // second decode turns that into ../). decodeURIComponent throws on
       // malformed input like %zz; that is a 404, not a crashed request.
+      const logPageMatch = /^\/l\/([^/]+)$/.exec(pathname);
+      if (logPageMatch && (method === 'GET' || method === 'HEAD')) {
+        const logId = logPageMatch[1];
+        const config = reader.config(logId);
+        // Ein nicht existierender und ein privater Log antworten identisch
+        // (spec §7) -- derselbe Grundsatz wie route() in lib/public.ts.
+        if (!config || (config.visibility === 'private' && viewer !== 'member')) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const releases = viewer === 'member' ? reader.releases(logId) : reader.releases(logId).filter((r) => r.published_at !== null);
+        const sorted = sortReleases(releases);
+        const body = config.view === 'timeline'
+          ? renderTimeline(logId, sorted)
+          : sorted.map((r) => renderReleaseFull(logId, r)).join('<hr>');
+        const html = publicPage(config.product, `<h1>${escapeHtml(config.product)}</h1>${body}`, { noindex: config.visibility === 'private' });
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(method === 'HEAD' ? undefined : html);
+        return;
+      }
+
+      const permalinkMatch = /^\/l\/([^/]+)\/r\/([^/]+)$/.exec(pathname);
+      if (permalinkMatch && (method === 'GET' || method === 'HEAD')) {
+        const logId = permalinkMatch[1];
+        const config = reader.config(logId);
+        if (!config || (config.visibility === 'private' && viewer !== 'member')) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        let version: string;
+        try {
+          version = decodeURIComponent(permalinkMatch[2]);
+        } catch {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const found = reader.releases(logId).find((r) => r.version === version);
+        if (!found || (found.published_at === null && viewer !== 'member')) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const html = publicPage(
+          `${config.product} ${found.version}`,
+          `<p><a href="/l/${encodeURIComponent(logId)}">&larr; ${escapeHtml(config.product)}</a></p>${renderReleaseFull(logId, found)}`,
+          { noindex: config.visibility === 'private' },
+        );
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(method === 'HEAD' ? undefined : html);
+        return;
+      }
+
       const mediaMatch = /^\/l\/([^/]+)\/media\/(.+)$/.exec(pathname);
       if (mediaMatch && (method === 'GET' || method === 'HEAD')) {
         let mediaPath: string;
