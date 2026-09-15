@@ -2510,3 +2510,116 @@ test('GET /l/<id>/r/<version> on a draft is 404 to an anonymous request, 200 to 
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
+
+// Review finding (Important 2): config.product is echoed through escapeHtml
+// at TWO independent call sites in server.ts -- the <h1> on /l/<id> and the
+// back-link on /l/<id>/r/<version> -- neither of which is the same call site
+// as publicPage's <title> escaping. A test that only checks "the raw payload
+// is absent from the whole response body" would still pass if only <title>
+// stayed escaped while the <h1>/back-link copy did not, since <title> already
+// carries an escaped copy of the same string. These tests pin down the <h1>
+// and back-link content specifically.
+test('GET /l/<id> escapes an HTML-meaningful product name in the <h1>, independent of <title>', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: '<script>prod</script>',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1`);
+      const html = await res.text();
+      const h1 = /<h1>(.*?)<\/h1>/.exec(html);
+      assert.ok(h1, 'expected an <h1> tag');
+      assert.ok(!h1![1].includes('<script>prod</script>'), 'the <h1> content must be escaped on its own, not only via <title>');
+      assert.ok(h1![1].includes('&lt;script&gt;prod&lt;/script&gt;'));
+    }, undefined, auth);
+  });
+});
+
+test('GET /l/<id>/r/<version> escapes an HTML-meaningful product name in the back-link text', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: '<script>prod</script>',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: '2026-09-01T00:00:00.000Z', blobSha: 'r1',
+      path: 'releases/1.0.0.json', doc: JSON.stringify({
+        version: '1.0.0', tag: null, date: '2026-09-01', published_at: '2026-09-01T00:00:00.000Z', commits: 1,
+        headline: 'released', body: [], image: null, covered: [], changes: [],
+      }),
+    }).run();
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/r/1.0.0`);
+      const html = await res.text();
+      const backLink = /<a href="\/l\/log1">(.*?)<\/a>/.exec(html);
+      assert.ok(backLink, 'expected the back-link anchor');
+      assert.ok(!backLink![1].includes('<script>prod</script>'), 'the back-link text must be escaped on its own, not only via <title>');
+      assert.ok(backLink![1].includes('&lt;script&gt;prod&lt;/script&gt;'));
+    }, undefined, auth);
+  });
+});
+
+// Review finding (Important 3): only "noindex absent for a public log" was
+// tested. These cover the other direction (present for private) on both
+// routes, plus "absent for public" on the permalink route, which previously
+// had no noindex assertion at all.
+test('GET /l/<id> sets noindex for a private log viewed by a write-access member', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'write' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('noindex'));
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GET /l/<id>/r/<version> sets noindex for a private log viewed by a write-access member', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'write' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/r/1.0.0`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('noindex'));
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GET /l/<id>/r/<version> does not set noindex for a public log', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: '2026-09-01T00:00:00.000Z', blobSha: 'r1',
+      path: 'releases/1.0.0.json', doc: JSON.stringify({
+        version: '1.0.0', tag: null, date: '2026-09-01', published_at: '2026-09-01T00:00:00.000Z', commits: 1,
+        headline: 'released', body: [], image: null, covered: [], changes: [],
+      }),
+    }).run();
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/r/1.0.0`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(!html.includes('noindex'));
+    }, undefined, auth);
+  });
+});

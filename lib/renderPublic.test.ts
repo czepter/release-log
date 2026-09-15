@@ -107,3 +107,11 @@ test('renderTimeline escapes the teaser (first body paragraph)', () => {
   const html = renderTimeline('log1', [release]);
   assert.ok(!html.includes('<script>teaser</script>'));
 });
+
+test('renderTimeline percent-encodes an attribute-breaking version in the permalink href', () => {
+  const release: ReleaseDoc = { ...RELEASE, version: '"><script>x</script>' };
+  const html = renderTimeline('log1', [release]);
+  assert.ok(!html.includes('"><script>x</script>'), 'the raw payload must never appear');
+  assert.ok(!html.includes('href="/l/log1/r/"><script>'), 'a raw " must never terminate the href attribute');
+  assert.ok(html.includes('%22%3E%3Cscript%3Ex%3C%2Fscript%3E'), 'the version must be fully percent-encoded inside the href');
+});
