@@ -13,7 +13,7 @@ import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/w
 import type { RepoRef } from './lib/github.ts';
 import { openDb } from './lib/db/client.ts';
 import type { Db } from './lib/db/client.ts';
-import { account, log, syncError } from './lib/db/schema.ts';
+import { account, log, syncError, release, media, repoPermission } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { escapeHtml, page } from './lib/render.ts';
 import type { GitHub } from './lib/github.ts';
@@ -645,6 +645,54 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         return;
       }
 
+      const deleteMatch = /^\/dashboard\/logs\/([^/]+)\/delete$/.exec(pathname);
+      if (deleteMatch && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        const logId = deleteMatch[1];
+        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+        if (!row) {
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Nicht gefunden', '<p>Dieses Log gibt es nicht.</p>'));
+          return;
+        }
+        const ref = { owner: row.repoOwner, repo: row.repoName };
+        const allowed = row.state === 'frozen' && isAdmin(who.login, auth.adminLogins)
+          ? true
+          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
+        if (!allowed) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Kein Zugriff', '<p>Du hast keine Schreibrechte auf dieses Repository.</p>'));
+          return;
+        }
+
+        const form = await readFormBody(req);
+        if (form.get('confirm_name') !== row.product) {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Name stimmt nicht', `<p>Der eingegebene Name stimmt nicht mit „${escapeHtml(row.product)}" überein. Nichts wurde gelöscht.</p>`));
+          return;
+        }
+
+        auth.db.delete(release).where(eq(release.logId, logId)).run();
+        auth.db.delete(media).where(eq(media.logId, logId)).run();
+        auth.db.delete(syncError).where(eq(syncError.logId, logId)).run();
+        auth.db.delete(repoPermission).where(eq(repoPermission.logId, logId)).run();
+        auth.db.delete(log).where(eq(log.publicId, logId)).run();
+
+        res.writeHead(302, { location: '/dashboard' });
+        res.end();
+        return;
+      }
+
       if (pathname === '/me' && method === 'GET') {
         if (!auth) {
           res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
@@ -676,27 +724,27 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
       // bypassed (%252e%252e%252f survives one decode as %2e%2e%2f, and a
       // second decode turns that into ../). decodeURIComponent throws on
       // malformed input like %zz; that is a 404, not a crashed request.
-      const media = /^\/l\/([^/]+)\/media\/(.+)$/.exec(pathname);
-      if (media && (method === 'GET' || method === 'HEAD')) {
+      const mediaMatch = /^\/l\/([^/]+)\/media\/(.+)$/.exec(pathname);
+      if (mediaMatch && (method === 'GET' || method === 'HEAD')) {
         let mediaPath: string;
         try {
-          mediaPath = decodeURIComponent(media[2]);
+          mediaPath = decodeURIComponent(mediaMatch[2]);
         } catch {
           res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
           res.end(method === 'HEAD' ? undefined : JSON.stringify({ error: 'not_found' }));
           return;
         }
 
-        // media[1] (the log id) is looked up undecoded, unlike mediaPath above.
+        // mediaMatch[1] (the log id) is looked up undecoded, unlike mediaPath above.
         // That is deliberate, not an oversight: undecoded is the safe
         // direction here, since a decode could only ever turn a non-matching
         // id into a different non-matching id. route() below makes the same
         // choice for the log id segment it extracts from pathname. Do not
         // add a decode here to "match" the media path -- that would be a
         // second decode on a segment nothing has decoded once yet.
-        const config = reader.config(media[1]);
+        const config = reader.config(mediaMatch[1]);
         const blob = config && config.visibility === 'public'
-          ? reader.media(media[1], mediaPath)
+          ? reader.media(mediaMatch[1], mediaPath)
           : null;
         if (blob) {
           res.writeHead(200, {
