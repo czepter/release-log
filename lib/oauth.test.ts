@@ -83,11 +83,11 @@ test('two registrations produce two distinct client ids', () => {
 test('a freshly minted code redeems once, with the right client/redirect/verifier', () => {
   withDb((db) => {
     const code = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const result = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(result.ok, true);
     if (!result.ok) return;
@@ -100,24 +100,75 @@ test('a freshly minted code redeems once, with the right client/redirect/verifie
 test('a wrong code_verifier is rejected', () => {
   withDb((db) => {
     const code = mintAuthorizationCode(db, {
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
+      accountId: 42, scope: 'logs:read',
+    });
+    const result = redeemAuthorizationCode(db, {
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'wrong-verifier-9999999999999999999999999999',
+    });
+    assert.equal(result.ok, false);
+  });
+});
+
+// Issue #4: RFC 7636 §4.1 schreibt dem code_verifier eine Form vor (43-128
+// Zeichen aus dem unreservierten Satz). Ohne diese Prüfung wäre ein zu
+// kurzer Verifier einlösbar, solange er nur zu seiner eigenen Challenge
+// passt -- deshalb ist dieser Test bewusst so gebaut, dass Hash und
+// Challenge zusammenpassen und NUR die Form daneben liegt. Sonst bewiese er
+// nichts über die neue Prüfung.
+test('a code_verifier that is too short is refused even though it matches its own challenge', () => {
+  withDb((db) => {
+    // 39 Zeichen, und 'IciedB...' ist genau dessen SHA-256 (s. lib/pkce.test.ts).
+    const shortVerifier = 'test-verifier-1234567890123456789012345';
+    const code = mintAuthorizationCode(db, {
       clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
       accountId: 42, scope: 'logs:read',
     });
     const result = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'wrong-verifier',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: shortVerifier,
     });
-    assert.equal(result.ok, false);
+    assert.equal(result.ok, false, 'a verifier shorter than 43 characters is not a verifier');
+  });
+});
+
+test('a replay of a consumed code revokes the family even when the verifier is malformed', () => {
+  // Die Formprüfung steht hinter der Wiedereinlösungsprüfung. Stünde sie
+  // davor, könnte ein gestohlener Code mit absichtlich kaputtem Verifier
+  // still abprallen -- und der Widerruf, das einzige Signal, das ein
+  // mehrfach benutzter Code je gibt, bliebe aus.
+  withDb((db) => {
+    const code = mintAuthorizationCode(db, {
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
+      accountId: 42, scope: 'logs:read',
+    });
+    const first = redeemAuthorizationCode(db, {
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
+    });
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    db.insert(oauthToken).values({
+      id: 'tok-malformed-verifier', familyId: first.value.familyId, clientId: 'c1', accountId: 42, scope: 'logs:read',
+      kind: 'access', tokenHash: 'irrelevant-hash-2', expiresAt: '2099-01-01T00:00:00.000Z', revokedAt: null, createdAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+
+    const second = redeemAuthorizationCode(db, {
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'nope',
+    });
+    assert.equal(second.ok, false);
+
+    const tokenRow = db.select().from(oauthToken).where(eq(oauthToken.id, 'tok-malformed-verifier')).all()[0];
+    assert.notEqual(tokenRow.revokedAt, null, 'the family must be revoked before the verifier is ever judged');
   });
 });
 
 test('a mismatched redirect_uri is rejected, even with the right code and verifier', () => {
   withDb((db) => {
     const code = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const result = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://attacker.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'c1', redirectUri: 'https://attacker.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(result.ok, false);
   });
@@ -127,12 +178,12 @@ test('an expired code is rejected', () => {
   withDb((db) => {
     let now = 0;
     const code = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     }, () => new Date(now).toISOString());
     now = 61_000; // one second past the 60-second lifetime
     const result = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     }, () => now);
     assert.equal(result.ok, false);
   });
@@ -141,11 +192,11 @@ test('an expired code is rejected', () => {
 test('redeeming a code twice fails the second time and revokes every token that code produced', () => {
   withDb((db) => {
     const code = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const first = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(first.ok, true);
     if (!first.ok) return;
@@ -158,7 +209,7 @@ test('redeeming a code twice fails the second time and revokes every token that 
     }).run();
 
     const second = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(second.ok, false, 'a second redemption of the same code must fail');
 
@@ -170,11 +221,11 @@ test('redeeming a code twice fails the second time and revokes every token that 
 test('a replay of an already-consumed code still revokes the family, even with the wrong code_verifier', () => {
   withDb((db) => {
     const code = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const first = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(first.ok, true);
     if (!first.ok) return;
@@ -186,7 +237,7 @@ test('a replay of an already-consumed code still revokes the family, even with t
     // Replay with a WRONG code_verifier -- revocation must still fire,
     // because consumedAt !== null is checked before PKCE.
     const second = redeemAuthorizationCode(db, {
-      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'a-completely-wrong-verifier',
+      code, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'wrong-verifier-9999999999999999999999999999',
     });
     assert.equal(second.ok, false, 'a second redemption must fail even with the wrong verifier');
 
@@ -198,18 +249,18 @@ test('a replay of an already-consumed code still revokes the family, even with t
 test('revoking one family on replay does not touch a different family\'s token', () => {
   withDb((db) => {
     const codeA = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const codeB = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const firstA = redeemAuthorizationCode(db, {
-      code: codeA, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code: codeA, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     const firstB = redeemAuthorizationCode(db, {
-      code: codeB, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code: codeB, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(firstA.ok, true);
     assert.equal(firstB.ok, true);
@@ -227,7 +278,7 @@ test('revoking one family on replay does not touch a different family\'s token',
 
     // Replay only code A a second time.
     const secondA = redeemAuthorizationCode(db, {
-      code: codeA, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code: codeA, clientId: 'c1', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(secondA.ok, false);
 
@@ -241,11 +292,11 @@ test('revoking one family on replay does not touch a different family\'s token',
 test('a wrong client_id is rejected, even with the right redirect_uri, code and verifier', () => {
   withDb((db) => {
     const code = mintAuthorizationCode(db, {
-      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8',
+      clientId: 'c1', redirectUri: 'https://client.example/cb', codeChallenge: 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0',
       accountId: 42, scope: 'logs:read',
     });
     const result = redeemAuthorizationCode(db, {
-      code, clientId: 'attacker-client', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-1234567890123456789012345',
+      code, clientId: 'attacker-client', redirectUri: 'https://client.example/cb', codeVerifier: 'test-verifier-12345678901234567890123456789',
     });
     assert.equal(result.ok, false);
   });

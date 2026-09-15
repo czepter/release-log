@@ -38,6 +38,7 @@ import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
 import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
+import { isValidCodeChallenge } from './lib/pkce.ts';
 import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
@@ -1138,7 +1139,13 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // not one of the fields the consent form round-trips (see the hidden
         // fields below), so requiring it again on POST would reject every
         // decision submission before it ever reaches the allow/deny check.
-        if ((method === 'GET' && params.get('response_type') !== 'code') || codeChallenge === '' || codeChallengeMethod !== 'S256') {
+        //
+        // isValidCodeChallenge ersetzt die frühere "nicht leer"-Prüfung: mit
+        // S256 ist eine Challenge immer 43 base64url-Zeichen (RFC 7636 §4.2).
+        // Was diese Form verfehlt, kann zu keinem gültigen Verifier gehören
+        // -- das hier ist die Grenze, an der eine Anfrage geprüft wird, also
+        // fällt es hier auf und nicht eine Minute später beim Einlösen.
+        if ((method === 'GET' && params.get('response_type') !== 'code') || !isValidCodeChallenge(codeChallenge) || codeChallengeMethod !== 'S256') {
           redirectWithError('invalid_request');
           return;
         }

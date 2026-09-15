@@ -6,7 +6,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { eq, and, isNull } from 'drizzle-orm';
 import type { Db } from './db/client.ts';
 import { oauthClient, oauthCode, oauthToken, account } from './db/schema.ts';
-import { verifyPkce } from './pkce.ts';
+import { verifyPkce, isValidCodeVerifier } from './pkce.ts';
 
 export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString('base64url');
@@ -119,6 +119,11 @@ export function redeemAuthorizationCode(
     return { ok: false, error: 'invalid_grant' };
   }
   if (Date.parse(row.expiresAt) <= now) return { ok: false, error: 'invalid_grant' };
+  // Erst die Form (RFC 7636 §4.1), dann der Vergleich -- und beides genau
+  // hier, hinter der Wiedereinlösungsprüfung oben: ein Replay mit einem
+  // missgebildeten Verifier muss weiterhin die ganze Kette widerrufen,
+  // nicht still an einer Formprüfung abprallen.
+  if (!isValidCodeVerifier(input.codeVerifier)) return { ok: false, error: 'invalid_grant' };
   if (!verifyPkce(input.codeVerifier, row.codeChallenge, 'S256')) return { ok: false, error: 'invalid_grant' };
 
   db.update(oauthCode).set({ consumedAt: new Date(now).toISOString() }).where(eq(oauthCode.codeHash, row.codeHash)).run();
