@@ -17,7 +17,7 @@ import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { fakeGitHub } from './lib/github.ts';
 import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
-import { log, syncError, release, media, repoPermission } from './lib/db/schema.ts';
+import { log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -1620,5 +1620,85 @@ test('delete without write access (and not admin, not frozen) is refused with 40
       assert.equal(res.status, 403);
       assert.equal(db.select().from(log).where(eq(log.publicId, 'log1')).all().length, 1);
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GET /admin/allowlist for a non-admin is refused with 403', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 99);
+    db.insert(account).values({ githubUserId: 99, login: 'not-an-admin', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 403);
+    }, undefined, auth);
+  });
+});
+
+test('GET /admin/allowlist for an admin lists the current entries', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(allowlist).values({ githubLogin: 'someone', addedBy: 'octocat', addedAt: '2026-09-14T00:00:00.000Z', note: 'trusted contractor' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('someone'));
+      assert.ok(html.includes('trusted contractor'));
+    }, undefined, auth);
+  });
+});
+
+test('POST /admin/allowlist adds a login, recording who added it', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/admin/allowlist', { github_login: 'new-person', note: 'joined the team' }, cookie);
+      assert.equal(res.status, 302);
+      const row = db.select().from(allowlist).where(eq(allowlist.githubLogin, 'new-person')).all()[0];
+      assert.equal(row.addedBy, 'octocat');
+      assert.equal(row.note, 'joined the team');
+    }, undefined, auth);
+  });
+});
+
+test('POST /admin/allowlist by a non-admin is refused and adds nothing', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 99);
+    db.insert(account).values({ githubUserId: 99, login: 'not-an-admin', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/admin/allowlist', { github_login: 'sneaky', note: '' }, cookie);
+      assert.equal(res.status, 403);
+      assert.equal(db.select().from(allowlist).where(eq(allowlist.githubLogin, 'sneaky')).all().length, 0);
+    }, undefined, auth);
+  });
+});
+
+test('POST /admin/allowlist/:login/delete removes exactly that entry', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(allowlist).values({ githubLogin: 'keep-me', addedBy: 'octocat', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
+    db.insert(allowlist).values({ githubLogin: 'remove-me', addedBy: 'octocat', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist/remove-me/delete`, { method: 'POST', headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(db.select().from(allowlist).where(eq(allowlist.githubLogin, 'remove-me')).all().length, 0);
+      assert.equal(db.select().from(allowlist).where(eq(allowlist.githubLogin, 'keep-me')).all().length, 1, 'removing one entry must not touch another');
+    }, undefined, auth);
+  });
+});
+
+test('an allowlist login containing HTML-meaningful characters is escaped', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(allowlist).values({ githubLogin: '<script>x</script>', addedBy: 'octocat', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/admin/allowlist`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<script>x</script>'));
+    }, undefined, auth);
   });
 });
