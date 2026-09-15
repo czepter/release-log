@@ -18,6 +18,7 @@ import { fakeGitHub } from './lib/github.ts';
 import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
 import { log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
+import { mintTokenPair } from './lib/oauth.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -2305,6 +2306,65 @@ test('GET /dashboard/connections escapes an HTML-meaningful client name', async 
       const res = await fetch(`${base}/dashboard/connections`, { headers: { cookie: `session=${cookie}` } });
       const html = await res.text();
       assert.ok(!html.includes('<script>x</script>'), 'a client_name with HTML-meaningful characters must be escaped');
+    }, undefined, auth);
+  });
+});
+
+test('POST /mcp without a bearer token answers 401 with a WWW-Authenticate challenge', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/mcp`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'initialize', id: 1, params: {} }),
+      });
+      assert.equal(res.status, 401);
+      assert.ok(res.headers.get('www-authenticate')?.includes('Bearer'));
+    }, undefined, auth);
+  });
+});
+
+test('POST /mcp with an unknown bearer token answers 401', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/mcp`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-real-token' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'initialize', id: 1, params: {} }),
+      });
+      assert.equal(res.status, 401);
+    }, undefined, auth);
+  });
+});
+
+test('POST /mcp with a valid bearer token reaches the MCP handler', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+      const res = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${pair.accessToken}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0', method: 'initialize', id: 1,
+          params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1.0' } },
+        }),
+      });
+      // Not 401/404: the request passed the bearer gate and reached the SDK,
+      // whatever the SDK's own answer to a handshake looks like.
+      assert.notEqual(res.status, 401);
+      assert.notEqual(res.status, 404);
+    }, undefined, auth);
+  });
+});
+
+test('GET /.well-known/oauth-authorization-server serves RFC 8414 metadata naming this server\'s endpoints', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/.well-known/oauth-authorization-server`);
+      assert.equal(res.status, 200);
+      const body = await res.json() as { issuer: string; token_endpoint: string; code_challenge_methods_supported: string[] };
+      assert.equal(body.issuer, 'https://example.test');
+      assert.equal(body.token_endpoint, 'https://example.test/oauth/token');
+      assert.deepEqual(body.code_challenge_methods_supported, ['S256']);
     }, undefined, auth);
   });
 });

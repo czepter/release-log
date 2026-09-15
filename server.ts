@@ -32,8 +32,14 @@ import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
-import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient } from './lib/oauth.ts';
+import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
+import {
+  createMcpHandler, McpServer, requireBearerAuth, OAuthError, OAuthErrorCode,
+  oauthMetadataResponse, getOAuthProtectedResourceMetadataUrl,
+} from '@modelcontextprotocol/server';
+import type { AuthInfo, OAuthTokenVerifier } from '@modelcontextprotocol/server';
+import { toNodeHandler } from '@modelcontextprotocol/node';
 
 const MEDIA_CACHE = 'public, max-age=31536000, immutable';
 const JSON_CACHE = 'public, max-age=60';
@@ -169,6 +175,18 @@ function readRawBody(req: import('node:http').IncomingMessage, maxBytes: number)
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
   const oauthRegisterLimiter = rateLimiter(10, 60 * 60 * 1000); // 10 je Stunde
   const oauthTokenLimiter = rateLimiter(60, 60 * 1000); // 60 je Minute
+  const mcpVerifier: OAuthTokenVerifier | null = !auth ? null : {
+    async verifyAccessToken(token) {
+      const looked = lookupAccessToken(auth.db, token);
+      if (!looked) throw new OAuthError(OAuthErrorCode.InvalidToken, 'unknown, revoked or expired token');
+      return { token, clientId: looked.clientId, scopes: looked.scope.split(' '), expiresAt: looked.expiresAt };
+    },
+  };
+  const mcpAuthGate = mcpVerifier && auth
+    ? requireBearerAuth({ verifier: mcpVerifier, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL(`${auth.baseUrl}/mcp`)) })
+    : null;
+  // Task 13 ersetzt diese leere Factory durch einen Import aus lib/mcpTools.ts.
+  const mcpNodeHandler = toNodeHandler(createMcpHandler(() => new McpServer({ name: 'release-log-hub', version: '1.0.0' })));
   return createServer(async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
@@ -942,6 +960,64 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         revokeAllForClient(auth.db, who.accountId, clientId, new Date().toISOString());
         res.writeHead(302, { location: '/dashboard/connections' });
         res.end();
+        return;
+      }
+
+      if ((pathname.startsWith('/.well-known/oauth-protected-resource') || pathname === '/.well-known/oauth-authorization-server')) {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const oauthMetadata = {
+          issuer: auth.baseUrl,
+          authorization_endpoint: `${auth.baseUrl}/oauth/authorize`,
+          token_endpoint: `${auth.baseUrl}/oauth/token`,
+          registration_endpoint: `${auth.baseUrl}/oauth/register`,
+          response_types_supported: ['code'],
+          grant_types_supported: ['authorization_code', 'refresh_token'],
+          code_challenge_methods_supported: ['S256'],
+          token_endpoint_auth_methods_supported: ['none'],
+          scopes_supported: ['logs:read', 'logs:write'],
+        };
+        const webReq = new Request(`${auth.baseUrl}${pathname}`, { method });
+        const metaRes = oauthMetadataResponse(webReq, { oauthMetadata, resourceServerUrl: new URL(`${auth.baseUrl}/mcp`) });
+        if (metaRes) {
+          const headers: Record<string, string> = {};
+          for (const [k, v] of metaRes.headers) headers[k] = v;
+          res.writeHead(metaRes.status, headers);
+          res.end(await metaRes.text());
+          return;
+        }
+      }
+
+      if (pathname === '/mcp') {
+        if (!auth || !mcpAuthGate) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        // Nur der Authorization-Header geht in die Bearer-Prüfung, über eine
+        // eigene, körperlose Request -- würde man stattdessen den ROH-Body
+        // von req hier schon einmal lesen (z. B. über toWebRequest), fände
+        // toNodeHandler weiter unten nichts mehr zu lesen: ein Node-Stream
+        // lässt sich nicht zweimal konsumieren.
+        const rawAuthHeader = req.headers['authorization'];
+        const probeRequest = new Request('http://mcp-auth-probe.internal/', {
+          headers: rawAuthHeader ? { authorization: Array.isArray(rawAuthHeader) ? rawAuthHeader[0] : rawAuthHeader } : {},
+        });
+        const authResult = await mcpAuthGate(probeRequest);
+        if (authResult instanceof Response) {
+          const headers: Record<string, string> = {};
+          for (const [k, v] of authResult.headers) headers[k] = v;
+          res.writeHead(authResult.status, headers);
+          res.end(await authResult.text());
+          return;
+        }
+        // toNodeHandler liest req.auth als pass-through authInfo -- dieselbe
+        // Konvention, die die offizielle Express-Middleware benutzt.
+        (req as unknown as { auth?: AuthInfo }).auth = authResult;
+        await mcpNodeHandler(req, res);
         return;
       }
 
