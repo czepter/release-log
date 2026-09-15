@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from './db/client.ts';
-import { log, release, account } from './db/schema.ts';
+import { log, release, account, media, uploadToken } from './db/schema.ts';
 import { indexReader } from './indexReader.ts';
 import { fakeGitHub } from './github.ts';
 import type { GitHub, RepoRef } from './github.ts';
@@ -627,6 +627,152 @@ test('unpublish_release on an active log without write access answers forbidden'
     assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
     assert.equal(deps.onRepoWriteCalls.length, 0);
   }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'read', async putFile() { throw new Error('must not be called'); } });
+});
+
+// add_media (Issue #2, spec §6 "Medien-Upload"): das Werkzeug gibt eine
+// Erlaubnis aus, keine Bytes. Was mit der Erlaubnis passiert, prüft
+// server.test.ts an der PUT-Route; hier steht, wer überhaupt eine bekommt.
+function insertActiveLog(db: ReturnType<typeof openDb>): void {
+  db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+  db.insert(log).values({
+    publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+    view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+    configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+  }).run();
+}
+
+const WRITABLE: GitHub = {
+  probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null,
+  collaboratorPermission: async () => 'write', async putFile() { throw new Error('must not be called'); },
+};
+
+async function addMedia(
+  factory: ReturnType<typeof buildMcpServer>, db: ReturnType<typeof openDb>, path: string, scope = 'logs:write',
+): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
+  const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope, familyId: 'fam1' });
+  return callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: scope.split(' ') }, 'add_media', {
+    log_id: 'log1', path,
+  });
+}
+
+test('add_media answers a single-use upload URL, its expiry and the size limit', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    const before = Date.now();
+    const result = await addMedia(factory, db, 'screenshot.png');
+    assert.notEqual(result.isError, true, result.content[0].text);
+    const body = JSON.parse(result.content[0].text) as {
+      upload_url: string; path: string; content_type: string; expires_at: string; max_bytes: number;
+    };
+    assert.equal(body.path, 'media/screenshot.png');
+    assert.equal(body.content_type, 'image/png');
+    assert.equal(body.max_bytes, 10 * 1024 * 1024);
+    assert.match(body.upload_url, /^https:\/\/example\.test\/upload\/[A-Za-z0-9_-]+$/);
+    const ttl = Date.parse(body.expires_at) - before;
+    assert.ok(ttl > 9 * 60 * 1000 && ttl <= 10 * 60 * 1000 + 1000, `expiry must be about ten minutes out, was ${ttl}ms`);
+
+    // Die URL trägt das Token im Klartext, die Datenbank nur seinen Hash --
+    // dass beides zusammengehört, prüft die PUT-Route in server.test.ts.
+    const rows = db.select().from(uploadToken).all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].logId, 'log1');
+    assert.equal(rows[0].path, 'media/screenshot.png');
+    assert.equal(rows[0].accountId, 42);
+    assert.equal(rows[0].consumedAt, null);
+    assert.ok(!body.upload_url.includes(rows[0].tokenHash), 'the stored hash is not what goes in the URL');
+  }, WRITABLE);
+});
+
+test('add_media accepts an explicit media/ prefix and normalises it', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    const result = await addMedia(factory, db, 'media/screenshot.png');
+    assert.notEqual(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).path, 'media/screenshot.png');
+  }, WRITABLE);
+});
+
+test('add_media refuses a path with further structure, minting nothing', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    for (const bad of ['../release-log.json', 'media/../release-log.json', 'sub/shot.png']) {
+      const result = await addMedia(factory, db, bad);
+      assert.equal(result.isError, true, `"${bad}" must be refused`);
+      assert.equal(JSON.parse(result.content[0].text).error, 'bad_filename');
+    }
+    assert.equal(db.select().from(uploadToken).all().length, 0, 'a refused path must leave no usable permission behind');
+  }, WRITABLE);
+});
+
+test('add_media refuses a file type the sync would not store anyway', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    const result = await addMedia(factory, db, 'notes.pdf');
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'unsupported_type');
+    assert.equal(db.select().from(uploadToken).all().length, 0);
+  }, WRITABLE);
+});
+
+test('add_media refuses a path that already exists, rather than handing out an overwrite', async () => {
+  // Ein überschriebenes Bild würde stillschweigend jedes veröffentlichte
+  // Release ändern, das darauf zeigt (spec §6).
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    db.insert(media).values({
+      logId: 'log1', path: 'media/screenshot.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1]),
+    }).run();
+    const result = await addMedia(factory, db, 'screenshot.png');
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'path_exists');
+    assert.equal(db.select().from(uploadToken).all().length, 0);
+  }, WRITABLE);
+});
+
+test('add_media without the logs:write scope answers forbidden', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    const result = await addMedia(factory, db, 'screenshot.png', 'logs:read');
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+    assert.equal(db.select().from(uploadToken).all().length, 0);
+  }, WRITABLE);
+});
+
+test('add_media without write access answers forbidden', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    const result = await addMedia(factory, db, 'screenshot.png');
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+    assert.equal(db.select().from(uploadToken).all().length, 0);
+  }, { ...WRITABLE, collaboratorPermission: async () => 'read' });
+});
+
+test('add_media on a frozen log answers log_frozen', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'frozen', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const result = await addMedia(factory, db, 'screenshot.png');
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'log_frozen');
+  }, { probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => null, async putFile() { throw new Error('must not be called'); } });
+});
+
+test('add_media on an unknown log answers not_found', async () => {
+  await withServerFor(async (factory, db) => {
+    insertActiveLog(db);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'add_media', {
+      log_id: 'no-such-log', path: 'screenshot.png',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'not_found');
+  }, WRITABLE);
 });
 
 // The brief's own placeholder for this test only asserted that

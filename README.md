@@ -132,13 +132,20 @@ Ein eigener OAuth-2.0-Autorisierungsserver (spec §5, "Rolle 2") schützt `/mcp`
   — verbundene Clients ansehen und trennen.
 - `POST /mcp` — die eigentliche MCP-Fläche, Streamable HTTP, Bearer-Token
   Pflicht: `list_logs`, `get_log`, `get_release` (Scope `logs:read`),
-  `write_release`, `publish_release`, `unpublish_release` (Scope
-  `logs:write`).
+  `write_release`, `publish_release`, `unpublish_release`, `add_media`
+  (Scope `logs:write`).
+- `PUT /upload/<token>` — der Bildweg von `add_media`. Das Token in der URL
+  ist der ganze Ausweis: einmalig, zehn Minuten gültig, an Log, Zielpfad und
+  Konto gebunden. Die Route prüft beim Hochladen erneut, ob dieses Konto
+  noch schreiben darf, begrenzt auf 10 MB und legt die Datei an, statt eine
+  bestehende zu ersetzen (`path_exists`, sonst änderte ein neues Bild
+  stillschweigend jedes veröffentlichte Release, das darauf zeigt).
 
-„Log anlegen" (`create_log`) und Medien-Upload über MCP (`add_media`) fehlen
-bewusst noch — beide brauchen eigene Infrastruktur (ein persistentes
-GitHub-Nutzer-Token beziehungsweise signierte Upload-URLs), die noch nicht
-existiert.
+So berühren Bilddaten den Kontext des Agenten nie — 5 MB ergäben als Base64
+rund 6,7 MB Text.
+
+„Log anlegen" (`create_log`) fehlt bewusst noch — das braucht ein
+persistentes GitHub-Nutzer-Token, das noch nicht existiert.
 
 ### Gehostete Seite
 
