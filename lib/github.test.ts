@@ -370,3 +370,87 @@ test('fakeGitHub grants write on a repository it knows, null on one it does not'
   assert.equal(await gh.collaboratorPermission({ owner: 'o', repo: 'r' }, 'anyone'), 'write');
   assert.equal(await gh.collaboratorPermission({ owner: 'o', repo: 'gone' }, 'anyone'), null);
 });
+
+test('putFile commits new content and returns the new blob sha', async () => {
+  const http = fakeHttp({
+    'PUT /repos/o/r/contents/release-log.json': { body: { content: { sha: 'new-sha-abc' } } },
+  });
+  const result = await githubClient(withToken('t'), http).putFile(
+    REF, 'release-log.json', Buffer.from('{"a":1}', 'utf8'), 'update settings', 'old-sha-123',
+  );
+  assert.deepEqual(result, { kind: 'committed', sha: 'new-sha-abc' });
+});
+
+test('putFile sends the content base64-encoded, with the message and expected sha', async () => {
+  const http = fakeHttp({
+    'PUT /repos/o/r/contents/media/shot.png': { body: { content: { sha: 'x' } } },
+  });
+  let sentBody: unknown;
+  const spy = Object.assign(
+    (url: string, init?: RequestInit) => {
+      if (init?.body) sentBody = JSON.parse(String(init.body));
+      return http(url, init);
+    },
+    { calls: http.calls },
+  );
+  await githubClient(withToken('t'), spy).putFile(REF, 'media/shot.png', Buffer.from([0x89, 0x50]), 'add media/shot.png', null);
+  assert.deepEqual(sentBody, {
+    message: 'add media/shot.png',
+    content: Buffer.from([0x89, 0x50]).toString('base64'),
+  });
+});
+
+test('putFile omits sha from the request when expectedSha is null, creating a new file', async () => {
+  const http = fakeHttp({ 'PUT /repos/o/r/contents/new.json': { body: { content: { sha: 'x' } } } });
+  let sentBody: { sha?: string } = {};
+  const spy = Object.assign(
+    (url: string, init?: RequestInit) => {
+      if (init?.body) sentBody = JSON.parse(String(init.body));
+      return http(url, init);
+    },
+    { calls: http.calls },
+  );
+  await githubClient(withToken('t'), spy).putFile(REF, 'new.json', Buffer.from('{}'), 'msg', null);
+  assert.equal('sha' in sentBody, false, 'a null expectedSha must not send a sha field at all');
+});
+
+test('a 409 (sha mismatch) is a conflict, not a throw', async () => {
+  const http = fakeHttp({ 'PUT /repos/o/r/contents/release-log.json': { status: 409 } });
+  const result = await githubClient(withToken('t'), http).putFile(REF, 'release-log.json', Buffer.from('{}'), 'm', 'stale-sha');
+  assert.deepEqual(result, { kind: 'conflict' });
+});
+
+test('a 422 (path already exists on a create) is also a conflict', async () => {
+  const http = fakeHttp({ 'PUT /repos/o/r/contents/media/existing.png': { status: 422 } });
+  const result = await githubClient(withToken('t'), http).putFile(REF, 'media/existing.png', Buffer.from('x'), 'm', null);
+  assert.deepEqual(result, { kind: 'conflict' });
+});
+
+test('no installation token yields no_installation, without a request', async () => {
+  const http = fakeHttp({});
+  const result = await githubClient(withToken(null), http).putFile(REF, 'release-log.json', Buffer.from('{}'), 'm', 'sha');
+  assert.deepEqual(result, { kind: 'no_installation' });
+  assert.deepEqual(http.calls, []);
+});
+
+test('an unexpected server error throws rather than reading as a conflict', async () => {
+  const http = fakeHttp({ 'PUT /repos/o/r/contents/release-log.json': { status: 500 } });
+  await assert.rejects(
+    () => githubClient(withToken('t'), http).putFile(REF, 'release-log.json', Buffer.from('{}'), 'm', 'sha'),
+    /HTTP 500/,
+  );
+});
+
+test('a path with a slash is percent-encoded per segment, not as one opaque string', async () => {
+  const http = fakeHttp({
+    'PUT /repos/o/r/contents/media/a%20b.png': { body: { content: { sha: 'x' } } },
+  });
+  const result = await githubClient(withToken('t'), http).putFile(REF, 'media/a b.png', Buffer.from('x'), 'm', null);
+  assert.equal(result.kind, 'committed');
+});
+
+test('fakeGitHub commits and reports it in the fake repo it knows', async () => {
+  const gh = fakeGitHub({ 'o/r': { 'release-log.json': '{}' } });
+  const result = await gh.putFile({ owner: 'o', repo: 'r' }, 'release-log.json', Buffer.from('{}'), 'm', 'anysha');
+  assert.equal(result.kind, 'committed');
+});

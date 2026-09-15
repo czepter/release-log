@@ -145,6 +145,7 @@ test('a repository whose sync throws does not stop the others', async () => {
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
       collaboratorPermission: (ref, login) => base.collaboratorPermission(ref, login),
+      putFile: (ref, path, content, message, expectedSha) => base.putFile(ref, path, content, message, expectedSha),
     };
 
     const outcomes = await reindex(db, gh, [
@@ -238,6 +239,7 @@ test('reindex reports a repository the app is not installed on', async () => {
       tree: async () => [],
       blob: async () => null,
       collaboratorPermission: async () => null,
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const [outcome] = await reindex(db, uninstalled, [{ owner: 'o', repo: 'r' }]);
     assert.equal(outcome.skipped, 'no_installation');
