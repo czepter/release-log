@@ -384,6 +384,20 @@ test('listConnectedClients omits a client after revokeAllForClient', () => {
   });
 });
 
+test('listConnectedClients excludes a refresh token that expired without ever being revoked', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    registerClient(db, { redirect_uris: ['https://client.example/cb'] });
+    const clientId = db.select().from(oauthClient).all()[0].clientId;
+    // Mint at a fake "now" far in the past so the 30-day TTL has long elapsed
+    // by the time listConnectedClients checks against the real clock --
+    // revokedAt stays null the whole time, so only the expiry filter (not
+    // the revocation filter) can be what excludes this row.
+    mintTokenPair(db, { clientId, accountId: 42, scope: 'logs:read', familyId: 'fam1' }, () => new Date(0).toISOString());
+    assert.equal(listConnectedClients(db, 42).length, 0, 'an expired-but-unrevoked refresh token must not be listed');
+  });
+});
+
 test('revokeAllForClient does not touch a different account\'s tokens for the same client', () => {
   withDb((db) => {
     db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();

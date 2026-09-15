@@ -1991,10 +1991,10 @@ test('a callback with no login_next cookie still redirects to /me (unchanged def
   });
 });
 
-async function registerTestClient(base: string, redirectUri = 'https://client.example/cb'): Promise<string> {
+async function registerTestClient(base: string, redirectUri = 'https://client.example/cb', clientName = 'Test Client'): Promise<string> {
   const res = await fetch(`${base}/oauth/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ redirect_uris: [redirectUri], client_name: 'Test Client' }),
+    body: JSON.stringify({ redirect_uris: [redirectUri], client_name: clientName }),
   });
   const body = await res.json() as { client_id: string };
   return body.client_id;
@@ -2246,6 +2246,65 @@ test('POST /dashboard/connections/:clientId/revoke removes the connection', asyn
       const listRes = await fetch(`${base}/dashboard/connections`, { headers: { cookie: `session=${cookie}` } });
       const html = await listRes.text();
       assert.ok(!html.includes('Test Client'), 'a revoked client must no longer be listed');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/token with grant_type=refresh_token exchanges a live refresh token for a new pair', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const { code } = await authorizeAndGetCode(base, cookie, clientId);
+      const firstRes = await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: AUTHORIZE_VERIFIER,
+      });
+      const first = await firstRes.json() as { access_token: string; refresh_token: string };
+
+      const res = await postFormRaw(base, '/oauth/token', {
+        grant_type: 'refresh_token', refresh_token: first.refresh_token,
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { access_token: string; refresh_token: string; token_type: string; expires_in: number; scope: string };
+      assert.ok(typeof body.access_token === 'string' && body.access_token.length > 0);
+      assert.ok(typeof body.refresh_token === 'string' && body.refresh_token.length > 0);
+      assert.notEqual(body.access_token, first.access_token, 'rotation must mint a new access token');
+      assert.notEqual(body.refresh_token, first.refresh_token, 'rotation must mint a new refresh token');
+      assert.equal(body.token_type, 'Bearer');
+      assert.equal(body.scope, 'logs:read');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/token with grant_type=refresh_token and an unknown refresh token is refused', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await postFormRaw(base, '/oauth/token', {
+        grant_type: 'refresh_token', refresh_token: 'not-a-real-token',
+      });
+      assert.equal(res.status, 400);
+      const body = await res.json() as { error: string };
+      assert.equal(body.error, 'invalid_grant');
+    }, undefined, auth);
+  });
+});
+
+test('GET /dashboard/connections escapes an HTML-meaningful client name', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base, 'https://client.example/cb', '<script>x</script>');
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const { code } = await authorizeAndGetCode(base, cookie, clientId);
+      await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: AUTHORIZE_VERIFIER,
+      });
+      const res = await fetch(`${base}/dashboard/connections`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<script>x</script>'), 'a client_name with HTML-meaningful characters must be escaped');
     }, undefined, auth);
   });
 });
