@@ -889,6 +889,26 @@ test('GET /dashboard/logs/:id for an unknown id answers 404', async () => {
   });
 });
 
+test('a frozen log detail page is reachable by an admin even without canWrite', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'frozen-detail', 'o', 'gone-repo-3', 'frozen');
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }),
+      collaboratorPermission: async () => null, // a gone repo answers null -- never write access
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    // 'octocat' is this fixture's admin (see withAuth's adminLogins).
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/frozen-detail`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Product frozen-detail'), 'an admin must still reach a frozen log\'s own detail page');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
 test('GET /dashboard/logs/:id with write access shows settings, sync status and errors', async () => {
   await withAuth(async (auth, db) => {
     db.insert(log).values({
@@ -986,6 +1006,95 @@ test('product, repoOwner, repoName and configBlobSha are each escaped independen
       assert.ok(html.includes('&lt;i&gt;owner-x&lt;/i&gt;'), 'repoOwner must appear escaped instead');
       assert.ok(html.includes('&lt;u&gt;repo-x&lt;/u&gt;'), 'repoName must appear escaped instead');
       assert.ok(html.includes('&lt;s&gt;sha-x&lt;/s&gt;'), 'configBlobSha must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('the log detail page lists releases, distinguishing published from draft', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({ logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: '2026-09-02T00:00:00.000Z', blobSha: 'r1', path: 'releases/1.0.0.json', doc: '{}' }).run();
+    db.insert(release).values({ logId: 'log1', version: '2.0.0-rc', date: '2026-09-10', publishedAt: null, blobSha: 'r2', path: 'releases/2.0.0-rc.json', doc: '{}' }).run();
+    const gh = fakeGitHub({ 'o/repo1': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(html.includes('1.0.0'), 'the published release version must be listed');
+      assert.ok(html.includes('2.0.0-rc'), 'the draft release version must be listed');
+      assert.ok(html.includes('Veröffentlicht'), 'a release with publishedAt set must be marked published');
+      assert.ok(html.includes('Entwurf'), 'a release with publishedAt null must be marked as a draft');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a release version and date containing HTML-meaningful characters are escaped on the log page', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({ logId: 'log1', version: '<b>1.0.0</b>', date: '<i>2026-09-01</i>', publishedAt: null, blobSha: 'r1', path: 'releases/1.0.0.json', doc: '{}' }).run();
+    const gh = fakeGitHub({ 'o/repo1': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<b>1.0.0</b>'), 'the raw version tag must never appear unescaped');
+      assert.ok(!html.includes('<i>2026-09-01</i>'), 'the raw date tag must never appear unescaped');
+      assert.ok(html.includes('&lt;b&gt;1.0.0&lt;/b&gt;'), 'version must appear escaped instead');
+      assert.ok(html.includes('&lt;i&gt;2026-09-01&lt;/i&gt;'), 'date must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('the log detail page shows "keine Installation" (not "erreichbar") when probe reports no_installation', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'no_installation' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(html.includes('keine Installation'), 'a no_installation probe result must be labelled as such');
+      assert.ok(!html.includes('erreichbar'), 'a no_installation probe result must not be mislabelled as reachable');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('the log detail page shows "Repo nicht mehr auffindbar" when probe reports gone', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(html.includes('Repo nicht mehr auffindbar'), 'a gone probe result must be labelled as such');
+      assert.ok(!html.includes('erreichbar'), 'a gone probe result must not be mislabelled as reachable');
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
@@ -1576,6 +1685,29 @@ test('POST delete with the wrong name changes nothing', async () => {
       const res = await postForm(base, '/dashboard/logs/log1/delete', { confirm_name: 'the wrong name' }, cookie);
       assert.equal(res.status, 400);
       assert.equal(db.select().from(log).where(eq(log.publicId, 'log1')).all().length, 1, 'the log must survive a wrong confirmation');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('the wrong-confirmation-name error page escapes the product name', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: '<b>x</b>', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/delete', { confirm_name: 'the wrong name' }, cookie);
+      assert.equal(res.status, 400);
+      const html = await res.text();
+      assert.ok(!html.includes('<b>x</b>'), 'the raw product tag must never appear unescaped on the wrong-name error page');
+      assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;'), 'the product name must appear escaped instead');
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
