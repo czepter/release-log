@@ -13,7 +13,7 @@ import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/w
 import type { RepoRef } from './lib/github.ts';
 import { openDb } from './lib/db/client.ts';
 import type { Db } from './lib/db/client.ts';
-import { account, log } from './lib/db/schema.ts';
+import { account, log, syncError } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { escapeHtml, page } from './lib/render.ts';
 import type { GitHub } from './lib/github.ts';
@@ -353,6 +353,91 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         `;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(page('Dashboard', body));
+        return;
+      }
+
+      const dashboardLog = /^\/dashboard\/logs\/([^/]+)$/.exec(pathname);
+      if (dashboardLog && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        const logId = dashboardLog[1];
+        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+        if (!row) {
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Nicht gefunden', '<p>Dieses Log gibt es nicht.</p>'));
+          return;
+        }
+        const ref = { owner: row.repoOwner, repo: row.repoName };
+        const isTheAdmin = isAdmin(who.login, auth.adminLogins);
+        // Same frozen-admin exception as /dashboard: a deleted repo answers
+        // every permission lookup as 404/null, which would otherwise lock
+        // even an admin out of a frozen log's own page (spec, plan deviation 7).
+        const allowed = row.state === 'frozen' && isTheAdmin
+          ? true
+          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
+        if (!allowed) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Kein Zugriff', '<p>Du hast keine Schreibrechte auf dieses Repository.</p>'));
+          return;
+        }
+
+        const errors = auth.db.select().from(syncError).where(eq(syncError.logId, logId)).all();
+        const errorRows = errors.map((e) =>
+          `<tr><td>${escapeHtml(e.path)}</td><td>${escapeHtml(e.message)}</td></tr>`,
+        ).join('');
+
+        const body = `
+          <p><a href="/dashboard">&larr; alle Logs</a></p>
+          <h1>${escapeHtml(row.product)}</h1>
+          <p class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)} &middot; ${row.state === 'frozen' ? 'eingefroren' : 'aktiv'} &middot; zuletzt abgeglichen: ${row.indexedAt ? escapeHtml(row.indexedAt) : 'nie'}</p>
+
+          <h2>Einstellungen</h2>
+          <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/settings">
+            <input type="hidden" name="expected_sha" value="${escapeHtml(row.configBlobSha ?? '')}">
+            <label for="view">Ansicht</label>
+            <select id="view" name="view">
+              <option value="full" ${row.view === 'full' ? 'selected' : ''}>Vollständig</option>
+              <option value="timeline" ${row.view === 'timeline' ? 'selected' : ''}>Zeitstrahl</option>
+            </select>
+            <label for="visibility">Sichtbarkeit</label>
+            <select id="visibility" name="visibility">
+              <option value="public" ${row.visibility === 'public' ? 'selected' : ''}>Öffentlich</option>
+              <option value="private" ${row.visibility === 'private' ? 'selected' : ''}>Privat</option>
+            </select>
+            <label for="curation_notes">Kurationshinweise</label>
+            <textarea id="curation_notes" name="curation_notes">${escapeHtml(row.curationNotes ?? '')}</textarea>
+            <button type="submit">Speichern</button>
+          </form>
+
+          ${errors.length > 0
+            ? `<h2>Abgleichfehler</h2><table><thead><tr><th>Pfad</th><th>Meldung</th></tr></thead><tbody>${errorRows}</tbody></table>`
+            : ''}
+
+          <h2>Medien</h2>
+          <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/media" id="media-form">
+            <input type="file" id="media-file" accept=".png,.jpg,.jpeg,.webp">
+            <button type="button" id="media-submit">Hochladen</button>
+            <p class="muted" id="media-status"></p>
+          </form>
+
+          <h2>Löschen</h2>
+          <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/delete">
+            <label for="confirm_name">Gib „${escapeHtml(row.product)}" ein, um das endgültige Löschen zu bestätigen</label>
+            <input type="text" id="confirm_name" name="confirm_name">
+            <button type="submit">Log endgültig löschen</button>
+          </form>
+        `;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page(row.product, body));
         return;
       }
 

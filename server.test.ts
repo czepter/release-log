@@ -17,7 +17,7 @@ import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { fakeGitHub } from './lib/github.ts';
 import type { GitHub } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
-import { log } from './lib/db/schema.ts';
+import { log, syncError } from './lib/db/schema.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -858,6 +858,104 @@ test('a repoOwner and repoName containing HTML-meaningful characters are each es
       assert.ok(!html.includes('<i>repo</i>'), 'the raw repoName tag must never appear unescaped');
       assert.ok(html.includes('&lt;b&gt;owner&lt;/b&gt;'), 'repoOwner must appear escaped instead');
       assert.ok(html.includes('&lt;i&gt;repo&lt;/i&gt;'), 'repoName must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GET /dashboard/logs/:id without write access answers 403', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'log1', 'o', 'repo1');
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }), collaboratorPermission: async () => 'read',
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 403);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GET /dashboard/logs/:id for an unknown id answers 404', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/does-not-exist`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 404);
+    }, undefined, auth);
+  });
+});
+
+test('GET /dashboard/logs/:id with write access shows settings, sync status and errors', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'Auri CRM', view: 'timeline', visibility: 'private', curationNotes: 'internal notes',
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'config-sha-1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(syncError).values({ logId: 'log1', path: 'releases/bad.json', message: 'sha:deadbeef date: required', at: '2026-09-15T00:00:00.000Z' }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }), collaboratorPermission: async () => 'admin',
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Auri CRM'));
+      assert.ok(html.includes('value="internal notes"') || html.includes('>internal notes<'), 'curation_notes must be pre-filled');
+      assert.ok(html.includes('releases/bad.json'), 'the sync error path must be listed');
+      assert.ok(html.includes('date: required'), 'the sync error message must be listed');
+      assert.ok(html.includes('config-sha-1'), 'the current config blob sha must be embedded for the settings form to submit against');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a curation_notes value with HTML-meaningful characters is escaped', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: '<img src=x onerror=alert(1)>',
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh = fakeGitHub({ 'o/repo1': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<img src=x onerror=alert(1)>'), 'the raw markup must never appear unescaped');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a sync error path and message containing HTML-meaningful characters are each escaped independently', async () => {
+  await withAuth(async (auth, db) => {
+    // Distinct tags per field, same as the repoOwner/repoName pair on the
+    // dashboard list: a shared fixture value could pass by coincidence if
+    // only one of the two escapeHtml calls in the error row template were
+    // ever dropped.
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(syncError).values({ logId: 'log1', path: '<b>bad/path</b>', message: '<i>bad message</i>', at: '2026-09-15T00:00:00.000Z' }).run();
+    const gh = fakeGitHub({ 'o/repo1': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<b>bad/path</b>'), 'the raw path tag must never appear unescaped');
+      assert.ok(!html.includes('<i>bad message</i>'), 'the raw message tag must never appear unescaped');
+      assert.ok(html.includes('&lt;b&gt;bad/path&lt;/b&gt;'), 'the path must appear escaped instead');
+      assert.ok(html.includes('&lt;i&gt;bad message&lt;/i&gt;'), 'the message must appear escaped instead');
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
