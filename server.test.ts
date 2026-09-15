@@ -2124,3 +2124,85 @@ test('POST /oauth/authorize with decision=deny redirects with access_denied, no 
     }, undefined, auth);
   });
 });
+
+async function postFormRaw(base: string, path: string, fields: Record<string, string>): Promise<Response> {
+  return fetch(`${base}${path}`, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(fields).toString(),
+  });
+}
+
+async function authorizeAndGetCode(base: string, cookie: string, clientId: string): Promise<{ code: string; state: string }> {
+  const res = await postForm(base, '/oauth/authorize', {
+    decision: 'allow', client_id: clientId, redirect_uri: 'https://client.example/cb',
+    code_challenge: AUTHORIZE_CHALLENGE, code_challenge_method: 'S256', state: 'xyz', scope: 'logs:read',
+  }, cookie);
+  const location = new URL(res.headers.get('location')!);
+  return { code: location.searchParams.get('code')!, state: location.searchParams.get('state')! };
+}
+
+const AUTHORIZE_VERIFIER = 'test-verifier-1234567890123456789012345'; // s. Task 2
+
+test('POST /oauth/token exchanges a valid code for an access and refresh token', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const { code } = await authorizeAndGetCode(base, cookie, clientId);
+
+      const res = await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: AUTHORIZE_VERIFIER,
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { access_token: unknown; refresh_token: unknown; token_type: string; expires_in: number };
+      assert.ok(typeof body.access_token === 'string' && body.access_token.length > 0);
+      assert.ok(typeof body.refresh_token === 'string' && body.refresh_token.length > 0);
+      assert.equal(body.token_type, 'Bearer');
+      assert.equal(body.expires_in, 3600);
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/token with a wrong code_verifier is refused', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const { code } = await authorizeAndGetCode(base, cookie, clientId);
+      const res = await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: 'wrong',
+      });
+      assert.equal(res.status, 400);
+      const body = await res.json() as { error: string };
+      assert.equal(body.error, 'invalid_grant');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/token with an unsupported grant_type is refused', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await postFormRaw(base, '/oauth/token', { grant_type: 'password' });
+      assert.equal(res.status, 400);
+      const body = await res.json() as { error: string };
+      assert.equal(body.error, 'unsupported_grant_type');
+    }, undefined, auth);
+  });
+});
+
+test('POST /oauth/token is rate-limited after 60 requests from the same IP within a minute', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      for (let i = 0; i < 60; i++) {
+        const res = await postFormRaw(base, '/oauth/token', { grant_type: 'password' });
+        assert.notEqual(res.status, 429, `request ${i + 1} of 60 must not be rate-limited yet`);
+      }
+      const res61 = await postFormRaw(base, '/oauth/token', { grant_type: 'password' });
+      assert.equal(res61.status, 429);
+    }, undefined, auth);
+  });
+});
