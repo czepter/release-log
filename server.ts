@@ -13,8 +13,11 @@ import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/w
 import type { RepoRef } from './lib/github.ts';
 import { openDb } from './lib/db/client.ts';
 import type { Db } from './lib/db/client.ts';
-import { account } from './lib/db/schema.ts';
+import { account, log } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
+import { escapeHtml, page } from './lib/render.ts';
+import type { GitHub } from './lib/github.ts';
+import type { Permissions } from './lib/permissions.ts';
 import { indexReader } from './lib/indexReader.ts';
 import { readConfig } from './lib/config.ts';
 import { installations } from './lib/appAuth.ts';
@@ -50,7 +53,24 @@ export type Auth = {
   adminLogins: string[];
   baseUrl: string;
   http: Http;
+  gh: GitHub;
+  perms: Permissions;
+  // Called after a dashboard write action (Task 5, Task 6) commits
+  // successfully -- the same reconcile the webhook otherwise triggers, only
+  // right away instead of only after delivery.
+  onRepoWrite(ref: RepoRef): void;
 };
+
+type LoggedIn = { accountId: number; login: string };
+
+// Read the session cookie, look up the account -- exactly what /me already
+// does, now in one place for every dashboard route.
+function currentAccount(req: import('node:http').IncomingMessage, auth: Auth): LoggedIn | null {
+  const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
+  if (!session) return null;
+  const row = auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0];
+  return row ? { accountId: session.accountId, login: row.login } : null;
+}
 
 // A tiny request-cookie parser: Node's IncomingMessage never splits the
 // `cookie` header for you, and pulling in a dependency for "find one
@@ -295,6 +315,47 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         return;
       }
 
+      if (pathname === '/dashboard' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        const isTheAdmin = isAdmin(who.login, auth.adminLogins);
+        const allLogs = auth.db.select().from(log).all();
+        const rows: string[] = [];
+        for (const row of allLogs) {
+          const ref = { owner: row.repoOwner, repo: row.repoName };
+          // A frozen log is never "writable" for anyone -- GitHub answers a
+          // permission lookup on a deleted repo with 404, which
+          // collaboratorPermission reads as null. Without this exception a
+          // frozen log would become permanently unreachable in the
+          // dashboard, including for deletion (spec, plan deviation 7).
+          const visible = row.state === 'frozen' && isTheAdmin
+            ? true
+            : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
+          if (!visible) continue;
+          rows.push(`<tr><td><a href="/dashboard/logs/${encodeURIComponent(row.publicId)}">${escapeHtml(row.product)}</a></td><td class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)}</td><td>${row.state === 'frozen' ? '<span class="badge">eingefroren</span>' : ''}</td></tr>`);
+        }
+        const body = `
+          <h1>Deine Logs</h1>
+          ${rows.length > 0
+            ? `<table><thead><tr><th>Produkt</th><th>Repository</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+            : `<p class="muted">Keine Logs, auf die du gerade Schreibrechte hast.</p>`}
+          ${isTheAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
+          <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
+        `;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page('Dashboard', body));
+        return;
+      }
+
       if (pathname === '/me' && method === 'GET') {
         if (!auth) {
           res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
@@ -434,6 +495,9 @@ if (import.meta.main) {
     adminLogins: config.adminLogins,
     baseUrl: config.baseUrl,
     http: authHttp,
+    gh,
+    perms,
+    onRepoWrite: (ref) => { queue.enqueue(ref); },
   }).listen(port, '127.0.0.1', () => {
     console.log(`release-log-hub on http://127.0.0.1:${port}, index at ${dbPath}`);
   });
