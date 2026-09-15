@@ -18,6 +18,7 @@ const CONFIG: AppConfig = {
   clientId: 'Iv1.test',
   clientSecret: 'test-client-secret',
   signingKey: 'test-signing-key',
+  tokenEncryptionKey: Buffer.alloc(32, 7),
   adminLogins: ['tester'],
 };
 

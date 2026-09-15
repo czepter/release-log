@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeHttp } from './http.ts';
-import { exchangeCodeForIdentity } from './login.ts';
+import { exchangeCodeForLogin } from './login.ts';
 
 test('a successful exchange returns the identity from GET /user', async () => {
   const http = fakeHttp({
     'POST /login/oauth/access_token': { body: { access_token: 'gho_abc', token_type: 'bearer' } },
     'GET /user': { body: { id: 42, login: 'octocat', avatar_url: 'https://example.test/a.png' } },
   });
-  const identity = await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/auth/github/callback');
-  assert.deepEqual(identity, { id: 42, login: 'octocat', avatarUrl: 'https://example.test/a.png' });
+  const login = await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/auth/github/callback');
+  assert.deepEqual(login?.identity, { id: 42, login: 'octocat', avatarUrl: 'https://example.test/a.png' });
 });
 
 test('the user token reaches GET /user as a bearer header and nowhere else', async () => {
@@ -25,7 +25,7 @@ test('the user token reaches GET /user as a bearer header and nowhere else', asy
     },
     { calls: inner.calls },
   );
-  await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/cb');
+  await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/cb');
   assert.deepEqual(seen, ['', 'Bearer gho_secret_value']);
 });
 
@@ -48,7 +48,7 @@ test('the token exchange POSTs to github.com with the full body GitHub expects',
     },
     { calls: inner.calls },
   );
-  await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/auth/github/callback');
+  await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/auth/github/callback');
 
   assert.ok(calls[0].url.startsWith('https://github.com/'), `expected a github.com URL, got ${calls[0].url}`);
   assert.deepEqual(JSON.parse(calls[0].body), {
@@ -64,18 +64,18 @@ test('a missing avatar_url becomes null, not undefined or a throw', async () => 
     'POST /login/oauth/access_token': { body: { access_token: 't' } },
     'GET /user': { body: { id: 1, login: 'a' } },
   });
-  const identity = await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'code', 'https://example.test/cb');
-  assert.equal(identity?.avatarUrl, null);
+  const login = await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'code', 'https://example.test/cb');
+  assert.equal(login?.identity.avatarUrl, null);
 });
 
 test('a token exchange that fails yields null, not a throw', async () => {
   const http = fakeHttp({ 'POST /login/oauth/access_token': { status: 401 } });
-  assert.equal(await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'bad-code', 'https://example.test/cb'), null);
+  assert.equal(await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'bad-code', 'https://example.test/cb'), null);
 });
 
 test('a response with no access_token yields null', async () => {
   const http = fakeHttp({ 'POST /login/oauth/access_token': { body: { error: 'bad_verification_code' } } });
-  assert.equal(await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'bad-code', 'https://example.test/cb'), null);
+  assert.equal(await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'bad-code', 'https://example.test/cb'), null);
   // The missing token is a dead end: nothing after the exchange may run, so
   // GET /user must never appear in the call log.
   assert.deepEqual(http.calls, ['POST /login/oauth/access_token']);
@@ -86,7 +86,7 @@ test('a GET /user that fails yields null, not a throw', async () => {
     'POST /login/oauth/access_token': { body: { access_token: 't' } },
     'GET /user': { status: 401 },
   });
-  assert.equal(await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'code', 'https://example.test/cb'), null);
+  assert.equal(await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'code', 'https://example.test/cb'), null);
 });
 
 test('a user response missing id or login yields null', async () => {
@@ -94,5 +94,39 @@ test('a user response missing id or login yields null', async () => {
     'POST /login/oauth/access_token': { body: { access_token: 't' } },
     'GET /user': { body: { login: 'a' } },
   });
-  assert.equal(await exchangeCodeForIdentity(http, 'client-id', 'client-secret', 'code', 'https://example.test/cb'), null);
+  assert.equal(await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'code', 'https://example.test/cb'), null);
+});
+
+// Entscheidung 23: dasselbe Token, das GET /user beantwortet, ist das, was
+// create_log später für POST /user/repos braucht. Es hier wegzuwerfen war
+// der Zustand, den Issue #1 aufhebt -- also muss es hier auch herauskommen.
+test('the token set comes back with its expiries turned into timestamps', async () => {
+  const http = fakeHttp({
+    'POST /login/oauth/access_token': {
+      body: {
+        access_token: 'gho_abc', expires_in: 28800,
+        refresh_token: 'ghr_abc', refresh_token_expires_in: 15811200,
+      },
+    },
+    'GET /user': { body: { id: 42, login: 'octocat', avatar_url: null } },
+  });
+  const now = Date.parse('2026-09-15T12:00:00.000Z');
+  const login = await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/cb', () => now);
+  assert.deepEqual(login?.tokens, {
+    accessToken: 'gho_abc',
+    accessExpiresAt: new Date(now + 28800 * 1000).toISOString(),
+    refreshToken: 'ghr_abc',
+    refreshExpiresAt: new Date(now + 15811200 * 1000).toISOString(),
+  });
+});
+
+test('an app with expiry switched off yields a token that never expires and no refresh token', async () => {
+  const http = fakeHttp({
+    'POST /login/oauth/access_token': { body: { access_token: 'gho_forever', token_type: 'bearer' } },
+    'GET /user': { body: { id: 42, login: 'octocat', avatar_url: null } },
+  });
+  const login = await exchangeCodeForLogin(http, 'client-id', 'client-secret', 'the-code', 'https://example.test/cb');
+  assert.deepEqual(login?.tokens, {
+    accessToken: 'gho_forever', accessExpiresAt: null, refreshToken: null, refreshExpiresAt: null,
+  });
 });

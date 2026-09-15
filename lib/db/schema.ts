@@ -156,3 +156,22 @@ export const uploadToken = sqliteTable('upload_token', {
   consumedAt: text('consumed_at'),
   createdAt: text('created_at').notNull(),
 });
+
+// Das GitHub-Nutzer-Token eines Kontos (spec §5, Entscheidung 23). Einzige
+// Ausnahme von "nur Hashes": dieses Token wird benutzt, nicht geprüft, also
+// liegt es verschlüsselt (TOKEN_ENCRYPTION_KEY, lib/secrets.ts). Benutzt
+// wird es ausschließlich für POST /user/repos -- jeder andere Repo-Zugriff
+// läuft über die Installation.
+//
+// Beide Token stehen in derselben Zeile, weil ein Refresh beide zugleich
+// ersetzen muss: ein halb geschriebener Datensatz sperrt das Konto aus.
+// accessExpiresAt/refreshExpiresAt dürfen null sein -- eine App mit
+// abgeschalteten Ablaufzeiten gibt ein Token ohne Ablauf und ohne Refresh.
+export const githubUserToken = sqliteTable('github_user_token', {
+  accountId: integer('account_id').primaryKey(),
+  accessTokenEnc: text('access_token_enc').notNull(),
+  accessExpiresAt: text('access_expires_at'),
+  refreshTokenEnc: text('refresh_token_enc'),
+  refreshExpiresAt: text('refresh_expires_at'),
+  updatedAt: text('updated_at').notNull(),
+});

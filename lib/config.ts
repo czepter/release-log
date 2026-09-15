@@ -2,6 +2,8 @@
 // that starts and then discovers its third missing variable on the first
 // request wastes a deploy cycle per variable.
 
+import { readEncryptionKey } from './secrets.ts';
+
 export type AppConfig = {
   appId: string;
   privateKey: string;
@@ -15,6 +17,9 @@ export type AppConfig = {
   // Signs the session cookie. Nothing but this process ever needs to read
   // or write with it.
   signingKey: string;
+  // Verschlüsselt die GitHub-Nutzer-Token im Ruhezustand (spec §12).
+  // 32 Bytes, hex- oder base64-kodiert -- roh sind sie keine .env-Zeile.
+  tokenEncryptionKey: Buffer;
   // Who is allowed to sign in without ever needing a row in the
   // allowlist table — solves the chicken-and-egg problem of an empty
   // table locking everyone out forever (spec §5, decision 15).
@@ -29,6 +34,7 @@ const REQUIRED = [
   'GITHUB_CLIENT_ID',
   'GITHUB_CLIENT_SECRET',
   'SIGNING_KEY',
+  'TOKEN_ENCRYPTION_KEY',
   'ADMIN_LOGINS',
 ];
 
@@ -49,6 +55,10 @@ export function readConfig(env: Record<string, string | undefined>): AppConfig {
     throw new Error('GITHUB_APP_PRIVATE_KEY does not decode to a PEM PRIVATE KEY block');
   }
 
+  // Dieselbe Behandlung wie der private Schlüssel: früh und laut
+  // scheitern, nicht erst beim ersten create_log.
+  const tokenEncryptionKey = readEncryptionKey(env.TOKEN_ENCRYPTION_KEY as string);
+
   const adminLogins = (env.ADMIN_LOGINS as string).split(',').map((s) => s.trim()).filter((s) => s !== '');
   if (adminLogins.length === 0) {
     // A non-empty variable that trims down to nothing is the same
@@ -65,6 +75,7 @@ export function readConfig(env: Record<string, string | undefined>): AppConfig {
     clientId: env.GITHUB_CLIENT_ID as string,
     clientSecret: env.GITHUB_CLIENT_SECRET as string,
     signingKey: env.SIGNING_KEY as string,
+    tokenEncryptionKey,
     adminLogins,
   };
 }

@@ -31,7 +31,7 @@ import { githubClient } from './lib/github.ts';
 import { withRetry } from './lib/http.ts';
 import type { Http } from './lib/http.ts';
 import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
-import { exchangeCodeForIdentity } from './lib/login.ts';
+import { exchangeCodeForLogin } from './lib/login.ts';
 import { permissions } from './lib/permissions.ts';
 import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
@@ -40,6 +40,12 @@ import { startReconcile } from './lib/reconcile.ts';
 import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
 import { isValidCodeChallenge } from './lib/pkce.ts';
 import { redeemUploadToken } from './lib/uploads.ts';
+import { createLog } from './lib/createLog.ts';
+import type { UserTokens } from './lib/userTokens.ts';
+import { userTokens } from './lib/userTokens.ts';
+import { cipher } from './lib/secrets.ts';
+import type { CreateUserRepo } from './lib/github.ts';
+import { userRepoCreator } from './lib/github.ts';
 import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
@@ -77,10 +83,18 @@ export type Auth = {
   http: Http;
   gh: GitHub;
   perms: Permissions;
+  // Das GitHub-Nutzer-Token je Konto (Entscheidung 23). Nur create_log
+  // benutzt es, und nur für POST /user/repos.
+  users: UserTokens;
+  createRepo: CreateUserRepo;
   // Called after a dashboard write action (Task 5, Task 6) commits
   // successfully -- the same reconcile the webhook otherwise triggers, only
   // right away instead of only after delivery.
   onRepoWrite(ref: RepoRef): void;
+  // Wie onRepoWrite, nur abwartend: create_log darf erst antworten, wenn
+  // der neue Log im Index steht -- sonst zeigt seine Antwort auf eine URL,
+  // die noch 404 gibt.
+  syncNow(ref: RepoRef): Promise<void>;
 };
 
 type LoggedIn = { accountId: number; login: string };
@@ -259,7 +273,10 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
     : null;
   const mcpNodeHandler = toNodeHandler(createMcpHandler(
     auth
-      ? buildMcpServer({ db: auth.db, reader, perms: auth.perms, gh: auth.gh, onRepoWrite: auth.onRepoWrite, baseUrl: auth.baseUrl })
+      ? buildMcpServer({
+        db: auth.db, reader, perms: auth.perms, gh: auth.gh, onRepoWrite: auth.onRepoWrite,
+        baseUrl: auth.baseUrl, users: auth.users, createRepo: auth.createRepo, syncNow: auth.syncNow,
+      })
       : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' }),
   ));
   return createServer(async (req, res) => {
@@ -425,20 +442,21 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // an attacker-controlled request (code/state are both unauthenticated
         // input). To the caller a throw and a null mean the same thing --
         // GitHub could not be reached correctly -- so both get the same 502.
-        let identity;
+        let login;
         try {
-          identity = await exchangeCodeForIdentity(
+          login = await exchangeCodeForLogin(
             auth.http, auth.clientId, auth.clientSecret, code, `${auth.baseUrl}/auth/github/callback`,
           );
         } catch {
-          identity = null;
+          login = null;
         }
-        if (!identity) {
+        if (!login) {
           res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
           res.end(page('GitHub nicht erreichbar', '<p>Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.</p>'));
           return;
         }
 
+        const identity = login.identity;
         // The allowlist check runs before anything is written: a denied
         // person must leave zero trace -- no account row, no session cookie.
         if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
@@ -455,6 +473,11 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
             set: { login: identity.login, avatarUrl: identity.avatarUrl, lastSeenAt: nowIso },
           })
           .run();
+
+        // Das Nutzer-Token gehört zu dieser Anmeldung und ersetzt, was
+        // vorher da lag (Entscheidung 23). Es steht verschlüsselt in der
+        // Datenbank, nicht gehasht -- es wird benutzt, nicht geprüft.
+        auth.users.store(identity.id, login.tokens);
 
         const rawNext = cookieValue(req.headers.cookie, 'login_next');
         let redirectLocation = '/me';
@@ -524,12 +547,72 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           ${rows.length > 0
             ? `<table><thead><tr><th>Produkt</th><th>Repository</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
             : `<p class="muted">Keine Logs, auf die du gerade Schreibrechte hast.</p>`}
+          <h2>Neues Log anlegen</h2>
+          <p class="muted">Legt ein Repository auf deinem GitHub-Konto (${escapeHtml(who.login)}) an, schreibt die erste
+            <code>release-log.json</code> hinein und nimmt es in den Index auf. Die GitHub App muss das neue
+            Repository sehen dürfen.</p>
+          <form method="POST" action="/dashboard/logs/new">
+            <p><label>Produkt<br><input name="product" required maxlength="200"></label></p>
+            <p><label>Repository-Name<br><input name="repo_name" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._-]*"></label></p>
+            <p><label>Ansicht<br><select name="view"><option value="full">full</option><option value="timeline">timeline</option></select></label></p>
+            <p><label>Sichtbarkeit<br><select name="visibility"><option value="public">public</option><option value="private">private</option></select></label></p>
+            <button type="submit">Anlegen</button>
+          </form>
           ${isTheAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
           <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
           <p><a href="/dashboard/connections">Verbundene Clients</a></p>
         `;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(page('Dashboard', body));
+        return;
+      }
+
+      // Derselbe Ablauf wie das MCP-Werkzeug create_log, nur mit der
+      // Session statt einem Bearer-Token als Ausweis (spec §6, §8).
+      if (pathname === '/dashboard/logs/new' && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        const form = await readFormBody(req);
+        const created = await createLog(
+          {
+            db: auth.db, gh: auth.gh, users: auth.users, createRepo: auth.createRepo,
+            syncNow: auth.syncNow, baseUrl: auth.baseUrl,
+          },
+          {
+            accountId: who.accountId, login: who.login, owner: who.login,
+            repoName: (form.get('repo_name') ?? '').trim(),
+            product: (form.get('product') ?? '').trim(),
+            view: form.get('view') ?? undefined,
+            visibility: form.get('visibility') ?? undefined,
+          },
+        );
+        if (created.ok) {
+          res.writeHead(302, { location: `/dashboard/logs/${encodeURIComponent(created.value.logId)}` });
+          res.end();
+          return;
+        }
+        // Ein Fehlschlag heißt oft, dass auf GitHub trotzdem etwas
+        // entstanden ist (das Repo). Die Meldung sagt deshalb, was als
+        // Nächstes zu tun ist, statt nur „ging nicht".
+        const status = created.error === 'forbidden' ? 403
+          : created.error === 'invalid_document' ? 400
+            : created.error === 'conflict' || created.error === 'repo_not_installed' ? 409
+              : created.error === 'reauth_required' ? 401
+                : 502;
+        const again = created.error === 'reauth_required'
+          ? '<p><a href="/auth/github/login">Neu bei GitHub anmelden</a></p>'
+          : '<p><a href="/dashboard">Zurück zum Dashboard</a></p>';
+        res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page('Log nicht angelegt', `<p>${escapeHtml(created.message)}</p>${again}`));
         return;
       }
 
@@ -1552,6 +1635,10 @@ if (import.meta.main) {
 
   const perms = permissions(db, gh);
   const authHttp: Http = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  const users = userTokens({
+    db, http: authHttp, cipher: cipher(config.tokenEncryptionKey),
+    clientId: config.clientId, clientSecret: config.clientSecret,
+  });
 
   // Bind an explicit address: without a host Node listens on :: and takes
   // IPv4 only while nothing else holds it, so a busy port turns into a
@@ -1570,7 +1657,13 @@ if (import.meta.main) {
     http: authHttp,
     gh,
     perms,
+    users,
+    createRepo: userRepoCreator(withRetry(authHttp)),
     onRepoWrite: (ref) => { queue.enqueue(ref); },
+    // Durch dieselbe Warteschlange wie jeder andere Abgleich, nur
+    // abgewartet: zwei Läufe auf demselben Repo würden einander die Sweeps
+    // unter den Füßen wegziehen (s. lib/syncQueue.ts).
+    syncNow: async (ref) => { queue.enqueue(ref); await queue.idle(); },
   }).listen(port, '127.0.0.1', () => {
     console.log(`release-log-hub on http://127.0.0.1:${port}, index at ${dbPath}`);
   });

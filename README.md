@@ -43,6 +43,7 @@ sie findet. `readConfig` verlangt vier Umgebungsvariablen:
 | `GITHUB_APP_PRIVATE_KEY` | Ihr privater Schlüssel, PEM, base64-kodiert |
 | `GITHUB_WEBHOOK_SECRET` | Das Webhook-Secret der App |
 | `BASE_URL` | Die öffentliche Basis-URL des Diensts |
+| `TOKEN_ENCRYPTION_KEY` | 32 Bytes, hex- oder base64-kodiert: verschlüsselt die GitHub-Nutzer-Token (`openssl rand -hex 32`) |
 
 ## Betrieb
 
@@ -109,14 +110,15 @@ Fünf-Minuten-Obergrenze wie sonst auch.
   Datenbankschreibvorgang.
 - `POST /dashboard/logs/<id>/media` — ein Bild (`.png`, `.jpg`, `.webp`,
   höchstens 10 MB) als Commit unter `media/<Dateiname>`.
+- `POST /dashboard/logs/new` — legt ein Repository auf dem GitHub-Konto der
+  angemeldeten Person an, schreibt die erste `release-log.json` und eine
+  `README.md` hinein und nimmt es in den Index auf. Derselbe Ablauf wie das
+  MCP-Werkzeug `create_log`.
 - `POST /dashboard/logs/<id>/delete` — endgültiges Löschen von Index und
   Medien, mit Eingabe des Produktnamens zur Bestätigung. Das Repo selbst
   bleibt unangetastet.
 - `GET`/`POST /admin/allowlist`, `POST /admin/allowlist/<login>/delete` —
   nur für Admins.
-
-„Log anlegen" fehlt bewusst noch — das braucht ein persistentes
-GitHub-Nutzer-Token, das noch nicht existiert.
 
 ### MCP und OAuth
 
@@ -132,8 +134,8 @@ Ein eigener OAuth-2.0-Autorisierungsserver (spec §5, "Rolle 2") schützt `/mcp`
   — verbundene Clients ansehen und trennen.
 - `POST /mcp` — die eigentliche MCP-Fläche, Streamable HTTP, Bearer-Token
   Pflicht: `list_logs`, `get_log`, `get_release` (Scope `logs:read`),
-  `write_release`, `publish_release`, `unpublish_release`, `add_media`
-  (Scope `logs:write`).
+  `create_log`, `write_release`, `publish_release`, `unpublish_release`,
+  `add_media` (Scope `logs:write`).
 - `PUT /upload/<token>` — der Bildweg von `add_media`. Das Token in der URL
   ist der ganze Ausweis: einmalig, zehn Minuten gültig, an Log, Zielpfad und
   Konto gebunden. Die Route prüft beim Hochladen erneut, ob dieses Konto
@@ -144,8 +146,27 @@ Ein eigener OAuth-2.0-Autorisierungsserver (spec §5, "Rolle 2") schützt `/mcp`
 So berühren Bilddaten den Kontext des Agenten nie — 5 MB ergäben als Base64
 rund 6,7 MB Text.
 
-„Log anlegen" (`create_log`) fehlt bewusst noch — das braucht ein
-persistentes GitHub-Nutzer-Token, das noch nicht existiert.
+### Repos anlegen und das GitHub-Nutzer-Token
+
+`create_log` ist der einzige Weg dieses Diensts, der nicht über das
+Installations-Token läuft: `POST /user/repos` gibt es nur für Nutzer-Token.
+Der Dienst hält deshalb je Konto das Nutzer-Token aus der Anmeldung
+vor — **verschlüsselt** mit `TOKEN_ENCRYPTION_KEY`, nicht gehasht, weil es
+benutzt und nicht nur geprüft wird. Es ist damit das einzige Geheimnis im
+System, das ein Datenbankdiebstahl brauchbar erbeutet.
+
+- Ein Refresh widerruft das alte Access-Token sofort, also ersetzt sein
+  Ergebnis beide Token in einem Schreibvorgang.
+- Refreshes laufen je Konto serialisiert: zwei gleichzeitige widerrufen
+  einander.
+- Scheitert der Refresh, antwortet `create_log` mit `reauth_required` und
+  nennt die Anmelde-URL. Der Mensch meldet sich einmal neu an.
+
+Angelegt wird mit dem Nutzer-Token, geschrieben wird mit dem
+Installations-Token: erst das Repo, dann die Erreichbarkeitsprüfung
+(`repo_not_installed`, wenn die App das frische Repo nicht sieht), dann
+`release-log.json` und `README.md`, dann der Abgleich. Die Antwort kommt
+erst, wenn der Log im Index steht.
 
 ### Gehostete Seite
 

@@ -14,13 +14,16 @@ import { account } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { fakeHttp } from './lib/http.ts';
 import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
-import { fakeGitHub } from './lib/github.ts';
+import { fakeGitHub, blobSha } from './lib/github.ts';
+import { syncLog } from './lib/index.ts';
 import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
 import type { Permissions } from './lib/permissions.ts';
-import { log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
+import { log, syncError, release, media, repoPermission, allowlist, githubUserToken } from './lib/db/schema.ts';
 import { mintTokenPair } from './lib/oauth.ts';
 import { mintUploadToken, UPLOAD_TOKEN_TTL_MS } from './lib/uploads.ts';
+import { userTokens } from './lib/userTokens.ts';
+import { cipher } from './lib/secrets.ts';
 import { indexReader } from './lib/indexReader.ts';
 
 const reader: Reader = {
@@ -460,6 +463,14 @@ function withAuth(fn: (auth: Auth, db: ReturnType<typeof openDb>) => Promise<voi
       db, clientId: 'client-id', clientSecret: 'client-secret', signingKey: SIGNING_KEY,
       adminLogins: ['octocat'], baseUrl: 'https://example.test', http,
       gh, perms: permissions(db, gh), onRepoWrite: () => {},
+      // Dieselben Vorgaben wie in lib/mcpTools.test.ts: vorhanden, damit
+      // jede Route baut, und wirkungslos, bis ein Test sie ersetzt.
+      users: userTokens({
+        db, http, cipher: cipher(Buffer.alloc(32, 3)),
+        clientId: 'client-id', clientSecret: 'client-secret',
+      }),
+      createRepo: async () => ({ kind: 'unavailable', status: 503 }),
+      syncNow: async () => {},
     },
     db,
   ).finally(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -563,6 +574,39 @@ test('a successful login for an allowed login sets a session cookie and redirect
       assert.equal(rows.length, 1);
       assert.equal(rows[0].login, 'octocat');
     }, undefined, auth);
+  });
+});
+
+// Entscheidung 23: die Anmeldung ist der einzige Moment, in dem ein
+// GitHub-Nutzer-Token entsteht. Es hier wegzuwerfen hieße, create_log nie
+// benutzen zu können -- genau der Zustand, den Issue #1 aufhebt.
+test('a successful login stores the GitHub user token for that account', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual', headers: { cookie: 'oauth_state=right' },
+      });
+      // 'gho_test' ist, was die Fixture von GitHub zurückgibt (s. withAuth).
+      assert.deepEqual(await auth.users.tokenFor(42), { ok: true, token: 'gho_test' });
+      const row = db.select().from(githubUserToken).where(eq(githubUserToken.accountId, 42)).all()[0];
+      assert.ok(row, 'the grant must be persisted');
+      assert.ok(!row.accessTokenEnc.includes('gho_test'), 'and never in the clear');
+    }, undefined, auth);
+  });
+});
+
+test('a denied login stores no user token either', async () => {
+  // „Zero trace" gilt auch hier: das Token entsteht erst hinter der
+  // Zulassungsprüfung.
+  await withAuth(async (auth, db) => {
+    const deniedAuth = { ...auth, adminLogins: ['somebody-else'] };
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
+        redirect: 'manual', headers: { cookie: 'oauth_state=right' },
+      });
+      assert.equal(res.status, 403);
+      assert.equal(db.select().from(githubUserToken).all().length, 0);
+    }, undefined, deniedAuth);
   });
 });
 
@@ -886,6 +930,128 @@ test('GET /dashboard never asks GitHub about a frozen log an admin sees anyway',
       assert.ok(html.includes('Product frozen-three'), 'an admin still sees the frozen log');
       assert.deepEqual(state.asked, ['live-one'], 'only the live log may cost a permission lookup');
     }, undefined, { ...auth, perms });
+  });
+});
+
+// „Log anlegen" im Dashboard (Issue #1, spec §8): derselbe Ablauf wie das
+// MCP-Werkzeug create_log, mit der Session als Ausweis. Die Fehlerfälle des
+// Ablaufs stehen in lib/createLog.test.ts; hier steht, was die Route daraus
+// macht.
+const GRANTED_USER_TOKEN = {
+  accessToken: 'gho_user_token',
+  accessExpiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(),
+  refreshToken: 'ghr_stored',
+  refreshExpiresAt: new Date(Date.now() + 181 * 24 * 60 * 60 * 1000).toISOString(),
+};
+
+function creatingGitHub(): { gh: GitHub; repos: Record<string, Record<string, string | Buffer>> } {
+  const repos: Record<string, Record<string, string | Buffer>> = {};
+  const base = fakeGitHub(repos);
+  return {
+    repos,
+    gh: {
+      ...base,
+      collaboratorPermission: async () => 'write',
+      async putFile(ref, path, content) {
+        const key = `${ref.owner}/${ref.repo}`;
+        if (!repos[key]) return { kind: 'no_installation' };
+        repos[key][path] = content;
+        return { kind: 'committed', sha: blobSha(content) };
+      },
+    },
+  };
+}
+
+test('GET /dashboard offers the form that creates a log', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const html = await (await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } })).text();
+      assert.ok(html.includes('action="/dashboard/logs/new"'), 'the dashboard must offer the create form');
+      assert.ok(html.includes('name="repo_name"') && html.includes('name="product"'));
+    }, undefined, auth);
+  });
+});
+
+test('POST /dashboard/logs/new creates the repository and lands on the new log', async () => {
+  await withAuth(async (auth, db) => {
+    const { gh, repos } = creatingGitHub();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    auth.users.store(42, GRANTED_USER_TOKEN);
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/new', {
+        product: 'Auri CRM', repo_name: 'auri-release-log', view: 'timeline', visibility: 'private',
+      }, cookie);
+      assert.equal(res.status, 302);
+      const location = res.headers.get('location')!;
+      assert.match(location, /^\/dashboard\/logs\/[0-9a-z]{12}$/);
+      const logId = location.split('/').pop()!;
+      const row = db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+      assert.ok(row, 'the log must be indexed before the redirect points at it');
+      assert.equal(row.product, 'Auri CRM');
+      assert.equal(row.view, 'timeline');
+      assert.equal(row.visibility, 'private');
+      assert.ok(repos['octocat/auri-release-log']['release-log.json'], 'the first release-log.json must be committed');
+      assert.ok(repos['octocat/auri-release-log']['README.md'], 'a README comes along');
+    }, undefined, {
+      ...auth, gh, perms: permissions(db, gh),
+      createRepo: async (_token, input) => {
+        repos[`octocat/${input.name}`] = {};
+        return { kind: 'created', owner: 'octocat', repo: input.name, nodeId: `R_${input.name}` };
+      },
+      syncNow: async (ref) => { await syncLog(db, gh, ref); },
+    });
+  });
+});
+
+test('POST /dashboard/logs/new without a session goes to the login, creating nothing', async () => {
+  await withAuth(async (auth, db) => {
+    let created = 0;
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/new`, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ product: 'P', repo_name: 'r' }).toString(),
+        redirect: 'manual',
+      });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/auth/github/login');
+      assert.equal(created, 0);
+    }, undefined, {
+      ...auth,
+      createRepo: async (_token, input) => {
+        created += 1;
+        return { kind: 'created', owner: 'octocat', repo: input.name, nodeId: 'R_x' };
+      },
+    });
+    assert.equal(db.select().from(log).all().length, 0);
+  });
+});
+
+test('POST /dashboard/logs/new without a stored user token asks for a fresh login', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/new', { product: 'Auri CRM', repo_name: 'auri-release-log' }, cookie);
+      assert.equal(res.status, 401);
+      const html = await res.text();
+      assert.ok(html.includes('/auth/github/login'), 'the page must offer the way back');
+    }, undefined, auth);
+  });
+});
+
+test('a repository name that is already taken answers 409, not a redirect into nothing', async () => {
+  await withAuth(async (auth, db) => {
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    auth.users.store(42, GRANTED_USER_TOKEN);
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/new', { product: 'Auri CRM', repo_name: 'auri-release-log' }, cookie);
+      assert.equal(res.status, 409);
+      assert.ok((await res.text()).includes('auri-release-log'));
+    }, undefined, { ...auth, createRepo: async () => ({ kind: 'name_taken' }) });
   });
 });
 
