@@ -237,6 +237,7 @@ function counting(gh: GitHub): { gh: GitHub; blobs: string[] } {
       probe: (ref) => gh.probe(ref),
       tree: (ref, commit) => gh.tree(ref, commit),
       blob: (ref, sha) => { blobs.push(sha); return gh.blob(ref, sha); },
+      putFile: (ref, path, content, message, expectedSha) => gh.putFile(ref, path, content, message, expectedSha),
     },
   };
 }
@@ -271,6 +272,7 @@ test('a sync that throws partway through leaves head_sha at the previous value',
       probe: (ref) => base.probe(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async () => { throw new Error('rate limited'); },
+      putFile: (ref, path, content, message, expectedSha) => base.putFile(ref, path, content, message, expectedSha),
     };
 
     await assert.rejects(() => syncLog(db, failing, REF));
@@ -546,6 +548,7 @@ test('an indexed media file whose blob comes back null on a later sync is droppe
       probe: (ref) => base.probe(ref),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: async (ref, sha) => (sha === editedSha ? null : base.blob(ref, sha)),
+      putFile: (ref, path, content, message, expectedSha) => base.putFile(ref, path, content, message, expectedSha),
     };
     await syncLog(db, missingBlob, REF);
 
@@ -581,6 +584,7 @@ test('a sync without an installation leaves the stored node id alone', async () 
       probe: async () => ({ kind: 'no_installation' }),
       tree: async (ref, commit) => { treeCalled = true; return base.tree(ref, commit); },
       blob: async (ref, sha) => { blobCalled = true; return base.blob(ref, sha); },
+      putFile: (ref, path, content, message, expectedSha) => base.putFile(ref, path, content, message, expectedSha),
     };
     await syncLog(db, uninstalled, REF);
 
@@ -610,6 +614,7 @@ test('a repository the app is not installed on is skipped, not frozen', async ()
       probe: async () => ({ kind: 'no_installation' }),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
+      putFile: (ref, path, content, message, expectedSha) => base.putFile(ref, path, content, message, expectedSha),
     };
     const outcome = await syncLog(db, uninstalled, REF);
 
@@ -687,6 +692,7 @@ test('(Finding 3) a no_installation result stamps indexed_at on the existing row
       probe: async () => ({ kind: 'no_installation' }),
       tree: (ref, commit) => base.tree(ref, commit),
       blob: (ref, sha) => base.blob(ref, sha),
+      putFile: (ref, path, content, message, expectedSha) => base.putFile(ref, path, content, message, expectedSha),
     };
     const outcome = await syncLog(db, uninstalled, REF);
 
@@ -705,6 +711,7 @@ test('a repository with no commits is skipped without a problem row', async () =
       probe: async () => ({ kind: 'empty', nodeId: 'R_1' }),
       tree: async () => [],
       blob: async () => null,
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, empty, REF);
     assert.equal(outcome.skipped, 'no_commits');
@@ -729,6 +736,7 @@ test("a stale ref's sync converges the row on the canonical name probe() reports
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_1', owner: 'o', repo: 'new-name' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(CONFIG), size: CONFIG.length }],
       blob: async (_ref, sha) => (sha === blobSha(CONFIG) ? Buffer.from(CONFIG) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, gh, { owner: 'o', repo: 'old-stale-name' });
 
@@ -751,6 +759,7 @@ test('a renamed repository keeps its log, anchored on the node id', async () => 
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: before.repoNodeId as string }),
       tree: async () => fakeGitHub({ 'o/r': files }).tree(REF, 'c1'),
       blob: (ref, sha) => fakeGitHub({ 'o/r': files }).blob(REF, sha),
+      putFile: (ref, path, content, message, expectedSha) => fakeGitHub({ 'o/r': files }).putFile(ref, path, content, message, expectedSha),
     };
     await syncLog(db, renamed, { owner: 'o', repo: 'renamed' });
 
@@ -795,6 +804,7 @@ test('(b) the rightful holder re-syncing under a new name keeps its log', async 
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: before.repoNodeId as string }),
       tree: async () => fakeGitHub({ 'o/r': files }).tree(REF, 'c1'),
       blob: (ref, sha) => fakeGitHub({ 'o/r': files }).blob(REF, sha),
+      putFile: (ref, path, content, message, expectedSha) => fakeGitHub({ 'o/r': files }).putFile(ref, path, content, message, expectedSha),
     };
     const outcome = await syncLog(db, renamed, { owner: 'o', repo: 'renamed' });
 
@@ -827,6 +837,7 @@ test('(c) a claimant row with a NULL node id is adopted, not refused', async () 
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(config), size: config.length }],
       blob: async (_ref, sha) => (sha === blobSha(config) ? Buffer.from(config) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     // Also renamed, which is exactly what a NULL node id cannot survive:
     // the node-id lookup misses (nothing yet has 'R_new') and the path
@@ -867,6 +878,7 @@ test('a repository renamed onto a name a frozen log still holds is refused, not 
       probe: async () => ({ kind: 'ready', head: 'c-renamed', nodeId: rowA.repoNodeId as string }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configA), size: configA.length }],
       blob: async (_ref, sha) => (sha === blobSha(configA) ? Buffer.from(configA) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, renamed, { owner: 'o', repo: 'recycled' });
 
@@ -907,6 +919,7 @@ test('a stale ref whose canonical name is already held by a frozen log is refuse
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_a', owner: 'o', repo: 'new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configA), size: configA.length }],
       blob: async (_ref, sha) => (sha === blobSha(configA) ? Buffer.from(configA) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, gh, { owner: 'o', repo: 'old-stale' });
 
@@ -959,6 +972,7 @@ test('a rename onto a path an active row holds does not delete that row', async 
       probe: async () => ({ kind: 'ready', head: 'c-renamed', nodeId: 'R_x_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configX), size: configX.length }],
       blob: async (_ref, sha) => (sha === blobSha(configX) ? Buffer.from(configX) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, renamed, { owner: 'o', repo: 'target' });
 
@@ -1014,6 +1028,7 @@ test('a legacy row synced under its own path is adopted and gets its node id fil
         if (sha === blobSha(config)) configBlobFetches += 1;
         return sha === blobSha(config) ? Buffer.from(config) : null;
       },
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, gh, REF);
 
@@ -1067,6 +1082,7 @@ test('a different repository synced onto a legacy NULL-node-id row\'s path is re
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_other' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configOther), size: configOther.length }],
       blob: async (_ref, sha) => (sha === blobSha(configOther) ? Buffer.from(configOther) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, gh, REF);
 
@@ -1099,6 +1115,7 @@ test('a rename onto a path a frozen row holds is refused when the incoming repos
       probe: async () => ({ kind: 'ready', head: 'c1', nodeId: 'R_b_new' }),
       tree: async () => [{ path: 'release-log.json', sha: blobSha(configB), size: configB.length }],
       blob: async (_ref, sha) => (sha === blobSha(configB) ? Buffer.from(configB) : null),
+      putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
     };
     const outcome = await syncLog(db, incoming, { owner: 'o', repo: 'frozen-holder' });
 

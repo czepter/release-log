@@ -35,6 +35,7 @@ function counting(level: 'admin' | 'write' | 'read' | 'none' | null): { gh: GitH
     tree: async () => [],
     blob: async () => null,
     async collaboratorPermission() { calls += 1; return level; },
+    putFile: async () => ({ kind: 'committed' as const, sha: 'stub' }),
   };
   return { gh, calls: () => calls };
 }

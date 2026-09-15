@@ -28,6 +28,17 @@ export type RepoState =
   | { kind: 'no_installation' }
   | { kind: 'gone' };
 
+export type CommitResult =
+  | { kind: 'committed'; sha: string }
+  // GitHubs eigene Konflikterkennung: 409 heißt "die erwartete SHA stimmt
+  // nicht mehr" (jemand hat die Datei seither geändert), 422 auf einem
+  // Anlegen-ohne-SHA heißt "unter diesem Pfad liegt schon etwas". Beides
+  // verdient dieselbe Antwort -- nicht committen, dem Menschen sagen, dass
+  // sich etwas geändert hat -- also bildet putFile beide auf denselben
+  // Zustand ab.
+  | { kind: 'conflict' }
+  | { kind: 'no_installation' };
+
 export type GitHub = {
   probe(ref: RepoRef): Promise<RepoState>;
   tree(ref: RepoRef, commit: string): Promise<TreeEntry[]>;
@@ -36,6 +47,7 @@ export type GitHub = {
   // 14). null heißt "keine Antwort möglich" -- der Aufrufer behandelt das
   // wie 'none', nie wie Schreibrecht.
   collaboratorPermission(ref: RepoRef, login: string): Promise<'admin' | 'write' | 'read' | 'none' | null>;
+  putFile(ref: RepoRef, path: string, content: Buffer, message: string, expectedSha: string | null): Promise<CommitResult>;
 };
 
 // git hashes a blob as sha1("blob <byte length>\0" + content).
@@ -84,7 +96,19 @@ export function fakeGitHub(repos: Record<string, Record<string, string | Buffer>
     async collaboratorPermission(ref) {
       return entriesOf(ref) === null ? null : 'write';
     },
+    async putFile() {
+      // Kein bestehender Test braucht mehr als "es hat geklappt" von der
+      // Fake-Seite -- Tests für das eigentliche Konfliktverhalten laufen
+      // gegen githubClient mit fakeHttp, wo die Antwort steuerbar ist.
+      return { kind: 'committed', sha: 'fake-committed-sha' };
+    },
   };
+}
+
+// GitHubs Contents-API-Pfad trägt "/" als echten Pfadtrenner -- ihn als
+// Ganzes zu kodieren würde ihn selbst mitkodieren und die URL brechen.
+function encodePath(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
 }
 
 const API = 'https://api.github.com';
@@ -99,12 +123,12 @@ function headers(token: string): Record<string, string> {
 }
 
 export function githubClient(inst: Installations, http: Http): GitHub {
-  async function authed(ref: RepoRef, path: string): Promise<Response | null> {
+  async function authed(ref: RepoRef, path: string, init?: RequestInit): Promise<Response | null> {
     const token = await inst.tokenFor(ref);
     // Not installed: there is nothing to ask, and asking without a token
     // would be a different failure than the one the caller means.
     if (token === null) return null;
-    const res = await http(`${API}${path}`, { headers: headers(token) });
+    const res = await http(`${API}${path}`, { ...init, headers: headers(token) });
     if (res.status !== 401) return res;
 
     // Exactly one attempt: a 401 means either "token dead" — a fresh one
@@ -114,7 +138,7 @@ export function githubClient(inst: Installations, http: Http): GitHub {
     inst.invalidate(ref);
     const fresh = await inst.tokenFor(ref);
     if (fresh === null) return null;
-    return http(`${API}${path}`, { headers: headers(fresh) });
+    return http(`${API}${path}`, { ...init, headers: headers(fresh) });
   }
 
   return {
@@ -201,6 +225,22 @@ export function githubClient(inst: Installations, http: Http): GitHub {
       return body.permission === 'admin' || body.permission === 'write' || body.permission === 'read'
         ? body.permission
         : 'none';
+    },
+
+    async putFile(ref, path, content, message, expectedSha) {
+      const res = await authed(ref, `/repos/${ref.owner}/${ref.repo}/contents/${encodePath(path)}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          message,
+          content: content.toString('base64'),
+          ...(expectedSha !== null ? { sha: expectedSha } : {}),
+        }),
+      });
+      if (res === null) return { kind: 'no_installation' };
+      if (res.status === 409 || res.status === 422) return { kind: 'conflict' };
+      if (!res.ok) throw new Error(`commit to ${path} failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { content: { sha: string } };
+      return { kind: 'committed', sha: body.content.sha };
     },
   };
 }
