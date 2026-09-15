@@ -19,6 +19,7 @@ import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
 import { log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 import { mintTokenPair } from './lib/oauth.ts';
+import { indexReader } from './lib/indexReader.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -2366,5 +2367,75 @@ test('GET /.well-known/oauth-authorization-server serves RFC 8414 metadata namin
       assert.equal(body.token_endpoint, 'https://example.test/oauth/token');
       assert.deepEqual(body.code_challenge_methods_supported, ['S256']);
     }, undefined, auth);
+  });
+});
+
+function insertPrivateLogWithDraft(db: ReturnType<typeof openDb>): void {
+  db.insert(log).values({
+    publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+    view: 'full', visibility: 'private', curationNotes: null, state: 'active', headSha: 'c0ffee',
+    configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+  }).run();
+  db.insert(release).values({
+    logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: '2026-09-01T00:00:00.000Z', blobSha: 'r1',
+    path: 'releases/1.0.0.json', doc: JSON.stringify({
+      version: '1.0.0', tag: null, date: '2026-09-01', published_at: '2026-09-01T00:00:00.000Z', commits: 1,
+      headline: 'released', body: [], image: null, covered: [], changes: [],
+    }),
+  }).run();
+  db.insert(release).values({
+    logId: 'log1', version: '2.0.0-draft', date: '2026-09-14', publishedAt: null, blobSha: 'r2',
+    path: 'releases/2.0.0-draft.json', doc: JSON.stringify({
+      version: '2.0.0-draft', tag: null, date: '2026-09-14', published_at: null, commits: 1,
+      headline: 'unreleased', body: [], image: null, covered: [], changes: [],
+    }),
+  }).run();
+}
+
+test('GET /l/<id>/versions on a private log answers 404 to an anonymous request (unchanged)', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    // These three tests exercise the db-backed log they just inserted, so the
+    // JSON route needs the db-backed reader (same wiring as production's
+    // createApp(indexReader(db), ...)) -- not the file-fixture `reader`
+    // above, which only knows 'abc123'.
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/versions`);
+      assert.equal(res.status, 404);
+    }, undefined, auth);
+  });
+});
+
+test('GET /l/<id>/versions with a session that has write access includes the draft', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'write' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/versions`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { versions: unknown[] };
+      assert.equal(body.versions.length, 2, 'both the published and the draft version must be listed for a write-access holder');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('GET /l/<id>/versions with a session that has NO write access still hides the draft', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'read' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      // Private + no write access: still a 404, indistinguishable from
+      // "does not exist" (spec §7) -- read-only collaboration does not
+      // unlock a private log's JSON either.
+      const res = await fetch(`${base}/l/log1/versions`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 404);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });

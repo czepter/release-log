@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import type { Server, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { route } from './lib/public.ts';
+import type { Viewer } from './lib/public.ts';
 import type { Reader } from './lib/store.ts';
 import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/webhook.ts';
 import type { RepoRef } from './lib/github.ts';
@@ -1247,9 +1248,23 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         return;
       }
 
-      // Viewer is 'public' until sessions exist. Drafts and private logs stay
-      // invisible until then, which is the safe direction.
-      const viewer = 'public';
+      // Sessions und canWrite existieren jetzt (Plan 5/6) -- ein Konto mit
+      // Schreibrecht auf DAS Repo, das dieser Log-Pfad benennt, ist 'member'
+      // und sieht Entwürfe; jeder andere bleibt 'public' (spec §7,
+      // Abweichung 7). Derselbe Regex-Trick wie beim ETag weiter unten:
+      // "+ '/'" macht auch ein pfadloses /l/<id> treffbar.
+      const viewerLogMatch = /^\/l\/([^/]+)\//.exec(pathname + '/');
+      let viewer: Viewer = 'public';
+      if (viewerLogMatch && auth) {
+        const who = currentAccount(req, auth);
+        if (who) {
+          const viewerRow = auth.db.select().from(log).where(eq(log.publicId, viewerLogMatch[1])).all()[0];
+          if (viewerRow) {
+            const ref = { owner: viewerRow.repoOwner, repo: viewerRow.repoName };
+            if (await auth.perms.canWrite(who.accountId, who.login, viewerRow.publicId, ref)) viewer = 'member';
+          }
+        }
+      }
 
       // url.pathname is percent-encoded (new URL never decodes it), so a media
       // filename with a space or non-ASCII character only matches the file on
