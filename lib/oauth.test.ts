@@ -280,3 +280,15 @@ test('an unknown token is rejected', () => {
     assert.equal(lookupAccessToken(db, 'never-issued'), null);
   });
 });
+
+test('lookupAccessToken returns expiresAt in seconds, not milliseconds', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const before = Date.now();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    const looked = lookupAccessToken(db, pair.accessToken);
+    assert.ok(looked);
+    const expiresAtMs = looked!.expiresAt * 1000;
+    assert.ok(Math.abs(expiresAtMs - (before + 3_600_000)) < 5000, `expiresAt should be ~1 hour out in seconds, got ${looked!.expiresAt}`);
+  });
+});
