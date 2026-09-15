@@ -14,6 +14,10 @@ import { account } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { fakeHttp } from './lib/http.ts';
 import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
+import { fakeGitHub } from './lib/github.ts';
+import type { GitHub } from './lib/github.ts';
+import { permissions } from './lib/permissions.ts';
+import { log } from './lib/db/schema.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -446,8 +450,13 @@ function withAuth(fn: (auth: Auth, db: ReturnType<typeof openDb>) => Promise<voi
     'POST /login/oauth/access_token': { body: { access_token: 'gho_test' } },
     'GET /user': { body: { id: 42, login: 'octocat', avatar_url: 'https://example.test/a.png' } },
   });
+  const gh = fakeGitHub({});
   return fn(
-    { db, clientId: 'client-id', clientSecret: 'client-secret', signingKey: SIGNING_KEY, adminLogins: ['octocat'], baseUrl: 'https://example.test', http },
+    {
+      db, clientId: 'client-id', clientSecret: 'client-secret', signingKey: SIGNING_KEY,
+      adminLogins: ['octocat'], baseUrl: 'https://example.test', http,
+      gh, perms: permissions(db, gh), onRepoWrite: () => {},
+    },
     db,
   ).finally(() => { rmSync(dir, { recursive: true, force: true }); });
 }
@@ -734,5 +743,100 @@ test('a member webhook delivery calls onPermissionInvalidation, not onDelivery',
     webhookSecret: secret,
     onDelivery: (refs) => { delivered.push(...refs); },
     onPermissionInvalidation: (refs) => { invalidated.push(...refs); },
+  });
+});
+
+function insertLog(db: ReturnType<typeof openDb>, publicId: string, owner: string, repo: string, state = 'active'): void {
+  db.insert(log).values({
+    publicId, repoOwner: owner, repoName: repo, repoNodeId: `R_${publicId}`,
+    product: `Product ${publicId}`, view: 'full', visibility: 'public', curationNotes: null,
+    state, headSha: 'c0ffee', configBlobSha: 'abc', indexedAt: '2026-09-15T00:00:00.000Z',
+  }).run();
+}
+
+test('GET /dashboard without a session redirects to login', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/auth/github/login');
+    }, undefined, auth);
+  });
+});
+
+test('GET /dashboard lists only logs the account can write to', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'writable', 'o', 'writable-repo');
+    insertLog(db, 'not-writable', 'o', 'other-repo');
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }),
+      async collaboratorPermission(ref) { return ref.repo === 'writable-repo' ? 'write' : 'read'; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Product writable'), 'a writable log must be listed');
+      assert.ok(!html.includes('Product not-writable'), 'a log without write access must not be listed');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a frozen log is listed for an admin even without canWrite', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'frozen-one', 'o', 'gone-repo', 'frozen');
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }),
+      collaboratorPermission: async () => null, // a gone repo answers null -- never write access
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      // 'octocat' is this fixture's admin (see withAuth's adminLogins).
+      assert.ok(html.includes('Product frozen-one'), 'an admin must still see a frozen log, to reach its delete action');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a frozen log is hidden from a non-admin account without write access', async () => {
+  await withAuth(async (auth, db) => {
+    insertLog(db, 'frozen-two', 'o', 'gone-repo-2', 'frozen');
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      putFile: async () => ({ kind: 'committed', sha: 'x' }),
+      collaboratorPermission: async () => null,
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 99);
+    db.insert(account).values({ githubUserId: 99, login: 'not-an-admin', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('Product frozen-two'), 'a frozen log stays hidden from a non-admin who cannot write to it');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a product name containing HTML-meaningful characters is escaped in the list', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'xss-log', repoOwner: 'o', repoName: 'xss-repo', repoNodeId: 'R_xss',
+      product: '<script>alert(1)</script>', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'abc', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh = fakeGitHub({ 'o/xss-repo': { 'release-log.json': '{}' } });
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard`, { headers: { cookie: `session=${cookie}` } });
+      const html = await res.text();
+      assert.ok(!html.includes('<script>alert(1)</script>'), 'the raw tag must never appear unescaped');
+      assert.ok(html.includes('&lt;script&gt;'), 'it must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
