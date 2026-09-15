@@ -1058,6 +1058,70 @@ test('an empty curation_notes becomes null in the committed document, not an emp
   });
 });
 
+// The route builds `candidate` from the row's own id/product, never from the
+// form -- but nothing else pins that down. A future edit that spread form
+// fields into the candidate (e.g. to "generalize" it) would let anyone with
+// write access to a log's repo rewrite that log's own id (the public URL
+// and index lookup key) or its displayed product via a forged POST field,
+// and ship it as a real commit.
+test('a forged id or product in the form is ignored, not committed', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'Auri CRM', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let committedContent = '';
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile(ref, path, content) { committedContent = content.toString('utf8'); return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'sha1', view: 'full', visibility: 'public', curation_notes: '',
+        id: 'hijacked-id', product: 'Hijacked Product',
+      }, cookie);
+      const doc = JSON.parse(committedContent);
+      assert.equal(doc.id, 'log1');
+      assert.equal(doc.product, 'Auri CRM');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+// putFile returning no_installation must never be treated as success: the
+// GitHub installation cannot currently reach this repo, so nothing was
+// written. Falling through to onRepoWrite + a 302 would tell the user it
+// saved, enqueue a resync for a write that never happened, and silently
+// lose the change -- exactly the failure mode this task's design exists to
+// prevent for the "committed" and "conflict" outcomes.
+test('putFile reporting no_installation answers 502 and enqueues nothing', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { return { kind: 'no_installation' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'sha1', view: 'full', visibility: 'public', curation_notes: '',
+      }, cookie);
+      assert.equal(res.status, 502);
+      assert.equal(enqueued, null, 'a write that never happened must not trigger a resync enqueue');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
 test('an invalid view value is rejected before anything is committed', async () => {
   await withAuth(async (auth, db) => {
     db.insert(log).values({
@@ -1090,6 +1154,7 @@ test('a stale expected_sha results in a conflict page, not a silent overwrite', 
       product: 'P', view: 'full', visibility: 'public', curationNotes: null,
       state: 'active', headSha: 'c0ffee', configBlobSha: 'current-sha', indexedAt: '2026-09-15T00:00:00.000Z',
     }).run();
+    let enqueued: RepoRef | null = null;
     const gh: GitHub = {
       probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
       collaboratorPermission: async () => 'write',
@@ -1102,7 +1167,8 @@ test('a stale expected_sha results in a conflict page, not a silent overwrite', 
         expected_sha: 'a-now-stale-sha', view: 'full', visibility: 'public', curation_notes: '',
       }, cookie);
       assert.equal(res.status, 409);
-    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+      assert.equal(enqueued, null, 'a conflict must not trigger a resync enqueue');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
   });
 });
 
