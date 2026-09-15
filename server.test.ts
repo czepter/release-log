@@ -2613,6 +2613,91 @@ test('GET /l/<id>/r/<version> sets noindex for a private log viewed by a write-a
   });
 });
 
+// Issue #3: die Medienroute prüfte nur config.visibility === 'public' und
+// ließ damit die Bilder eines privaten Logs für JEDEN verschwinden -- auch
+// für das angemeldete Mitglied, das dessen Entwürfe ohnehin zu sehen
+// bekommt. Diese zwei Tests stehen zusammen: derselbe private Log, dasselbe
+// Bild, einmal anonym (404, wie bisher) und einmal mit Schreibrecht (200).
+// Nur zusammen unterscheiden sie "Regel richtig" von "Regel weg".
+test('media of a private log is served to a signed-in write-access member', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    db.insert(media).values({
+      logId: 'log1', path: 'media/x.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1, 2, 3]),
+    }).run();
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'write' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/media/media/x.png`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'image/png');
+      assert.equal((await res.arrayBuffer()).byteLength, 3);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('media of a private log served to a member is never publicly cacheable', async () => {
+  // Die Antwort hängt an der Session, nicht am Pfad: mit dem
+  // öffentlichen Ein-Jahr-immutable-Header könnte ein geteilter Cache die
+  // Bytes eines privaten Logs an jeden weiterreichen.
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    db.insert(media).values({
+      logId: 'log1', path: 'media/x.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1, 2, 3]),
+    }).run();
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'write' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/media/media/x.png`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const cacheControl = res.headers.get('cache-control') ?? '';
+      assert.ok(!cacheControl.includes('public'), `expected a non-public cache-control, got "${cacheControl}"`);
+      assert.ok(!cacheControl.includes('immutable'), `expected no immutable cache-control, got "${cacheControl}"`);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('media of a private log stays 404 for a signed-in account without write access', async () => {
+  await withAuth(async (auth, db) => {
+    insertPrivateLogWithDraft(db);
+    db.insert(media).values({
+      logId: 'log1', path: 'media/x.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1, 2, 3]),
+    }).run();
+    const gh: GitHub = { ...fakeGitHub({}), collaboratorPermission: async () => 'read' };
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/media/media/x.png`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 404);
+      assert.equal(res.headers.get('access-control-allow-origin'), null);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('media of a public log keeps its long immutable cache for everyone', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'Auri CRM',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(media).values({
+      logId: 'log1', path: 'media/x.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1, 2, 3]),
+    }).run();
+    const reader = indexReader(db);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/l/log1/media/media/x.png`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('cache-control') ?? '', /immutable/);
+    }, undefined, auth);
+  });
+});
+
 test('GET /l/<id>/r/<version> does not set noindex for a public log', async () => {
   await withAuth(async (auth, db) => {
     db.insert(log).values({
