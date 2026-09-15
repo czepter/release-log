@@ -11,6 +11,14 @@ import type { GitHub, RepoRef } from './github.ts';
 import { permissions } from './permissions.ts';
 import { mintTokenPair } from './oauth.ts';
 import { buildMcpServer } from './mcpTools.ts';
+import { fakeHttp } from './http.ts';
+import { cipher } from './secrets.ts';
+import { userTokens } from './userTokens.ts';
+import type { UserTokens } from './userTokens.ts';
+import type { CreateUserRepo } from './github.ts';
+import { blobSha } from './github.ts';
+import { syncLog } from './index.ts';
+import { eq } from 'drizzle-orm';
 
 // fakeGitHub({}) always answers collaboratorPermission with null (no repo
 // known to it at all) -- it also never looks at the login it's given, so
@@ -19,16 +27,39 @@ import { buildMcpServer } from './mcpTools.ts';
 // optional parameter: the one test below that needs write access supplies a
 // hand-built GitHub object literal, the same pattern server.test.ts already
 // uses everywhere it needs a specific collaboratorPermission answer.
-function withServerFor(fn: (factory: ReturnType<typeof buildMcpServer>, db: ReturnType<typeof openDb>, deps: { onRepoWriteCalls: RepoRef[] }) => Promise<void>, gh?: GitHub): Promise<void> {
+type ToolTestDeps = {
+  onRepoWriteCalls: RepoRef[];
+  syncedRefs: RepoRef[];
+  users: UserTokens;
+};
+
+// create_log braucht drei Dinge, die kein anderes Werkzeug braucht (das
+// Nutzer-Token, den Repo-Anlegen-Aufruf, den abgewarteten Abgleich). Sie
+// haben deshalb Vorgaben, die nichts tun: ein Konto ohne gespeichertes
+// Token, ein createRepo, das GitHub als unerreichbar meldet, und ein
+// syncNow, das nichts abgleicht. Wer sie braucht, reicht eigene herein.
+function withServerFor(
+  fn: (factory: ReturnType<typeof buildMcpServer>, db: ReturnType<typeof openDb>, deps: ToolTestDeps) => Promise<void>,
+  gh?: GitHub,
+  extra: { createRepo?: CreateUserRepo; syncNow?: (ref: RepoRef) => Promise<void> } = {},
+): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'rlh-mcptools-'));
   const db = openDb(join(dir, 'test.sqlite'));
   const resolvedGh = gh ?? fakeGitHub({});
   const onRepoWriteCalls: RepoRef[] = [];
+  const syncedRefs: RepoRef[] = [];
+  const users = userTokens({
+    db, http: fakeHttp({}), cipher: cipher(Buffer.alloc(32, 3)),
+    clientId: 'Iv1.test', clientSecret: 'test-client-secret',
+  });
   const factory = buildMcpServer({
     db, reader: indexReader(db), perms: permissions(db, resolvedGh), gh: resolvedGh,
     onRepoWrite: (ref) => { onRepoWriteCalls.push(ref); }, baseUrl: 'https://example.test',
+    users,
+    createRepo: extra.createRepo ?? (async () => ({ kind: 'unavailable', status: 503 })),
+    syncNow: async (ref) => { syncedRefs.push(ref); await extra.syncNow?.(ref); },
   });
-  return fn(factory, db, { onRepoWriteCalls }).finally(() => { rmSync(dir, { recursive: true, force: true }); });
+  return fn(factory, db, { onRepoWriteCalls, syncedRefs, users }).finally(() => { rmSync(dir, { recursive: true, force: true }); });
 }
 
 // Ruft ein Werkzeug auf, ohne HTTP: dieselbe In-Memory-Verdrahtung, die die
@@ -627,6 +658,108 @@ test('unpublish_release on an active log without write access answers forbidden'
     assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
     assert.equal(deps.onRepoWriteCalls.length, 0);
   }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'read', async putFile() { throw new Error('must not be called'); } });
+});
+
+// create_log (Issue #1, spec §6): der einzige Aufruf, der ein
+// GitHub-Nutzer-Token braucht. Die Reihenfolge und ihre Fehlerfälle prüft
+// lib/createLog.test.ts; hier steht, was das WERKZEUG beisteuert -- die
+// Scope-Prüfung, die Kontobindung und die Form seiner Antwort.
+const GRANTED_USER_TOKEN = {
+  accessToken: 'gho_user_token',
+  accessExpiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(),
+  refreshToken: 'ghr_stored',
+  refreshExpiresAt: new Date(Date.now() + 181 * 24 * 60 * 60 * 1000).toISOString(),
+};
+
+test('create_log answers the new log\'s id, URL and repository, and the index knows it', async () => {
+  // Ein GitHub, das behält, was hineingeschrieben wird, plus ein Abgleich,
+  // der wirklich läuft: nur so beweist der Test, dass die zurückgegebene
+  // URL auf einen Log zeigt, den es gibt.
+  const repos: Record<string, Record<string, string | Buffer>> = {};
+  const base = fakeGitHub(repos);
+  const gh: GitHub = {
+    ...base,
+    async putFile(ref, path, content) {
+      const key = `${ref.owner}/${ref.repo}`;
+      if (!repos[key]) return { kind: 'no_installation' };
+      repos[key][path] = content;
+      return { kind: 'committed', sha: blobSha(content) };
+    },
+  };
+  // Die Datenbank entsteht erst in withServerFor, syncNow braucht sie aber
+  // -- gebraucht wird sie erst beim Werkzeugaufruf, also reicht dieser
+  // Halter.
+  let opened: ReturnType<typeof openDb> | null = null;
+  await withServerFor(async (factory, db, deps) => {
+    opened = db;
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    deps.users.store(42, GRANTED_USER_TOKEN);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'create_log', {
+      repo_name: 'auri-release-log', owner: 'octocat', product: 'Auri CRM',
+    });
+    assert.notEqual(result.isError, true, result.content[0].text);
+    const body = JSON.parse(result.content[0].text) as { log_id: string; url: string; repo: string };
+    assert.equal(body.repo, 'octocat/auri-release-log');
+    assert.equal(body.url, `https://example.test/l/${body.log_id}`);
+    const row = db.select().from(log).where(eq(log.publicId, body.log_id)).all()[0];
+    assert.ok(row, 'the log the answer names must exist in the index');
+    assert.equal(row.product, 'Auri CRM');
+    assert.deepEqual(deps.syncedRefs, [{ owner: 'octocat', repo: 'auri-release-log' }]);
+  }, gh, {
+    createRepo: async (_token, input) => {
+      repos[`octocat/${input.name}`] = {};
+      return { kind: 'created', owner: 'octocat', repo: input.name, nodeId: `R_${input.name}` };
+    },
+    syncNow: async (ref) => { await syncLog(opened as ReturnType<typeof openDb>, gh, ref); },
+  });
+});
+
+test('create_log without the logs:write scope answers forbidden, creating nothing', async () => {
+  let created = 0;
+  await withServerFor(async (factory, db, deps) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    deps.users.store(42, GRANTED_USER_TOKEN);
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:read'] }, 'create_log', {
+      repo_name: 'auri-release-log', owner: 'octocat', product: 'Auri CRM',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+    assert.equal(created, 0);
+  }, undefined, {
+    createRepo: async (_token, input) => {
+      created += 1;
+      return { kind: 'created', owner: 'octocat', repo: input.name, nodeId: 'R_x' };
+    },
+  });
+});
+
+test('create_log without a stored user token answers reauth_required, not a crash', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'create_log', {
+      repo_name: 'auri-release-log', owner: 'octocat', product: 'Auri CRM',
+    });
+    assert.equal(result.isError, true);
+    const body = JSON.parse(result.content[0].text) as { error: string; message: string };
+    assert.equal(body.error, 'reauth_required');
+    assert.match(body.message, /\/auth\/github\/login/, 'the answer has to name the way back');
+  });
+});
+
+test('create_log from a token whose account is gone answers forbidden', async () => {
+  // Kein Repo, gegen das man Rechte prüfen könnte -- die Absage muss also
+  // im Werkzeug stehen, nicht in canWrite.
+  await withServerFor(async (factory, db) => {
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 999, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'create_log', {
+      repo_name: 'auri-release-log', owner: 'octocat', product: 'Auri CRM',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+  });
 });
 
 // add_media (Issue #2, spec §6 "Medien-Upload"): das Werkzeug gibt eine

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { blobSha, fakeGitHub, githubClient } from './github.ts';
+import { blobSha, fakeGitHub, githubClient, userRepoCreator } from './github.ts';
 import { fakeHttp } from './http.ts';
 import { installations } from './appAuth.ts';
 import type { Installations } from './appAuth.ts';
@@ -289,7 +289,7 @@ test('a 401 invalidates the token and the request is retried once', async () => 
     'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
   });
   const inst = installations(
-    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', adminLogins: ['tester'] },
+    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', tokenEncryptionKey: Buffer.alloc(32, 7), adminLogins: ['tester'] },
     http,
   );
   const state = await githubClient(inst, http).probe(REF);
@@ -307,7 +307,7 @@ test('a 401 that survives the retry is reported, not retried forever', async () 
     'GET /repos/o/r': { status: 401 },
   });
   const inst = installations(
-    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', adminLogins: ['tester'] },
+    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', tokenEncryptionKey: Buffer.alloc(32, 7), adminLogins: ['tester'] },
     http,
   );
   await assert.rejects(() => githubClient(inst, http).probe(REF), /HTTP 401/);
@@ -453,4 +453,53 @@ test('fakeGitHub commits and reports it in the fake repo it knows', async () => 
   const gh = fakeGitHub({ 'o/r': { 'release-log.json': '{}' } });
   const result = await gh.putFile({ owner: 'o', repo: 'r' }, 'release-log.json', Buffer.from('{}'), 'm', 'anysha');
   assert.equal(result.kind, 'committed');
+});
+
+// userRepoCreator ist der eine Aufruf ohne Installations-Token: POST
+// /user/repos gibt es nur für Nutzer-Token (spec §5, Entscheidung 23).
+test('userRepoCreator posts to /user/repos with the user token and no auto_init', async () => {
+  const seen: Array<{ url: string; auth: string; body: unknown }> = [];
+  const inner = fakeHttp({
+    'POST /user/repos': { status: 201, body: { name: 'auri-release-log', node_id: 'R_new', owner: { login: 'octocat' } } },
+  });
+  const http = Object.assign(
+    (url: string, init?: RequestInit) => {
+      seen.push({
+        url,
+        auth: String((init?.headers as Record<string, string> | undefined)?.authorization ?? ''),
+        body: JSON.parse(String(init?.body ?? '{}')),
+      });
+      return inner(url, init);
+    },
+    { calls: inner.calls },
+  );
+  const result = await userRepoCreator(http)('gho_user_token', {
+    name: 'auri-release-log', description: 'Release-Log: Auri CRM', private: true,
+  });
+  assert.deepEqual(result, { kind: 'created', owner: 'octocat', repo: 'auri-release-log', nodeId: 'R_new' });
+  assert.ok(seen[0].url.startsWith('https://api.github.com/'), `expected an api.github.com URL, got ${seen[0].url}`);
+  assert.equal(seen[0].auth, 'Bearer gho_user_token', 'the USER token, not an installation token');
+  const body = seen[0].body as { auto_init: boolean; private: boolean; name: string };
+  assert.equal(body.auto_init, false, 'the first commit is ours, not GitHub\'s template');
+  assert.equal(body.private, true);
+  assert.equal(body.name, 'auri-release-log');
+});
+
+test('userRepoCreator reads the repository name back from the answer, not from the request', async () => {
+  // GitHub normalisiert Namen (Leerzeichen werden zu Bindestrichen). Was
+  // danach gilt, ist was zurückkommt.
+  const http = fakeHttp({
+    'POST /user/repos': { status: 201, body: { name: 'my-log', node_id: 'R_new', owner: { login: 'octocat' } } },
+  });
+  const result = await userRepoCreator(http)('t', { name: 'my log', description: '', private: false });
+  assert.equal(result.kind === 'created' && result.repo, 'my-log');
+});
+
+test('userRepoCreator maps 422, 401/403 and a 5xx to three different answers', async () => {
+  const cases: Array<[number, string]> = [[422, 'name_taken'], [401, 'unauthorized'], [403, 'unauthorized'], [503, 'unavailable']];
+  for (const [status, kind] of cases) {
+    const http = fakeHttp({ 'POST /user/repos': { status } });
+    const result = await userRepoCreator(http)('t', { name: 'r', description: '', private: false });
+    assert.equal(result.kind, kind, `HTTP ${status} must mean ${kind}`);
+  }
 });

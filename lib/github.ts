@@ -105,6 +105,56 @@ export function fakeGitHub(repos: Record<string, Record<string, string | Buffer>
   };
 }
 
+// Das Anlegen eines Repos ist der eine Aufruf, der NICHT über die
+// Installation laufen kann: GitHubs Berechtigungsreferenz führt
+// POST /user/repos nur für Nutzer-Token (spec §5, Entscheidung 23). Er
+// steht deshalb neben dem Client statt in ihm -- er bekommt das Token
+// gereicht, statt sich eins zu holen, und teilt mit githubClient nur die
+// Header-Form.
+export type CreateRepoResult =
+  | { kind: 'created'; owner: string; repo: string; nodeId: string }
+  // 422 auf diesem Endpunkt heißt praktisch immer "diesen Namen gibt es
+  // hier schon"; der Name selbst ist vorher geprüft.
+  | { kind: 'name_taken' }
+  // Token tot oder ohne das nötige Recht -- beides endet beim selben
+  // nächsten Schritt: der Mensch meldet sich neu an.
+  | { kind: 'unauthorized' }
+  | { kind: 'unavailable'; status: number };
+
+export type CreateUserRepo = (
+  token: string, input: { name: string; description: string; private: boolean },
+) => Promise<CreateRepoResult>;
+
+export function userRepoCreator(http: Http): CreateUserRepo {
+  return async (token, input) => {
+    const res = await http(`${API}/user/repos`, {
+      method: 'POST',
+      headers: headers(token),
+      body: JSON.stringify({
+        name: input.name,
+        description: input.description,
+        private: input.private,
+        // Kein auto_init: die erste release-log.json und die README schreibt
+        // das Installations-Token (spec §6), nicht GitHubs Vorlage. Ein
+        // angelegtes Repo wäre sonst schon belegt, und der erste eigene
+        // Commit wäre ein Ersetzen statt eines Anlegens.
+        auto_init: false,
+        has_issues: false,
+        has_projects: false,
+        has_wiki: false,
+      }),
+    });
+    if (res.status === 401 || res.status === 403) return { kind: 'unauthorized' };
+    if (res.status === 422) return { kind: 'name_taken' };
+    if (!res.ok) return { kind: 'unavailable', status: res.status };
+    const body = (await res.json()) as { name: string; node_id: string; owner: { login: string } };
+    // Der Name kommt aus der Antwort, nicht aus der Eingabe: GitHub
+    // normalisiert ihn (Leerzeichen werden zu Bindestrichen), und was
+    // danach gilt, ist was zurückkommt.
+    return { kind: 'created', owner: body.owner.login, repo: body.name, nodeId: body.node_id };
+  };
+}
+
 // GitHubs Contents-API-Pfad trägt "/" als echten Pfadtrenner -- ihn als
 // Ganzes zu kodieren würde ihn selbst mitkodieren und die URL brechen.
 function encodePath(path: string): string {

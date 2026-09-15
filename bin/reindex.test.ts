@@ -171,6 +171,7 @@ const PEM_ENV = {
   GITHUB_CLIENT_ID: 'Iv1.test',
   GITHUB_CLIENT_SECRET: 'test-client-secret',
   SIGNING_KEY: 'test-signing-key',
+  TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
   ADMIN_LOGINS: 'tester',
 };
 

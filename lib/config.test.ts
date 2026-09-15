@@ -13,6 +13,7 @@ const COMPLETE = {
   GITHUB_CLIENT_ID: 'Iv1.deadbeef',
   GITHUB_CLIENT_SECRET: 'client-secret-value',
   SIGNING_KEY: 'a-long-random-signing-key',
+  TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
   ADMIN_LOGINS: 'czepter, someone-else',
 };
 
@@ -130,5 +131,29 @@ test('the thrown message never contains the client secret or signing key on miss
     const message = (err as Error).message;
     assert.ok(!message.includes('client-secret-value'), 'the client secret must not appear in an error');
     assert.ok(!message.includes('a-long-random-signing-key'), 'the signing key must not appear in an error');
+  }
+});
+
+test('readConfig decodes TOKEN_ENCRYPTION_KEY to its 32 raw bytes', () => {
+  const config = readConfig(COMPLETE);
+  assert.deepEqual(config.tokenEncryptionKey, Buffer.alloc(32, 9));
+});
+
+test('readConfig rejects a TOKEN_ENCRYPTION_KEY that is not 32 bytes', () => {
+  // Früh und laut scheitern: ein zu kurzer Schlüssel fiele sonst erst beim
+  // ersten create_log auf, und dann mitten in einem Schreibvorgang.
+  assert.throws(
+    () => readConfig({ ...COMPLETE, TOKEN_ENCRYPTION_KEY: Buffer.alloc(16, 9).toString('base64') }),
+    /32 bytes/,
+  );
+});
+
+test('the thrown message never contains the encryption key itself', () => {
+  const secret = Buffer.alloc(16, 3).toString('base64');
+  try {
+    readConfig({ ...COMPLETE, TOKEN_ENCRYPTION_KEY: secret });
+    assert.fail('expected readConfig to throw');
+  } catch (err) {
+    assert.ok(!(err as Error).message.includes(secret), 'the key value must not appear in an error');
   }
 });

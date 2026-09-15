@@ -14,7 +14,9 @@ import type { Permissions } from './permissions.ts';
 import { sortReleases, latestOf } from './order.ts';
 import { lookupAccessToken } from './oauth.ts';
 import { parseRelease } from './document.ts';
-import type { GitHub, RepoRef } from './github.ts';
+import type { GitHub, RepoRef, CreateUserRepo } from './github.ts';
+import type { UserTokens } from './userTokens.ts';
+import { createLog } from './createLog.ts';
 import { mediaTypeOf } from './mediaTypes.ts';
 import { MEDIA_MAX_BYTES } from './index.ts';
 import { mintUploadToken, normalizeMediaPath } from './uploads.ts';
@@ -31,6 +33,10 @@ function toolError(error: string, message: string): CallToolResult {
 
 export type McpToolDeps = {
   db: Db; reader: Reader; perms: Permissions; gh: GitHub; onRepoWrite: (ref: RepoRef) => void; baseUrl: string;
+  // Nur create_log braucht diese drei: das Nutzer-Token, mit dem ein Repo
+  // überhaupt entstehen kann, der Aufruf, der es anlegt, und der Abgleich,
+  // auf den die Antwort warten muss (spec §6, Entscheidung 23).
+  users: UserTokens; createRepo: CreateUserRepo; syncNow: (ref: RepoRef) => Promise<void>;
 };
 
 // Der Kurationsteil des Vorbild-Skills, wörtlich aus spec §6.
@@ -45,7 +51,7 @@ breaking: true setzen, wenn der Leser handeln muss. Die Handlungsanweisung gehö
 covered nie von Hand anfassen.
 
 Ablauf:
-1. list_logs, dann get_log -- liefert jüngste Version und deren covered.
+1. list_logs, dann get_log -- liefert jüngste Version und deren covered. Gibt es noch keinen Log, legt create_log einen an.
 2. Lies lokal "git log" ab diesen Commits.
 3. Verwandte Commits zu Themen bündeln, Prosa schreiben.
 4. Bilder mit add_media hochladen: das Werkzeug liefert eine Upload-URL, die Bytes gehen per PUT dorthin, und image.src im Dokument ist danach der zurückgegebene Pfad.
@@ -55,7 +61,7 @@ Ablauf:
 `.trim();
 
 export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
-  const { db, reader, perms, gh, onRepoWrite, baseUrl } = deps;
+  const { db, reader, perms, gh, onRepoWrite, baseUrl, users, createRepo, syncNow } = deps;
   return async (ctx) => {
     const server = new McpServer(
       { name: 'release-log-hub', version: '1.0.0' },
@@ -230,6 +236,41 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
       'unpublish_release',
       { description: 'Setzt published_at auf null.', inputSchema: z.object({ log_id: z.string(), version: z.string() }) },
       ({ log_id, version }) => togglePublish(log_id, version, null),
+    );
+
+    // create_log ist der einzige Aufruf dieses Diensts, der ein
+    // GitHub-NUTZER-Token braucht: POST /user/repos gibt es nur dafür
+    // (spec §5, Entscheidung 23). Die Reihenfolge -- Repo anlegen,
+    // Erreichbarkeit prüfen, Dateien schreiben, indizieren -- steht in
+    // lib/createLog.ts, weil der Dashboard-Knopf dieselbe braucht.
+    server.registerTool(
+      'create_log',
+      {
+        description: 'Legt ein Repository mit frischer release-log.json an, indiziert es und liefert Kennung und URL.',
+        inputSchema: z.object({
+          repo_name: z.string(),
+          owner: z.string(),
+          product: z.string(),
+          view: z.enum(['full', 'timeline']).optional(),
+          visibility: z.enum(['public', 'private']).optional(),
+        }),
+      },
+      async ({ repo_name, owner, product, view, visibility }) => {
+        if (!scopes.includes('logs:write')) return toolError('forbidden', 'logs:write scope required');
+        // who ist null, wenn das Token zu keinem Konto mehr auflöst. Für
+        // jedes andere Werkzeug endet das in canWrite; hier gibt es kein
+        // Repo, gegen das man fragen könnte, also steht die Absage hier.
+        if (who === null) return toolError('forbidden', 'this token is not bound to an account');
+        const result = await createLog({ db, gh, users, createRepo, syncNow, baseUrl }, {
+          accountId: who.accountId, login: who.login, owner, repoName: repo_name, product, view, visibility,
+        });
+        if (!result.ok) return toolError(result.error, result.message);
+        return toolOk({
+          log_id: result.value.logId,
+          url: result.value.url,
+          repo: `${result.value.owner}/${result.value.repo}`,
+        });
+      },
     );
 
     // add_media stellt nur die Erlaubnis aus; die Bytes gehen per PUT an
