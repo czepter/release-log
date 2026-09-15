@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { openDb } from './db/client.ts';
 import { oauthClient, oauthToken } from './db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, revokeFamily, mintTokenPair, lookupAccessToken, rotateRefreshToken } from './oauth.ts';
+import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, revokeFamily, mintTokenPair, lookupAccessToken, rotateRefreshToken, revokeAllForClient, listConnectedClients } from './oauth.ts';
 import { account } from './db/schema.ts';
 
 function withDb(fn: (db: ReturnType<typeof openDb>) => void): void {
@@ -357,5 +357,43 @@ test('an expired refresh token is rejected without rotating', () => {
     now = 30 * 24 * 60 * 60 * 1000 + 1;
     const result = rotateRefreshToken(db, first.refreshToken, () => now);
     assert.equal(result.ok, false);
+  });
+});
+
+test('listConnectedClients lists a client with a live refresh token', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    registerClient(db, { redirect_uris: ['https://client.example/cb'], client_name: 'My Client' });
+    const clients = db.select().from(oauthClient).all();
+    mintTokenPair(db, { clientId: clients[0].clientId, accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    const connected = listConnectedClients(db, 42);
+    assert.equal(connected.length, 1);
+    assert.equal(connected[0].clientName, 'My Client');
+    assert.equal(connected[0].scope, 'logs:read');
+  });
+});
+
+test('listConnectedClients omits a client after revokeAllForClient', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    registerClient(db, { redirect_uris: ['https://client.example/cb'] });
+    const clientId = db.select().from(oauthClient).all()[0].clientId;
+    mintTokenPair(db, { clientId, accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    revokeAllForClient(db, 42, clientId, new Date().toISOString());
+    assert.equal(listConnectedClients(db, 42).length, 0);
+  });
+});
+
+test('revokeAllForClient does not touch a different account\'s tokens for the same client', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(account).values({ githubUserId: 99, login: 'someone-else', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    registerClient(db, { redirect_uris: ['https://client.example/cb'] });
+    const clientId = db.select().from(oauthClient).all()[0].clientId;
+    mintTokenPair(db, { clientId, accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    mintTokenPair(db, { clientId, accountId: 99, scope: 'logs:read', familyId: 'fam2' });
+    revokeAllForClient(db, 42, clientId, new Date().toISOString());
+    assert.equal(listConnectedClients(db, 42).length, 0);
+    assert.equal(listConnectedClients(db, 99).length, 1, 'a different account\'s connection to the same client must survive');
   });
 });

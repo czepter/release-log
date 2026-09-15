@@ -2206,3 +2206,46 @@ test('POST /oauth/token is rate-limited after 60 requests from the same IP withi
     }, undefined, auth);
   });
 });
+
+test('GET /dashboard/connections lists a connected client and its scope', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      // authorizeAndGetCode only issues a code -- exchange it so a real
+      // refresh token exists to be listed.
+      const { code } = await authorizeAndGetCode(base, cookie, clientId);
+      await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: AUTHORIZE_VERIFIER,
+      });
+      const res = await fetch(`${base}/dashboard/connections`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.ok(html.includes('Test Client'));
+    }, undefined, auth);
+  });
+});
+
+test('POST /dashboard/connections/:clientId/revoke removes the connection', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const { code } = await authorizeAndGetCode(base, cookie, clientId);
+      await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: AUTHORIZE_VERIFIER,
+      });
+      const revokeRes = await fetch(`${base}/dashboard/connections/${clientId}/revoke`, {
+        method: 'POST', headers: { cookie: `session=${cookie}` }, redirect: 'manual',
+      });
+      assert.equal(revokeRes.status, 302);
+      const listRes = await fetch(`${base}/dashboard/connections`, { headers: { cookie: `session=${cookie}` } });
+      const html = await listRes.text();
+      assert.ok(!html.includes('Test Client'), 'a revoked client must no longer be listed');
+    }, undefined, auth);
+  });
+});
