@@ -1524,6 +1524,16 @@ test('POST delete with the correct name wipes the log, its releases, media, erro
     db.insert(media).values({ logId: 'log1', path: 'media/x.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1]) }).run();
     db.insert(syncError).values({ logId: 'log1', path: 'releases/bad.json', message: 'x', at: '2026-09-15T00:00:00.000Z' }).run();
     db.insert(repoPermission).values({ accountId: 42, logId: 'log1', canWrite: true, checkedAt: '2026-09-15T00:00:00.000Z' }).run();
+    // Add a second log to prove deletion is scoped to logId, not a blanket table wipe
+    db.insert(log).values({
+      publicId: 'log2', repoOwner: 'o2', repoName: 'repo2', repoNodeId: 'R_log2',
+      product: 'Other Product', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'beef', configBlobSha: 'sha2', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({ logId: 'log2', version: '2.0.0', date: '2026-09-02', publishedAt: null, blobSha: 'r2', path: 'releases/2.0.0.json', doc: '{}' }).run();
+    db.insert(media).values({ logId: 'log2', path: 'media/y.png', blobSha: 'm2', contentType: 'image/png', bytes: Buffer.from([2]) }).run();
+    db.insert(syncError).values({ logId: 'log2', path: 'releases/bad2.json', message: 'y', at: '2026-09-15T00:00:00.000Z' }).run();
+    db.insert(repoPermission).values({ accountId: 42, logId: 'log2', canWrite: true, checkedAt: '2026-09-15T00:00:00.000Z' }).run();
     const gh: GitHub = {
       probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
       collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'x' }),
@@ -1539,6 +1549,12 @@ test('POST delete with the correct name wipes the log, its releases, media, erro
       assert.equal(db.select().from(media).where(eq(media.logId, 'log1')).all().length, 0);
       assert.equal(db.select().from(syncError).where(eq(syncError.logId, 'log1')).all().length, 0);
       assert.equal(db.select().from(repoPermission).where(eq(repoPermission.logId, 'log1')).all().length, 0);
+      // Prove the delete was scoped to log1, not a blanket table wipe
+      assert.equal(db.select().from(log).where(eq(log.publicId, 'log2')).all().length, 1);
+      assert.equal(db.select().from(release).where(eq(release.logId, 'log2')).all().length, 1);
+      assert.equal(db.select().from(media).where(eq(media.logId, 'log2')).all().length, 1);
+      assert.equal(db.select().from(syncError).where(eq(syncError.logId, 'log2')).all().length, 1);
+      assert.equal(db.select().from(repoPermission).where(eq(repoPermission.logId, 'log2')).all().length, 1);
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
