@@ -10,7 +10,7 @@ import { parseConfig, parseRelease } from './document.ts';
 import type { LogConfig } from './document.ts';
 import { mediaTypeOf } from './mediaTypes.ts';
 
-const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+export const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
 
 function mediaPaths(tree: TreeEntry[]): TreeEntry[] {
   return tree.filter((e) => e.path.startsWith('media/'));
