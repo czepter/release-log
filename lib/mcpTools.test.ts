@@ -7,7 +7,7 @@ import { openDb } from './db/client.ts';
 import { log, release, account } from './db/schema.ts';
 import { indexReader } from './indexReader.ts';
 import { fakeGitHub } from './github.ts';
-import type { GitHub } from './github.ts';
+import type { GitHub, RepoRef } from './github.ts';
 import { permissions } from './permissions.ts';
 import { mintTokenPair } from './oauth.ts';
 import { buildMcpServer } from './mcpTools.ts';
@@ -19,14 +19,16 @@ import { buildMcpServer } from './mcpTools.ts';
 // optional parameter: the one test below that needs write access supplies a
 // hand-built GitHub object literal, the same pattern server.test.ts already
 // uses everywhere it needs a specific collaboratorPermission answer.
-function withServerFor(
-  fn: (factory: ReturnType<typeof buildMcpServer>, db: ReturnType<typeof openDb>) => Promise<void>,
-  gh: GitHub = fakeGitHub({}),
-): Promise<void> {
+function withServerFor(fn: (factory: ReturnType<typeof buildMcpServer>, db: ReturnType<typeof openDb>, deps: { onRepoWriteCalls: RepoRef[] }) => Promise<void>, gh?: GitHub): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'rlh-mcptools-'));
   const db = openDb(join(dir, 'test.sqlite'));
-  const factory = buildMcpServer(db, indexReader(db), permissions(db, gh));
-  return fn(factory, db).finally(() => { rmSync(dir, { recursive: true, force: true }); });
+  const resolvedGh = gh ?? fakeGitHub({});
+  const onRepoWriteCalls: RepoRef[] = [];
+  const factory = buildMcpServer({
+    db, reader: indexReader(db), perms: permissions(db, resolvedGh), gh: resolvedGh,
+    onRepoWrite: (ref) => { onRepoWriteCalls.push(ref); }, baseUrl: 'https://example.test',
+  });
+  return fn(factory, db, { onRepoWriteCalls }).finally(() => { rmSync(dir, { recursive: true, force: true }); });
 }
 
 // Ruft ein Werkzeug auf, ohne HTTP: dieselbe In-Memory-Verdrahtung, die die
@@ -266,4 +268,152 @@ test('get_release is forbidden for a token without logs:read scope', async () =>
     assert.equal(result.isError, true);
     assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
   });
+});
+
+const VALID_DOC = {
+  version: '1.0.0', date: '2026-09-01', headline: 'Erste Version', body: [],
+  changes: [{ type: 'feat', title: 'Suche', description: 'x', commit: 'a', date: '2026-09-01' }],
+};
+
+test('write_release creates a brand-new version and returns a commit sha and permalink', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC,
+    });
+    assert.equal(result.isError, undefined);
+    const body = JSON.parse(result.content[0].text);
+    assert.ok(typeof body.commit_sha === 'string');
+    assert.equal(body.permalink, 'https://example.test/l/log1/r/1.0.0');
+    assert.deepEqual(deps.onRepoWriteCalls, [{ owner: 'o', repo: 'repo1' }]);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'newsha' }) });
+});
+
+test('write_release on an existing version without base_blob_sha answers conflict, without calling putFile', async () => {
+  // The fixture records a call and returns a "wrong" success rather than
+  // throwing: if the local pre-check regresses, the call reaches putFile,
+  // putFileCalled flips true, AND the tool wrongly reports success -- three
+  // independent, non-exception-dependent signals catch the same regression,
+  // rather than relying on unverified throw-propagation semantics inside
+  // the SDK's tool-call dispatch.
+  let putFileCalled = false;
+  await withServerFor(async (factory, db, deps) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: null, blobSha: 'existing-sha',
+      path: 'releases/1.0.0.json', doc: JSON.stringify({ ...VALID_DOC, tag: null, published_at: null, commits: 0, image: null, covered: [] }),
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'conflict');
+    assert.equal(putFileCalled, false, 'a known conflict must never reach putFile');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, {
+    probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write',
+    async putFile() { putFileCalled = true; return { kind: 'committed', sha: 'should-not-happen' }; },
+  });
+});
+
+test('write_release with a stale base_blob_sha maps GitHub\'s own conflict, does not enqueue a resync', async () => {
+  await withServerFor(async (factory, db, deps) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({
+      logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: null, blobSha: 'current-sha',
+      path: 'releases/1.0.0.json', doc: JSON.stringify({ ...VALID_DOC, tag: null, published_at: null, commits: 0, image: null, covered: [] }),
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC, base_blob_sha: 'a-now-stale-sha',
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'conflict');
+    assert.equal(deps.onRepoWriteCalls.length, 0);
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { return { kind: 'conflict' }; } });
+});
+
+test('write_release rejects an invalid document before calling putFile', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: { version: '1.0.0' }, // missing headline, date, ...
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'invalid_document');
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { throw new Error('must not be called'); } });
+});
+
+test('write_release without write access answers forbidden', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'read', async putFile() { throw new Error('must not be called'); } });
+});
+
+test('write_release on a frozen log answers log_frozen', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'frozen', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:write', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:write'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'log_frozen');
+  }, { probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => null, async putFile() { throw new Error('must not be called'); } });
+});
+
+test('write_release without the logs:write scope answers forbidden, even with write access', async () => {
+  await withServerFor(async (factory, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R1', product: 'P',
+      view: 'full', visibility: 'public', curationNotes: null, state: 'active', headSha: 'c0ffee',
+      configBlobSha: 'sha1', indexedAt: '2026-01-01T00:00:00.000Z',
+    }).run();
+    const pair = mintTokenPair(db, { clientId: 'c1', accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    const result = await callTool(factory, { token: pair.accessToken, clientId: 'c1', scopes: ['logs:read'] }, 'write_release', {
+      log_id: 'log1', version: '1.0.0', document: VALID_DOC,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(JSON.parse(result.content[0].text).error, 'forbidden');
+  }, { probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R1' }), tree: async () => [], blob: async () => null, collaboratorPermission: async () => 'write', async putFile() { throw new Error('must not be called'); } });
 });

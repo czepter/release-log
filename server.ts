@@ -189,7 +189,11 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
   const mcpAuthGate = mcpVerifier && auth
     ? requireBearerAuth({ verifier: mcpVerifier, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL(`${auth.baseUrl}/mcp`)) })
     : null;
-  const mcpNodeHandler = toNodeHandler(createMcpHandler(auth ? buildMcpServer(auth.db, reader, auth.perms) : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' })));
+  const mcpNodeHandler = toNodeHandler(createMcpHandler(
+    auth
+      ? buildMcpServer({ db: auth.db, reader, perms: auth.perms, gh: auth.gh, onRepoWrite: auth.onRepoWrite, baseUrl: auth.baseUrl })
+      : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' }),
+  ));
   return createServer(async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
