@@ -32,7 +32,7 @@ import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
-import { registerClient, findClient, mintAuthorizationCode } from './lib/oauth.ts';
+import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair } from './lib/oauth.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 
 const MEDIA_CACHE = 'public, max-age=31536000, immutable';
@@ -168,6 +168,7 @@ function readRawBody(req: import('node:http').IncomingMessage, maxBytes: number)
 
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
   const oauthRegisterLimiter = rateLimiter(10, 60 * 60 * 1000); // 10 je Stunde
+  const oauthTokenLimiter = rateLimiter(60, 60 * 1000); // 60 je Minute
   return createServer(async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
@@ -1032,6 +1033,51 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         `;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(page('Verbindung erlauben', body));
+        return;
+      }
+
+      if (pathname === '/oauth/token' && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const ip = req.socket.remoteAddress ?? 'unknown';
+        if (!oauthTokenLimiter.check(ip)) {
+          res.writeHead(429, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'rate_limited' }));
+          return;
+        }
+        const raw = await readRawBody(req, 16 * 1024);
+        const form = new URLSearchParams(raw.toString('utf8'));
+        const grantType = form.get('grant_type');
+
+        if (grantType === 'authorization_code') {
+          const code = form.get('code') ?? '';
+          const clientId = form.get('client_id') ?? '';
+          const redirectUri = form.get('redirect_uri') ?? '';
+          const codeVerifier = form.get('code_verifier') ?? '';
+          const redeemed = redeemAuthorizationCode(auth.db, { code, clientId, redirectUri, codeVerifier });
+          if (!redeemed.ok) {
+            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'invalid_grant' }));
+            return;
+          }
+          const pair = mintTokenPair(auth.db, {
+            clientId, accountId: redeemed.value.accountId, scope: redeemed.value.scope, familyId: redeemed.value.familyId,
+          });
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            access_token: pair.accessToken, refresh_token: pair.refreshToken,
+            token_type: 'Bearer', expires_in: pair.expiresIn, scope: redeemed.value.scope,
+          }));
+          return;
+        }
+
+        // Task 11 ergänzt hier einen "refresh_token"-Zweig.
+
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'unsupported_grant_type' }));
         return;
       }
 
