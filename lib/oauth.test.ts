@@ -38,6 +38,13 @@ test('a loopback http redirect_uri is accepted (RFC 8252 native clients)', () =>
   });
 });
 
+test('an IPv6-loopback http redirect_uri is accepted (RFC 8252 native clients)', () => {
+  withDb((db) => {
+    const result = registerClient(db, { redirect_uris: ['http://[::1]:51234/cb'] });
+    assert.equal(result.ok, true);
+  });
+});
+
 test('a plain http redirect_uri on a non-loopback host is rejected', () => {
   withDb((db) => {
     const result = registerClient(db, { redirect_uris: ['http://client.example/cb'] });
@@ -409,5 +416,22 @@ test('revokeAllForClient does not touch a different account\'s tokens for the sa
     revokeAllForClient(db, 42, clientId, new Date().toISOString());
     assert.equal(listConnectedClients(db, 42).length, 0);
     assert.equal(listConnectedClients(db, 99).length, 1, 'a different account\'s connection to the same client must survive');
+  });
+});
+
+// listConnectedClients only ever reads kind === 'refresh' rows, so every test
+// above proves revocation solely through that lens. This proves the access
+// token itself dies immediately too -- a regression that scoped
+// revokeAllForClient's WHERE to kind === 'refresh' only would leave every
+// test above green while an already-issued access token kept working.
+test('revokeAllForClient kills the access token immediately, not just the refresh token', () => {
+  withDb((db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-01-01T00:00:00.000Z' }).run();
+    registerClient(db, { redirect_uris: ['https://client.example/cb'] });
+    const clientId = db.select().from(oauthClient).all()[0].clientId;
+    const pair = mintTokenPair(db, { clientId, accountId: 42, scope: 'logs:read', familyId: 'fam1' });
+    assert.ok(lookupAccessToken(db, pair.accessToken), 'access token must be valid right after minting');
+    revokeAllForClient(db, 42, clientId, new Date().toISOString());
+    assert.equal(lookupAccessToken(db, pair.accessToken), null, 'access token must be revoked immediately, not just the refresh token');
   });
 });

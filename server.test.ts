@@ -2059,6 +2059,19 @@ test('GET /oauth/authorize with a redirect_uri not registered for this client an
   });
 });
 
+test('GET /oauth/authorize accepts an IPv6-loopback redirect_uri whose port differs from what was registered (RFC 8252)', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base, 'http://[::1]:51234/cb');
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('http://[::1]:9999/cb')}&code_challenge=${AUTHORIZE_CHALLENGE}&code_challenge_method=S256&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` } });
+      assert.equal(res.status, 200, 'a different port on the same IPv6-loopback host must still match (native client, random port per run)');
+    }, undefined, auth);
+  });
+});
+
 test('GET /oauth/authorize with code_challenge_method=plain redirects back with error, never issuing a code', async () => {
   await withAuth(async (auth, db) => {
     await withServer(reader, async (base) => {
