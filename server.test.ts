@@ -2066,7 +2066,7 @@ async function registerTestClient(base: string, redirectUri = 'https://client.ex
   return body.client_id;
 }
 
-const AUTHORIZE_CHALLENGE = 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8'; // s. Task 2/6
+const AUTHORIZE_CHALLENGE = 'X_sK_G4Dyklp20kbAx-LJ1PgccfIg7q9182mvWIO9U0'; // s. Task 2/6
 
 test('GET /oauth/authorize without a session redirects to login with next set', async () => {
   await withAuth(async (auth) => {
@@ -2173,6 +2173,31 @@ test('GET /oauth/authorize with code_challenge_method=plain redirects back with 
   });
 });
 
+// Issue #4: eine S256-Challenge ist immer 43 base64url-Zeichen (RFC 7636
+// §4.2). Die Route prüfte bisher nur "nicht leer", nahm also auch eine
+// Challenge an, zu der es keinen gültigen Verifier geben kann -- der Fehler
+// fiel dann erst beim Einlösen auf, eine Minute und einen Browser-Umweg
+// später.
+test('GET /oauth/authorize with a malformed code_challenge redirects back with invalid_request', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      // 43 Zeichen, aber mit '=' und '+' aus klassischem base64 -- der
+      // wahrscheinlichste Kodierfehler eines Clients.
+      const malformed = `${'a'.repeat(41)}+=`;
+      const query = `response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent('https://client.example/cb')}&code_challenge=${encodeURIComponent(malformed)}&code_challenge_method=S256&state=xyz&scope=logs:read`;
+      const res = await fetch(`${base}/oauth/authorize?${query}`, { headers: { cookie: `session=${cookie}` }, redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location')!);
+      assert.equal(location.searchParams.get('error'), 'invalid_request');
+      assert.equal(location.searchParams.get('code'), null, 'no code may be issued');
+      assert.equal(location.searchParams.get('state'), 'xyz');
+    }, undefined, auth);
+  });
+});
+
 test('GET /oauth/authorize with an unknown scope redirects back with invalid_scope', async () => {
   await withAuth(async (auth, db) => {
     await withServer(reader, async (base) => {
@@ -2241,7 +2266,7 @@ async function authorizeAndGetCode(base: string, cookie: string, clientId: strin
   return { code: location.searchParams.get('code')!, state: location.searchParams.get('state')! };
 }
 
-const AUTHORIZE_VERIFIER = 'test-verifier-1234567890123456789012345'; // s. Task 2
+const AUTHORIZE_VERIFIER = 'test-verifier-12345678901234567890123456789'; // s. Task 2
 
 test('POST /oauth/token exchanges a valid code for an access and refresh token', async () => {
   await withAuth(async (auth, db) => {
@@ -2265,6 +2290,37 @@ test('POST /oauth/token exchanges a valid code for an access and refresh token',
   });
 });
 
+// Issue #4: ein code_verifier, der RFC 7636 §4.1 verfehlt (hier: zu kurz),
+// wird als ungültige Einlösung abgewiesen, nicht erst als Hash-Mismatch --
+// derselbe invalid_grant nach außen, aber der Grund steht jetzt an der
+// Grenze und nicht im Vergleich.
+test('POST /oauth/token with a malformed code_verifier is refused', async () => {
+  await withAuth(async (auth, db) => {
+    await withServer(reader, async (base) => {
+      const clientId = await registerTestClient(base);
+      db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+      const cookie = createSessionCookie(SIGNING_KEY, 42);
+      // Der Code wird mit der Challenge des 39-Zeichen-Verifiers geprägt,
+      // und eingelöst wird genau mit diesem Verifier: Hash und Challenge
+      // passen zusammen, nur die Form nicht. Ohne die Formprüfung ginge
+      // dieser Tausch durch -- er ist also kein Test, der ohnehin scheitert.
+      const shortVerifier = 'test-verifier-1234567890123456789012345';
+      const authorized = await postForm(base, '/oauth/authorize', {
+        decision: 'allow', client_id: clientId, redirect_uri: 'https://client.example/cb',
+        code_challenge: 'IciedBlOjqgN0MZIUNWjA8gH1KixyJVIDzkZidCUWF8', code_challenge_method: 'S256',
+        state: 'xyz', scope: 'logs:read',
+      }, cookie);
+      const code = new URL(authorized.headers.get('location')!).searchParams.get('code')!;
+      const res = await postFormRaw(base, '/oauth/token', {
+        grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
+        client_id: clientId, code_verifier: shortVerifier,
+      });
+      assert.equal(res.status, 400);
+      assert.deepEqual(await res.json(), { error: 'invalid_grant' });
+    }, undefined, auth);
+  });
+});
+
 test('POST /oauth/token with a wrong code_verifier is refused', async () => {
   await withAuth(async (auth, db) => {
     await withServer(reader, async (base) => {
@@ -2274,7 +2330,7 @@ test('POST /oauth/token with a wrong code_verifier is refused', async () => {
       const { code } = await authorizeAndGetCode(base, cookie, clientId);
       const res = await postFormRaw(base, '/oauth/token', {
         grant_type: 'authorization_code', code, redirect_uri: 'https://client.example/cb',
-        client_id: clientId, code_verifier: 'wrong',
+        client_id: clientId, code_verifier: 'wrong-verifier-9999999999999999999999999999',
       });
       assert.equal(res.status, 400);
       const body = await res.json() as { error: string };
