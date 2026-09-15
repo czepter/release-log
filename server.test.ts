@@ -1196,3 +1196,210 @@ test('a settings change without write access is refused with 403 and commits not
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
+
+async function postBytes(base: string, path: string, bytes: Buffer, filename: string, cookie: string): Promise<Response> {
+  return fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/png', 'x-filename': encodeURIComponent(filename), cookie: `session=${cookie}` },
+    body: bytes,
+  });
+}
+
+const TINY_PNG = Buffer.from('89504e470d0a1a0a', 'hex');
+
+test('POST media commits the file under media/<filename> and triggers a resync', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let committed: { path: string; content: Buffer; sha: string | null } | null = null;
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile(ref, path, content, message, expectedSha) {
+        committed = { path, content, sha: expectedSha };
+        return { kind: 'committed', sha: 'media-sha' };
+      },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', TINY_PNG, 'screenshot.png', cookie);
+      assert.equal(res.status, 200);
+      assert.ok(committed, 'putFile must have been called');
+      assert.equal(committed!.path, 'media/screenshot.png');
+      assert.deepEqual(committed!.content, TINY_PNG);
+      assert.equal(committed!.sha, null, 'a new media file must be created, not replace an unrelated sha');
+      assert.deepEqual(enqueued, { owner: 'o', repo: 'repo1' });
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+test('a filename with an unsupported extension is rejected before any commit', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', Buffer.from('not really an svg'), 'shot.svg', cookie);
+      assert.equal(res.status, 415);
+      assert.equal(called, false);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a filename that is not a bare name (contains a path separator) is rejected', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', TINY_PNG, '../../etc/passwd.png', cookie);
+      assert.equal(res.status, 400);
+      assert.equal(called, false);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('an oversized upload is refused without buffering the whole body', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    // Strengthened past the brief: prove the size limit doesn't merely
+    // answer the wrong status but that it also never lets the oversized
+    // body reach putFile — a limit that short-circuits the HTTP response
+    // but still commits garbage would pass a status-only assertion.
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    const oversized = Buffer.alloc(11 * 1024 * 1024);
+    await withServer(reader, async (base) => {
+      const status = await postBytes(base, '/dashboard/logs/log1/media', oversized, 'huge.png', cookie)
+        .then((res) => res.status)
+        .catch(() => 0);
+      assert.notEqual(status, 200);
+      assert.ok(status === 413 || status === 0, `unexpected status ${status}`);
+      assert.equal(called, false, 'an oversized body must never reach putFile');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a media upload without write access is refused with 403', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'read',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', TINY_PNG, 'shot.png', cookie);
+      assert.equal(res.status, 403);
+      assert.equal(called, false);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a media upload with no x-filename header at all is rejected before any commit', async () => {
+  // A forged request could simply omit the header instead of sending a
+  // crafted one. String(undefined ?? '') collapses to '', which must hit
+  // the same empty-name rejection as an explicit empty string -- proving
+  // that, not just that *some* 4xx comes back, since 415 and 400 are both
+  // plausible-looking wrong answers for a missing header.
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/dashboard/logs/log1/media`, {
+        method: 'POST',
+        headers: { 'content-type': 'image/png', cookie: `session=${cookie}` },
+        body: TINY_PNG,
+      });
+      assert.equal(res.status, 400);
+      assert.equal(called, false);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a mixed-case extension is accepted and the filename is committed byte-for-byte, case preserved', async () => {
+  // mediaTypeOf lowercases the extension before comparing, so ".PNG" must
+  // still pass -- and the path it commits under must keep the filename
+  // exactly as submitted, not a normalized-case rewrite. Without this,
+  // a regression that started rejecting (or silently lower-casing) mixed
+  // case would ship unnoticed: none of the other tests use an uppercase
+  // extension.
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let committed: { path: string; content: Buffer } | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile(ref, path, content) {
+        committed = { path, content };
+        return { kind: 'committed', sha: 'x' };
+      },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postBytes(base, '/dashboard/logs/log1/media', TINY_PNG, 'Screenshot.PNG', cookie);
+      assert.equal(res.status, 200);
+      assert.ok(committed, 'putFile must have been called');
+      assert.equal(committed!.path, 'media/Screenshot.PNG');
+      assert.deepEqual(committed!.content, TINY_PNG);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});

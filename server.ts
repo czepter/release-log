@@ -28,7 +28,8 @@ import type { Http } from './lib/http.ts';
 import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { exchangeCodeForIdentity } from './lib/login.ts';
 import { permissions } from './lib/permissions.ts';
-import { syncLog } from './lib/index.ts';
+import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
+import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
 
@@ -437,11 +438,24 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
             : ''}
 
           <h2>Medien</h2>
-          <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/media" id="media-form">
-            <input type="file" id="media-file" accept=".png,.jpg,.jpeg,.webp">
-            <button type="button" id="media-submit">Hochladen</button>
-            <p class="muted" id="media-status"></p>
-          </form>
+          <input type="file" id="media-file" accept=".png,.jpg,.jpeg,.webp">
+          <button type="button" id="media-submit">Hochladen</button>
+          <p class="muted" id="media-status"></p>
+          <script>
+            document.getElementById('media-submit').addEventListener('click', async () => {
+              const input = document.getElementById('media-file');
+              const status = document.getElementById('media-status');
+              const file = input.files[0];
+              if (!file) { status.textContent = 'Bitte zuerst eine Datei auswählen.'; return; }
+              status.textContent = 'Lädt hoch…';
+              const res = await fetch(${JSON.stringify(`/dashboard/logs/${encodeURIComponent(row.publicId)}/media`)}, {
+                method: 'POST',
+                headers: { 'content-type': file.type || 'application/octet-stream', 'x-filename': encodeURIComponent(file.name) },
+                body: file,
+              });
+              status.textContent = res.ok ? 'Hochgeladen. Der Abgleich läuft.' : 'Fehlgeschlagen: ' + res.status;
+            });
+          </script>
 
           <h2>Löschen</h2>
           <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/delete">
@@ -525,6 +539,109 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         auth.onRepoWrite(ref);
         res.writeHead(302, { location: `/dashboard/logs/${encodeURIComponent(row.publicId)}` });
         res.end();
+        return;
+      }
+
+      const mediaUploadMatch = /^\/dashboard\/logs\/([^/]+)\/media$/.exec(pathname);
+      if (mediaUploadMatch && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'unauthorized' }));
+          return;
+        }
+        const logId = mediaUploadMatch[1];
+        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+        if (!row) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const ref = { owner: row.repoOwner, repo: row.repoName };
+        const allowed = row.state === 'frozen' && isAdmin(who.login, auth.adminLogins)
+          ? true
+          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
+        if (!allowed) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+
+        const rawName = req.headers['x-filename'];
+        let filename: string;
+        try {
+          filename = decodeURIComponent(String(rawName ?? ''));
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'bad_filename' }));
+          return;
+        }
+        // Ein reiner Dateiname, keine Pfadstruktur: media/<Name> ist die
+        // einzige Form, die dieser Upload je erzeugen darf.
+        if (filename === '' || filename.includes('/') || filename.includes('\\') || filename === '.' || filename === '..') {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'bad_filename' }));
+          return;
+        }
+        const contentType = mediaTypeOf(filename);
+        if (!contentType) {
+          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'unsupported_type' }));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        let size = 0;
+        let refused = false;
+        req.on('data', (chunk: Buffer) => {
+          if (refused) return;
+          size += chunk.length;
+          if (size > MEDIA_MAX_BYTES) {
+            refused = true;
+            res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'payload_too_large' }));
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        req.on('end', () => {
+          if (refused) return;
+          (async () => {
+            try {
+              const bytes = Buffer.concat(chunks);
+              // expectedSha: null -- ein Medien-Upload legt immer eine neue
+              // Datei an, nie ersetzt er eine bestehende. Existiert der
+              // Pfad schon, lehnt GitHub mit 422 ab (dieselbe Ablehnung,
+              // die add_media als path_exists kennt, spec §6): ein
+              // überschriebenes Bild würde sonst jedes veröffentlichte
+              // Release stillschweigend ändern, das darauf zeigt.
+              const result = await auth.gh.putFile(
+                ref, `media/${filename}`, bytes, `add media/${filename} via dashboard`, null,
+              );
+              if (result.kind === 'conflict') {
+                res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ error: 'path_exists' }));
+                return;
+              }
+              if (result.kind === 'no_installation') {
+                res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify({ error: 'not_installed' }));
+                return;
+              }
+              auth.onRepoWrite(ref);
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ ok: true }));
+            } catch (err) {
+              respondInternalError(res, err);
+            }
+          })();
+        });
         return;
       }
 
