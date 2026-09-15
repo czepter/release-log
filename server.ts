@@ -33,6 +33,7 @@ import { mediaTypeOf } from './lib/mediaTypes.ts';
 import { syncQueue } from './lib/syncQueue.ts';
 import { startReconcile } from './lib/reconcile.ts';
 import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
+import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
   createMcpHandler, McpServer, requireBearerAuth, OAuthError, OAuthErrorCode,
@@ -185,8 +186,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
   const mcpAuthGate = mcpVerifier && auth
     ? requireBearerAuth({ verifier: mcpVerifier, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL(`${auth.baseUrl}/mcp`)) })
     : null;
-  // Task 13 ersetzt diese leere Factory durch einen Import aus lib/mcpTools.ts.
-  const mcpNodeHandler = toNodeHandler(createMcpHandler(() => new McpServer({ name: 'release-log-hub', version: '1.0.0' })));
+  const mcpNodeHandler = toNodeHandler(createMcpHandler(auth ? buildMcpServer(auth.db, reader, auth.perms) : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' })));
   return createServer(async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
