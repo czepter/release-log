@@ -17,7 +17,7 @@ import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { fakeGitHub } from './lib/github.ts';
 import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
-import { log, syncError } from './lib/db/schema.ts';
+import { log, syncError, release, media, repoPermission } from './lib/db/schema.ts';
 
 const reader: Reader = {
   config: (id) => (id === 'abc123'
@@ -1509,6 +1509,100 @@ test('a malformed percent-sequence in x-filename answers 400, not a crash', asyn
       });
       assert.equal(res.status, 400);
       assert.equal(called, false);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('POST delete with the correct name wipes the log, its releases, media, errors and permission cache', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'Auri CRM', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    db.insert(release).values({ logId: 'log1', version: '1.0.0', date: '2026-09-01', publishedAt: null, blobSha: 'r1', path: 'releases/1.0.0.json', doc: '{}' }).run();
+    db.insert(media).values({ logId: 'log1', path: 'media/x.png', blobSha: 'm1', contentType: 'image/png', bytes: Buffer.from([1]) }).run();
+    db.insert(syncError).values({ logId: 'log1', path: 'releases/bad.json', message: 'x', at: '2026-09-15T00:00:00.000Z' }).run();
+    db.insert(repoPermission).values({ accountId: 42, logId: 'log1', canWrite: true, checkedAt: '2026-09-15T00:00:00.000Z' }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/delete', { confirm_name: 'Auri CRM' }, cookie);
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/dashboard');
+      assert.equal(db.select().from(log).where(eq(log.publicId, 'log1')).all().length, 0);
+      assert.equal(db.select().from(release).where(eq(release.logId, 'log1')).all().length, 0);
+      assert.equal(db.select().from(media).where(eq(media.logId, 'log1')).all().length, 0);
+      assert.equal(db.select().from(syncError).where(eq(syncError.logId, 'log1')).all().length, 0);
+      assert.equal(db.select().from(repoPermission).where(eq(repoPermission.logId, 'log1')).all().length, 0);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('POST delete with the wrong name changes nothing', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'Auri CRM', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write', putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/delete', { confirm_name: 'the wrong name' }, cookie);
+      assert.equal(res.status, 400);
+      assert.equal(db.select().from(log).where(eq(log.publicId, 'log1')).all().length, 1, 'the log must survive a wrong confirmation');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a frozen log can be deleted by an admin even without canWrite', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'gone-repo', repoNodeId: 'R_log1',
+      product: 'Gone Product', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'frozen', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'gone' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => null, putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    // 'octocat' is this fixture's admin.
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/delete', { confirm_name: 'Gone Product' }, cookie);
+      assert.equal(res.status, 302);
+      assert.equal(db.select().from(log).where(eq(log.publicId, 'log1')).all().length, 0);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('delete without write access (and not admin, not frozen) is refused with 403', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'Auri CRM', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'read', putFile: async () => ({ kind: 'committed', sha: 'x' }),
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/delete', { confirm_name: 'Auri CRM' }, cookie);
+      assert.equal(res.status, 403);
+      assert.equal(db.select().from(log).where(eq(log.publicId, 'log1')).all().length, 1);
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
