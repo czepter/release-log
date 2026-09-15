@@ -96,3 +96,26 @@ oder Löschung des Repositories (über das `repository`-Ereignis, das nur
 den Inhalts-Abgleich anstößt) tut das nicht: ein gecachtes „ja" kann bis zu
 fünf Minuten über ein solches Ereignis hinaus bestehen bleiben, dieselbe
 Fünf-Minuten-Obergrenze wie sonst auch.
+
+### Dashboard
+
+- `GET /dashboard` — die Logs, auf die das angemeldete Konto Schreibrechte
+  hat (eingefrorene Logs zusätzlich für Admins, sonst wäre eins nie mehr
+  erreichbar).
+- `GET /dashboard/logs/<id>` — Einstellungen, Abgleichfehler, Medien-Upload,
+  Löschen.
+- `POST /dashboard/logs/<id>/settings` — `view`, `visibility`,
+  `curation_notes` als Commit auf `release-log.json`, nie als
+  Datenbankschreibvorgang.
+- `POST /dashboard/logs/<id>/media` — ein Bild (`.png`, `.jpg`, `.webp`,
+  höchstens 10 MB) als Commit unter `media/<Dateiname>`.
+- `POST /dashboard/logs/<id>/delete` — endgültiges Löschen von Index und
+  Medien, mit Eingabe des Produktnamens zur Bestätigung. Das Repo selbst
+  bleibt unangetastet.
+- `GET`/`POST /admin/allowlist`, `POST /admin/allowlist/<login>/delete` —
+  nur für Admins.
+
+„Log anlegen" und die Liste verbundener MCP-Clients fehlen bewusst noch —
+beide brauchen Bausteine, die noch nicht existieren (ein persistentes
+GitHub-Nutzer-Token für `create_log` beziehungsweise den MCP-
+Authorization-Server für verbundene Clients).
