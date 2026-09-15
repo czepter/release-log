@@ -13,7 +13,7 @@ import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/w
 import type { RepoRef } from './lib/github.ts';
 import { openDb } from './lib/db/client.ts';
 import type { Db } from './lib/db/client.ts';
-import { account, log, syncError, release, media, repoPermission } from './lib/db/schema.ts';
+import { account, log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
 import { escapeHtml, page } from './lib/render.ts';
 import type { GitHub } from './lib/github.ts';
@@ -689,6 +689,107 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         auth.db.delete(log).where(eq(log.publicId, logId)).run();
 
         res.writeHead(302, { location: '/dashboard' });
+        res.end();
+        return;
+      }
+
+      if (pathname === '/admin/allowlist' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        if (!isAdmin(who.login, auth.adminLogins)) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
+          return;
+        }
+        const entries = auth.db.select().from(allowlist).all();
+        const rows = entries.map((e) =>
+          `<tr><td>${escapeHtml(e.githubLogin)}</td><td class="muted">${escapeHtml(e.note ?? '')}</td><td class="muted">${escapeHtml(e.addedBy)}, ${escapeHtml(e.addedAt)}</td><td><form method="POST" action="/admin/allowlist/${encodeURIComponent(e.githubLogin)}/delete"><button type="submit">Entfernen</button></form></td></tr>`,
+        ).join('');
+        const body = `
+          <p><a href="/dashboard">&larr; Dashboard</a></p>
+          <h1>Zulassungsliste</h1>
+          <table><thead><tr><th>Login</th><th>Notiz</th><th>Hinzugefügt</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          <h2>Hinzufügen</h2>
+          <form method="POST" action="/admin/allowlist">
+            <label for="github_login">GitHub-Login</label>
+            <input type="text" id="github_login" name="github_login" required>
+            <label for="note">Notiz</label>
+            <input type="text" id="note" name="note">
+            <button type="submit">Zulassen</button>
+          </form>
+        `;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page('Zulassungsliste', body));
+        return;
+      }
+
+      if (pathname === '/admin/allowlist' && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        if (!isAdmin(who.login, auth.adminLogins)) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
+          return;
+        }
+        const form = await readFormBody(req);
+        const login = form.get('github_login');
+        if (!login) {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Fehlender Login', '<p>Ein GitHub-Login ist erforderlich.</p>'));
+          return;
+        }
+        const note = form.get('note');
+        auth.db.insert(allowlist)
+          .values({ githubLogin: login, addedBy: who.login, addedAt: new Date().toISOString(), note: note === '' ? null : note })
+          .onConflictDoUpdate({
+            target: allowlist.githubLogin,
+            set: { addedBy: who.login, addedAt: new Date().toISOString(), note: note === '' ? null : note },
+          })
+          .run();
+        res.writeHead(302, { location: '/admin/allowlist' });
+        res.end();
+        return;
+      }
+
+      const allowlistDeleteMatch = /^\/admin\/allowlist\/([^/]+)\/delete$/.exec(pathname);
+      if (allowlistDeleteMatch && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        if (!isAdmin(who.login, auth.adminLogins)) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
+          return;
+        }
+        const targetLogin = decodeURIComponent(allowlistDeleteMatch[1]);
+        auth.db.delete(allowlist).where(eq(allowlist.githubLogin, targetLogin)).run();
+        res.writeHead(302, { location: '/admin/allowlist' });
         res.end();
         return;
       }
