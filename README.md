@@ -115,7 +115,36 @@ Fünf-Minuten-Obergrenze wie sonst auch.
 - `GET`/`POST /admin/allowlist`, `POST /admin/allowlist/<login>/delete` —
   nur für Admins.
 
-„Log anlegen" und die Liste verbundener MCP-Clients fehlen bewusst noch —
-beide brauchen Bausteine, die noch nicht existieren (ein persistentes
-GitHub-Nutzer-Token für `create_log` beziehungsweise den MCP-
-Authorization-Server für verbundene Clients).
+„Log anlegen" fehlt bewusst noch — das braucht ein persistentes
+GitHub-Nutzer-Token, das noch nicht existiert.
+
+### MCP und OAuth
+
+Ein eigener OAuth-2.0-Autorisierungsserver (spec §5, "Rolle 2") schützt `/mcp`:
+
+- `POST /oauth/register` — Dynamic Client Registration (RFC 7591), nur
+  öffentliche Clients (kein Secret, PKCE `S256` ist Pflicht).
+- `GET`/`POST /oauth/authorize` — Zustimmungsbildschirm.
+- `POST /oauth/token` — `authorization_code`- und `refresh_token`-Grant.
+- `GET /.well-known/oauth-protected-resource/mcp`,
+  `GET /.well-known/oauth-authorization-server` — Metadaten (RFC 9728/8414).
+- `GET /dashboard/connections`, `POST /dashboard/connections/<clientId>/revoke`
+  — verbundene Clients ansehen und trennen.
+- `POST /mcp` — die eigentliche MCP-Fläche, Streamable HTTP, Bearer-Token
+  Pflicht: `list_logs`, `get_log`, `get_release` (Scope `logs:read`),
+  `write_release`, `publish_release`, `unpublish_release` (Scope
+  `logs:write`).
+
+„Log anlegen" (`create_log`) und Medien-Upload über MCP (`add_media`) fehlen
+bewusst noch — beide brauchen eigene Infrastruktur (ein persistentes
+GitHub-Nutzer-Token beziehungsweise signierte Upload-URLs), die noch nicht
+existiert.
+
+### Gehostete Seite
+
+- `GET /l/<id>` — serverseitig gerendert, `full` oder `timeline` je nach
+  Log-Einstellung. Entwürfe nur für Angemeldete mit Schreibrecht sichtbar.
+- `GET /l/<id>/r/<version>` — Permalink auf eine einzelne Version.
+
+Der öffentliche JSON-Feed (`/l/<id>/versions`, `/l/<id>/releases`, ...) und
+der Medien-Download existierten schon vor diesem Plan.
