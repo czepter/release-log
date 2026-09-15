@@ -89,3 +89,52 @@ export const repoPermission = sqliteTable('repo_permission', {
   canWrite: integer('can_write', { mode: 'boolean' }).notNull(),
   checkedAt: text('checked_at').notNull(),
 }, (t) => [primaryKey({ columns: [t.accountId, t.logId] })]);
+
+// Ein registrierter MCP-Client (RFC 7591, Dynamic Client Registration).
+// Ausschließlich öffentliche Clients -- kein Secret, PKCE ist die einzige
+// Client-Authentisierung (spec §5, Abweichung 2).
+export const oauthClient = sqliteTable('oauth_client', {
+  clientId: text('client_id').primaryKey(),
+  clientName: text('client_name').notNull(),
+  // JSON-Array von Strings. Eine eigene Tabelle für mehrere Redirect-URIs
+  // wäre für "ein paar Strings, nie einzeln abgefragt" die falsche Naht.
+  redirectUris: text('redirect_uris').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+// Ein ausgegebener, noch nicht eingelöster Autorisierungscode. Einmalig,
+// 60 Sekunden gültig (spec §5). Der Code selbst wird nie gespeichert, nur
+// sein Hash -- wie jedes andere Token in diesem System.
+export const oauthCode = sqliteTable('oauth_code', {
+  codeHash: text('code_hash').primaryKey(),
+  clientId: text('client_id').notNull(),
+  redirectUri: text('redirect_uri').notNull(),
+  codeChallenge: text('code_challenge').notNull(),
+  // Eine zweite Einlösung widerruft alle aus diesem Code entstandenen Token
+  // (spec §5) -- familyId bindet Code und die daraus geprägten Token an
+  // dieselbe widerrufbare Kette, von Anfang an, nicht erst beim Refresh.
+  familyId: text('family_id').notNull(),
+  accountId: integer('account_id').notNull(),
+  scope: text('scope').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  consumedAt: text('consumed_at'),
+});
+
+// Ein ausgegebenes Access- oder Refresh-Token. Nur der Hash liegt in der
+// Datenbank (spec §5) -- was hier steht, reicht zum Prüfen, nicht zum
+// Benutzen. familyId gruppiert jede Rotation eines Refresh-Tokens und sein
+// zugehöriges Access-Token; ein Widerruf trifft immer die ganze familyId.
+export const oauthToken = sqliteTable('oauth_token', {
+  id: text('id').primaryKey(),
+  familyId: text('family_id').notNull(),
+  clientId: text('client_id').notNull(),
+  accountId: integer('account_id').notNull(),
+  scope: text('scope').notNull(),
+  kind: text('kind').notNull(), // 'access' | 'refresh'
+  tokenHash: text('token_hash').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  revokedAt: text('revoked_at'),
+  createdAt: text('created_at').notNull(),
+}, (t) => [
+  uniqueIndex('oauth_token_hash_unique').on(t.tokenHash),
+]);
