@@ -20,6 +20,7 @@ import type { GitHub } from './lib/github.ts';
 import type { Permissions } from './lib/permissions.ts';
 import { indexReader } from './lib/indexReader.ts';
 import { readConfig } from './lib/config.ts';
+import { parseConfig } from './lib/document.ts';
 import { installations } from './lib/appAuth.ts';
 import { githubClient } from './lib/github.ts';
 import { withRetry } from './lib/http.ts';
@@ -101,6 +102,19 @@ function respondInternalError(res: ServerResponse, err: unknown): void {
     res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ error: 'internal_error' }));
   }
+}
+
+// Node parst POST-Bodys nicht von selbst. Für kleine Formulare reicht ein
+// Sammeln der Chunks und URLSearchParams -- derselbe Ansatz wie beim
+// Webhook-Body, ohne dessen Größenbegrenzung (Formulare hier sind winzig
+// im Vergleich zu einer GitHub-Zustellung).
+function readFormBody(req: import('node:http').IncomingMessage): Promise<URLSearchParams> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => resolve(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))));
+    req.on('error', reject);
+  });
 }
 
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
@@ -438,6 +452,75 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         `;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(page(row.product, body));
+        return;
+      }
+
+      const settingsMatch = /^\/dashboard\/logs\/([^/]+)\/settings$/.exec(pathname);
+      if (settingsMatch && method === 'POST') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const who = currentAccount(req, auth);
+        if (!who) {
+          res.writeHead(302, { location: '/auth/github/login' });
+          res.end();
+          return;
+        }
+        const logId = settingsMatch[1];
+        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
+        if (!row) {
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Nicht gefunden', '<p>Dieses Log gibt es nicht.</p>'));
+          return;
+        }
+        const ref = { owner: row.repoOwner, repo: row.repoName };
+        const allowed = row.state === 'frozen' && isAdmin(who.login, auth.adminLogins)
+          ? true
+          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
+        if (!allowed) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Kein Zugriff', '<p>Du hast keine Schreibrechte auf dieses Repository.</p>'));
+          return;
+        }
+
+        const form = await readFormBody(req);
+        // Dieselbe Prüfung wie der Index (spec §6): ein Dokument, das der
+        // Index verwerfen würde, erreicht das Repo nicht.
+        const candidate = {
+          id: row.publicId,
+          product: row.product,
+          view: form.get('view'),
+          visibility: form.get('visibility'),
+          curation_notes: form.get('curation_notes') === '' ? null : form.get('curation_notes'),
+        };
+        const parsed = parseConfig(candidate);
+        if (!parsed.ok) {
+          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Ungültige Einstellungen', `<p>${escapeHtml(parsed.errors.join('; '))}</p>`));
+          return;
+        }
+
+        const content = Buffer.from(JSON.stringify(parsed.value, null, 2) + '\n', 'utf8');
+        const expectedSha = form.get('expected_sha');
+        const result = await auth.gh.putFile(
+          ref, 'release-log.json', content, 'update release-log.json settings via dashboard', expectedSha,
+        );
+        if (result.kind === 'conflict') {
+          res.writeHead(409, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Zwischenzeitlich geändert', '<p>Jemand anderes hat die Einstellungen inzwischen geändert. Bitte die Seite neu laden und erneut versuchen.</p>'));
+          return;
+        }
+        if (result.kind === 'no_installation') {
+          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
+          res.end(page('Nicht erreichbar', '<p>Die GitHub-Installation erreicht dieses Repository gerade nicht.</p>'));
+          return;
+        }
+
+        auth.onRepoWrite(ref);
+        res.writeHead(302, { location: `/dashboard/logs/${encodeURIComponent(row.publicId)}` });
+        res.end();
         return;
       }
 

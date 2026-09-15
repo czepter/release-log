@@ -15,7 +15,7 @@ import { eq } from 'drizzle-orm';
 import { fakeHttp } from './lib/http.ts';
 import { createSessionCookie, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { fakeGitHub } from './lib/github.ts';
-import type { GitHub } from './lib/github.ts';
+import type { GitHub, RepoRef } from './lib/github.ts';
 import { permissions } from './lib/permissions.ts';
 import { log, syncError } from './lib/db/schema.ts';
 
@@ -986,6 +986,147 @@ test('product, repoOwner, repoName and configBlobSha are each escaped independen
       assert.ok(html.includes('&lt;i&gt;owner-x&lt;/i&gt;'), 'repoOwner must appear escaped instead');
       assert.ok(html.includes('&lt;u&gt;repo-x&lt;/u&gt;'), 'repoName must appear escaped instead');
       assert.ok(html.includes('&lt;s&gt;sha-x&lt;/s&gt;'), 'configBlobSha must appear escaped instead');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+async function postForm(base: string, path: string, fields: Record<string, string>, cookie: string): Promise<Response> {
+  return fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: `session=${cookie}` },
+    body: new URLSearchParams(fields).toString(),
+    redirect: 'manual',
+  });
+}
+
+test('POST settings commits the new values and redirects back to the log page', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'Auri CRM', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'config-sha-1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let committed: { path: string; content: string; sha: string | null } | null = null;
+    let enqueued: RepoRef | null = null;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile(ref, path, content, message, expectedSha) {
+        committed = { path, content: content.toString('utf8'), sha: expectedSha };
+        return { kind: 'committed', sha: 'new-sha' };
+      },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'config-sha-1', view: 'timeline', visibility: 'private', curation_notes: 'be careful',
+      }, cookie);
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/dashboard/logs/log1');
+      assert.ok(committed, 'putFile must have been called');
+      assert.equal(committed!.path, 'release-log.json');
+      assert.equal(committed!.sha, 'config-sha-1');
+      const parsed = JSON.parse(committed!.content);
+      assert.deepEqual(parsed, { id: 'log1', product: 'Auri CRM', view: 'timeline', visibility: 'private', curation_notes: 'be careful' });
+      assert.deepEqual(enqueued, { owner: 'o', repo: 'repo1' }, 'a successful commit must trigger an immediate resync');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh), onRepoWrite: (ref) => { enqueued = ref; } });
+  });
+});
+
+test('an empty curation_notes becomes null in the committed document, not an empty string', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: 'old notes',
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let committedContent = '';
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile(ref, path, content) { committedContent = content.toString('utf8'); return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'sha1', view: 'full', visibility: 'public', curation_notes: '',
+      }, cookie);
+      assert.equal(JSON.parse(committedContent).curation_notes, null);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('an invalid view value is rejected before anything is committed', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'sha1', view: 'not-a-real-view', visibility: 'public', curation_notes: '',
+      }, cookie);
+      assert.equal(res.status, 400);
+      assert.equal(called, false, 'an invalid document must never reach putFile');
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a stale expected_sha results in a conflict page, not a silent overwrite', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'current-sha', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'write',
+      async putFile() { return { kind: 'conflict' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'a-now-stale-sha', view: 'full', visibility: 'public', curation_notes: '',
+      }, cookie);
+      assert.equal(res.status, 409);
+    }, undefined, { ...auth, gh, perms: permissions(db, gh) });
+  });
+});
+
+test('a settings change without write access is refused with 403 and commits nothing', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(log).values({
+      publicId: 'log1', repoOwner: 'o', repoName: 'repo1', repoNodeId: 'R_log1',
+      product: 'P', view: 'full', visibility: 'public', curationNotes: null,
+      state: 'active', headSha: 'c0ffee', configBlobSha: 'sha1', indexedAt: '2026-09-15T00:00:00.000Z',
+    }).run();
+    let called = false;
+    const gh: GitHub = {
+      probe: async () => ({ kind: 'ready', head: 'c0ffee', nodeId: 'R_log1' }), tree: async () => [], blob: async () => null,
+      collaboratorPermission: async () => 'read',
+      async putFile() { called = true; return { kind: 'committed', sha: 'x' }; },
+    };
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: null, lastSeenAt: '2026-09-15T00:00:00.000Z' }).run();
+    await withServer(reader, async (base) => {
+      const res = await postForm(base, '/dashboard/logs/log1/settings', {
+        expected_sha: 'sha1', view: 'timeline', visibility: 'public', curation_notes: '',
+      }, cookie);
+      assert.equal(res.status, 403);
+      assert.equal(called, false);
     }, undefined, { ...auth, gh, perms: permissions(db, gh) });
   });
 });
