@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { withCtx, signIn, addLog } from '../fixtures.ts';
 import type { Ctx } from '../fixtures.ts';
 import { log, release, media, syncError, repoPermission } from '../db/schema.ts';
+import type { Permissions } from '../permissions.ts';
 import { listLogs, createLogApi, logDetail, updateSettings, uploadMedia, deleteLog } from './logs.ts';
 
 const core = (ctx: Ctx) => ({ auth: ctx.auth, reader: ctx.reader });
@@ -186,5 +187,40 @@ test('deleteLog: an admin may delete a frozen log without write access; a non-ad
     const { who: dev } = signIn(ctx, 'dev');
     assert.equal((await deleteLog(core(ctx), dev, 'theirs', { confirm_name: 'Produkt theirs' })).status, 403);
     assert.equal((await deleteLog(core(ctx), admin, 'gone', { confirm_name: 'Produkt gone' })).status, 200);
+  });
+});
+
+// Parallel statt nacheinander: bei kaltem Cache kostet jede Frage einen
+// GitHub-Umlauf. Fällt, wenn die Liste in einer Schleife je Zeile wartet.
+test('listLogs asks for every log\'s write access in one round', async () => {
+  await withCtx(async (ctx) => {
+    for (const id of ['one', 'two', 'three']) addLog(ctx, id);
+    const state = { inFlight: 0, max: 0 };
+    const perms: Permissions = {
+      async canWrite() {
+        state.inFlight++; state.max = Math.max(state.max, state.inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        state.inFlight--; return true;
+      },
+      invalidate() {},
+    };
+    const { who } = signIn(ctx, 'dev');
+    const reply = await listLogs({ auth: { ...ctx.auth, perms }, reader: ctx.reader }, who);
+    assert.equal(body(reply).logs.length, 3);
+    assert.equal(state.max, 3);
+  });
+});
+
+test('createLogApi: a repository name that is already taken answers 409 naming it', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.auth.users.store(who.accountId, {
+      accessToken: 'gho_user_token', accessExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      refreshToken: 'ghr', refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    const auth = { ...ctx.auth, createRepo: async () => ({ kind: 'name_taken' as const }) };
+    const reply = await createLogApi({ auth, reader: ctx.reader }, who, { product: 'Auri CRM', repo_name: 'auri-release-log' });
+    assert.equal(reply.status, 409);
+    assert.match(body(reply).message, /auri-release-log/);
   });
 });

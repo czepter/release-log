@@ -59,3 +59,32 @@ test('signed in with a valid request: ok, carrying what the form round-trips', a
     assert.equal(check.redirectUri, 'http://127.0.0.1:5555/cb');
   });
 });
+
+// Aus server.test.ts übernommen, seit die Zustimmungsseite in Nuxt liegt.
+test('a loopback redirect_uri may differ from the registered one only in its port (RFC 8252)', async () => {
+  await withCtx(async (ctx) => {
+    const r = registerClient(ctx.auth.db, { client_name: 'Native', redirect_uris: ['http://[::1]:51234/cb'] });
+    if (!r.ok) throw new Error('register failed');
+    const { who } = signIn(ctx, 'dev');
+    assert.equal(checkAuthorizeRequest(ctx.auth, 'GET', query(r.value.clientId, { redirect_uri: 'http://[::1]:9999/cb' }), '', who).kind, 'ok');
+    assert.deepEqual(checkAuthorizeRequest(ctx.auth, 'GET', query(r.value.clientId, { redirect_uri: 'http://[::1]:9999/other' }), '', who), { kind: 'error', reason: 'bad_redirect_uri' });
+  });
+});
+
+test('code_challenge_method=plain and an unknown scope go back to the client, never to a code', async () => {
+  await withCtx(async (ctx) => {
+    const id = client(ctx);
+    const { who } = signIn(ctx, 'dev');
+    const plain = checkAuthorizeRequest(ctx.auth, 'GET', query(id, { code_challenge_method: 'plain' }), '', who);
+    assert.equal(plain.kind === 'redirect' && new URL(plain.location).searchParams.get('error'), 'invalid_request');
+    const scope = checkAuthorizeRequest(ctx.auth, 'GET', query(id, { scope: 'logs:read admin' }), '', who);
+    assert.equal(scope.kind === 'redirect' && new URL(scope.location).searchParams.get('error'), 'invalid_scope');
+  });
+});
+
+test('a redirect_uri that is not registered is an error, not a redirect', async () => {
+  await withCtx(async (ctx) => {
+    const id = client(ctx);
+    assert.deepEqual(checkAuthorizeRequest(ctx.auth, 'GET', query(id, { redirect_uri: 'https://evil.example/cb' }), '', null), { kind: 'error', reason: 'bad_redirect_uri' });
+  });
+});
