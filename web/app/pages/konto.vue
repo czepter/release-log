@@ -16,7 +16,7 @@ const { data: allowlist, refresh: refreshAllowlist } = await useFetch<{ entries:
 
 async function revoke(client: Client) {
   try {
-    await $fetch(`/api/clients/${encodeURIComponent(client.clientId)}`, { method: 'DELETE' })
+    await $fetch(`/api/clients/${encodeURIComponent(client.clientId)}`, { method: 'DELETE', body: {} })
     toast.success(`${client.clientName} getrennt.`)
     await refreshClients()
   } catch (err) {
@@ -38,7 +38,7 @@ async function allow() {
 }
 async function remove(entry: Entry) {
   try {
-    await $fetch(`/api/allowlist/${encodeURIComponent(entry.githubLogin)}`, { method: 'DELETE' })
+    await $fetch(`/api/allowlist/${encodeURIComponent(entry.githubLogin)}`, { method: 'DELETE', body: {} })
     await refreshAllowlist()
   } catch (err) {
     toast.error(apiMessage(err))

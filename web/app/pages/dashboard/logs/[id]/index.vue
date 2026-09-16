@@ -19,6 +19,8 @@ const { data, error, refresh } = await useFetch<Detail>(() => `/api/logs/${encod
 if (error.value?.statusCode === 404) throw createError({ statusCode: 404, statusMessage: 'Dieses Log gibt es nicht.', fatal: true })
 useHead({ title: () => data.value?.product ?? 'Log' })
 
+const now = useNow()
+onMounted(() => { now.value = Date.now() })
 const frozen = computed(() => data.value?.state === 'frozen')
 const drafts = computed(() => (data.value?.releases ?? []).filter((r) => r.published_at === null).length)
 const INSTALLATION = {
@@ -117,7 +119,7 @@ async function deleteLog() {
           <Badge v-else class="bg-green-50 text-green-700"><span class="size-1.5 rounded-full bg-green-500" />Aktiv</Badge>
           <Badge :variant="data.installation === 'reachable' ? 'outline' : 'destructive'">{{ INSTALLATION[data.installation] }}</Badge>
           <span class="text-border">·</span>
-          <span>Zuletzt abgeglichen {{ relativeTime(data.indexedAt) }}</span>
+          <span>Zuletzt abgeglichen {{ relativeTime(data.indexedAt, now) }}</span>
         </div>
       </div>
       <Button as-child variant="outline" size="lg">

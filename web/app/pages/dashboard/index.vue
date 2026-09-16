@@ -16,6 +16,8 @@ const logs = computed(() => {
 const frozenCount = computed(() => (data.value?.logs ?? []).filter((l) => l.state === 'frozen').length)
 
 const mcpUrl = useRequestURL().origin + '/mcp'
+const now = useNow()
+onMounted(() => { now.value = Date.now() })
 const copied = ref(false)
 async function copy() {
   await navigator.clipboard.writeText(mcpUrl)
@@ -87,7 +89,7 @@ async function copy() {
                 <AppStatusDot v-if="log.state === 'frozen'" tone="amber"><span class="text-amber-800">Eingefroren</span></AppStatusDot>
                 <AppStatusDot v-else tone="green">Aktiv</AppStatusDot>
               </td>
-              <td class="text-[13px] text-muted-foreground">{{ relativeTime(log.indexedAt) }}</td>
+              <td class="text-[13px] text-muted-foreground">{{ relativeTime(log.indexedAt, now) }}</td>
               <td class="pr-4 text-right text-muted-foreground"><ChevronRight class="ml-auto size-4" /></td>
             </tr>
             <tr v-if="logs.length === 0">

@@ -59,4 +59,9 @@
 
 /* Editor.js bringt eigenes CSS mit; nur die Kante zur Seite wird angepasst. */
 .codex-editor__redactor { padding-bottom: 120px !important; }
-.ce-block__content, .ce-toolbar__content { max-width: none; }
+
+.rl-plain:empty::before { content: attr(data-placeholder); color: var(--muted-foreground); pointer-events: none; }
+.ce-paragraph[data-placeholder]:empty::before { color: var(--muted-foreground); }
+.ce-block__content { max-width: 760px; }
+.ce-toolbar__content { max-width: 760px; }
+.codex-editor { font-size: 17px; line-height: 28px; }
