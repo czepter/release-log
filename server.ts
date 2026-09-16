@@ -7,14 +7,13 @@
 // with write access), reading the `viewer` this handler already computed.
 
 import { createServer } from 'node:http';
-import type { Server, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { route } from './lib/public.ts';
 import type { Viewer } from './lib/public.ts';
 import type { Reader } from './lib/store.ts';
 import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/webhook.ts';
 import type { RepoRef } from './lib/github.ts';
-import { openDb } from './lib/db/client.ts';
 import type { Db } from './lib/db/client.ts';
 import { account, log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
@@ -23,29 +22,19 @@ import { publicPage, renderReleaseFull, renderTimeline } from './lib/renderPubli
 import { sortReleases } from './lib/order.ts';
 import type { GitHub } from './lib/github.ts';
 import type { Permissions } from './lib/permissions.ts';
-import { indexReader } from './lib/indexReader.ts';
-import { readConfig } from './lib/config.ts';
 import { parseConfig } from './lib/document.ts';
-import { installations } from './lib/appAuth.ts';
-import { githubClient } from './lib/github.ts';
-import { withRetry } from './lib/http.ts';
 import type { Http } from './lib/http.ts';
 import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { exchangeCodeForLogin } from './lib/login.ts';
-import { permissions } from './lib/permissions.ts';
-import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
+import { MEDIA_MAX_BYTES } from './lib/index.ts';
+import { bootCore } from './lib/boot.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
-import { syncQueue } from './lib/syncQueue.ts';
-import { startReconcile } from './lib/reconcile.ts';
 import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
 import { isValidCodeChallenge } from './lib/pkce.ts';
 import { redeemUploadToken } from './lib/uploads.ts';
 import { createLog } from './lib/createLog.ts';
 import type { UserTokens } from './lib/userTokens.ts';
-import { userTokens } from './lib/userTokens.ts';
-import { cipher } from './lib/secrets.ts';
 import type { CreateUserRepo } from './lib/github.ts';
-import { userRepoCreator } from './lib/github.ts';
 import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
@@ -258,7 +247,16 @@ function readBodyWithin(
   });
 }
 
+export type CoreHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
+  return createServer(createHandler(reader, hooks, auth));
+}
+
+// Der ganze Kern als eine Funktion über Nodes req/res: server.ts lauscht
+// damit selbst (Tests, npm start), Nuxt ruft ihn für die Protokoll-Routen
+// im selben Prozess auf (Entscheidung 24).
+export function createHandler(reader: Reader, hooks?: Hooks, auth?: Auth): CoreHandler {
   const oauthRegisterLimiter = rateLimiter(10, 60 * 60 * 1000); // 10 je Stunde
   const oauthTokenLimiter = rateLimiter(60, 60 * 1000); // 60 je Minute
   const mcpVerifier: OAuthTokenVerifier | null = !auth ? null : {
@@ -279,7 +277,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
       })
       : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' }),
   ));
-  return createServer(async (req, res) => {
+  return async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
     // corrupted sqlite file, which runs for every /auth/github/callback
@@ -1619,67 +1617,16 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
     } catch (err) {
       respondInternalError(res, err);
     }
-  });
+  };
 }
 
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 8787);
-  const dbPath = process.env.DB_PATH ?? './release-log.sqlite';
-  const db = openDb(dbPath);
-
-  const config = readConfig(process.env);
-  // Node has no default fetch timeout: a hung connection would block this
-  // process's single in-flight sync indefinitely, stalling every
-  // repository's sync, not just the hung one. 30s is generous for a
-  // single GitHub API call, including the blobs a sync fetches one at a
-  // time. Same treatment as bin/reindex.ts, for the same reason.
-  const FETCH_TIMEOUT_MS = 30_000;
-  const gh = githubClient(
-    installations(config, withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }))),
-    withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })),
-  );
-  const queue = syncQueue(
-    async (ref) => { await syncLog(db, gh, ref); },
-    (ref, err) => { console.error(`${ref.owner}/${ref.repo}: ${(err as Error).message}`); },
-  );
-  startReconcile(db, queue);
-
-  const perms = permissions(db, gh);
-  const authHttp: Http = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  const users = userTokens({
-    db, http: authHttp, cipher: cipher(config.tokenEncryptionKey),
-    clientId: config.clientId, clientSecret: config.clientSecret,
-  });
-
+  const { reader, hooks, auth, dbPath } = bootCore(process.env);
   // Bind an explicit address: without a host Node listens on :: and takes
   // IPv4 only while nothing else holds it, so a busy port turns into a
   // silent IPv6-only start instead of an error (spec §12).
-  createApp(indexReader(db), {
-    webhookSecret: config.webhookSecret,
-    onDelivery: (refs) => { for (const ref of refs) queue.enqueue(ref); },
-    onPermissionInvalidation: (refs) => { for (const ref of refs) perms.invalidate(ref); },
-  }, {
-    db,
-    clientId: config.clientId,
-    clientSecret: config.clientSecret,
-    signingKey: config.signingKey,
-    adminLogins: config.adminLogins,
-    baseUrl: config.baseUrl,
-    http: authHttp,
-    gh,
-    perms,
-    users,
-    // Ohne withRetry, anders als jeder andere GitHub-Aufruf hier: ein
-    // Wiederholungsversuch auf POST /user/repos kann ein zweites Repo
-    // anlegen (oder das erste als „Name vergeben" zurückmelden), wenn die
-    // erste Antwort unterwegs verloren ging. Anlegen ist nicht idempotent.
-    createRepo: userRepoCreator(authHttp),
-    onRepoWrite: (ref) => { queue.enqueue(ref); },
-    // Durch dieselbe Warteschlange wie jeder andere Abgleich, nur
-    // abgewartet: zwei Läufe auf demselben Repo würden einander die Sweeps
-    // unter den Füßen wegziehen (s. lib/syncQueue.ts).
-    syncNow: async (ref) => { queue.enqueue(ref); await queue.idle(); },
-  }).listen(port, '127.0.0.1', () => {
+  createServer(createHandler(reader, hooks, auth)).listen(port, '127.0.0.1', () => {
     console.log(`release-log-hub on http://127.0.0.1:${port}, index at ${dbPath}`);
   });
 }

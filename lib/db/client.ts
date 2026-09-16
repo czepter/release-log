@@ -12,13 +12,13 @@ export type Db = BetterSQLite3Database<typeof schema>;
 
 const MIGRATIONS = fileURLToPath(new URL('../../drizzle', import.meta.url));
 
-export function openDb(path: string): Db {
+export function openDb(path: string, migrationsFolder: string = MIGRATIONS): Db {
   const sqlite = new Database(path);
   // Foreign keys are off by default in SQLite and the index relies on
   // explicit deletes rather than cascades, but WAL is worth having: a
   // reader is never blocked by the sync writing.
   sqlite.pragma('journal_mode = WAL');
   const db = drizzle(sqlite, { schema });
-  migrate(db, { migrationsFolder: MIGRATIONS });
+  migrate(db, { migrationsFolder });
   return db;
 }

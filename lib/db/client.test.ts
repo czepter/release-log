@@ -168,3 +168,14 @@ test('the same account can hold different cached permissions on different logs',
     assert.equal(rows.length, 2);
   });
 });
+
+// Nitro bündelt diese Datei; danach zeigt import.meta.url nicht mehr neben
+// drizzle/. Der zweite Parameter muss deshalb wirklich benutzt werden.
+test('openDb reads migrations from the folder it is given', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rlh-db-nomig-'));
+  try {
+    assert.throws(() => openDb(':memory:', dir), /_journal\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
