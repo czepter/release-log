@@ -10,6 +10,7 @@ import type { Db } from './db/client.ts';
 import { readConfig } from './config.ts';
 import { installations } from './appAuth.ts';
 import { githubClient, userRepoCreator } from './github.ts';
+import type { GitHub } from './github.ts';
 import { withRetry } from './http.ts';
 import type { Http } from './http.ts';
 import { syncQueue } from './syncQueue.ts';
@@ -24,7 +25,9 @@ import type { Hooks, Auth } from '../server.ts';
 
 export type Core = { reader: Reader; hooks: Hooks; auth: Auth; db: Db; dbPath: string };
 
-export function bootCore(env: NodeJS.ProcessEnv, opts: { migrationsFolder?: string } = {}): Core {
+// opts.gh ersetzt den GitHub-Client -- nur für die lokale Entwicklung der
+// Oberfläche (web/server/utils/core.ts), nie im Betrieb.
+export function bootCore(env: NodeJS.ProcessEnv, opts: { migrationsFolder?: string; gh?: GitHub } = {}): Core {
   const dbPath = env.DB_PATH ?? './release-log.sqlite';
   const db = opts.migrationsFolder ? openDb(dbPath, opts.migrationsFolder) : openDb(dbPath);
 
@@ -35,7 +38,7 @@ export function bootCore(env: NodeJS.ProcessEnv, opts: { migrationsFolder?: stri
   // single GitHub API call, including the blobs a sync fetches one at a
   // time. Same treatment as bin/reindex.ts, for the same reason.
   const FETCH_TIMEOUT_MS = 30_000;
-  const gh = githubClient(
+  const gh = opts.gh ?? githubClient(
     installations(config, withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }))),
     withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })),
   );
