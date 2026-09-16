@@ -12,6 +12,6 @@ export default defineEventHandler(async (event) => {
   if (!auth.db.select().from(account).where(eq(account.githubUserId, id)).all()[0]) {
     auth.db.insert(account).values({ githubUserId: id, login, avatarUrl: null, lastSeenAt: new Date().toISOString() }).run()
   }
-  setCookie(event, 'session', createSessionCookie(auth.signingKey, id), { httpOnly: true, sameSite: 'lax', path: '/' })
+  setCookie(event, 'session', createSessionCookie(auth.signingKey, id), { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 60 * 60 * 24 })
   return sendRedirect(event, '/dashboard')
 })
