@@ -5,7 +5,7 @@ const route = useRoute()
 const id = String(route.params.id)
 const { data, error } = await useFetch<{ log: PublicLogHead; releases: PublicRelease[] }>(`/api/public/logs/${encodeURIComponent(id)}`)
 // Privat und fehlend sind dieselbe 404 (spec §7).
-if (error.value || !data.value) throw createError({ statusCode: 404, statusMessage: 'Nicht gefunden', fatal: true })
+if (error.value || !data.value) throw createError({ statusCode: 404, statusMessage: 'Nicht gefunden' })
 
 const log = computed(() => data.value!.log)
 useHead({

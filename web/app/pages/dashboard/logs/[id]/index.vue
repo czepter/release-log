@@ -16,7 +16,7 @@ type Detail = {
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const { data, error, refresh } = await useFetch<Detail>(() => `/api/logs/${encodeURIComponent(id.value)}`)
-if (error.value?.statusCode === 404) throw createError({ statusCode: 404, statusMessage: 'Dieses Log gibt es nicht.', fatal: true })
+if (error.value?.statusCode === 404) throw createError({ statusCode: 404, statusMessage: 'Dieses Log gibt es nicht.' })
 useHead({ title: () => data.value?.product ?? 'Log' })
 
 const now = useNow()

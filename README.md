@@ -7,10 +7,35 @@ Dieser Stand ist Plan 1: das Dokumentmodell und die öffentliche JSON-Fläche,
 gespeist aus einem Verzeichnis statt aus GitHub.
 
 ```bash
-npm test        # node --test, ohne Argument aus dem Wurzelverzeichnis
+npm run dev       # Nuxt mit Fake-GitHub aus logs/demo, http://localhost:3000/api/dev/login
+npm test          # node --test, ohne Argument aus dem Wurzelverzeichnis
 npm run typecheck
-npm start       # LOGS_ROOT (Vorgabe ./logs), PORT (Vorgabe 8787)
+npm run build     # Nuxt-Build nach web/.output
+npm start         # der gebaute Dienst: Nuxt mit eingebettetem Kern (PORT, Vorgabe 3000)
+npm run start:core  # nur der Kern ohne Oberfläche, für Tests und Maschinen-Clients
 ```
+
+### Aufbau
+
+Nuxt (`web/`) ist die einzige Oberfläche und bindet den Kern (`server.ts`,
+`lib/`) im selben Prozess ein. Was Menschen sehen, rendert Nuxt; was
+Maschinen sprechen, beantwortet der Kern unverändert
+(`web/server/utils/corePaths.ts`):
+
+| Kern | Nuxt |
+|---|---|
+| `/health`, `/webhook`, `/mcp`, `/me`, `/auth/*`, `/.well-known/*`, `/upload/*` | `/dashboard`, `/dashboard/logs/<id>`, Release-Editor, `/konto` |
+| `/oauth/register`, `/oauth/token`, `POST /oauth/authorize` | `GET /oauth/authorize` (Zustimmung), `/anmeldung` |
+| `/l/<id>/versions`, `/l/<id>/releases…`, `/l/<id>/media/…` | `/l/<id>`, `/l/<id>/r/<version>` |
+| | `/api/*` — Seiten-API aus `lib/api/` |
+
+Nuxt liest die Migrationen aus `MIGRATIONS_DIR` (Vorgabe `./drizzle`,
+relativ zum Arbeitsverzeichnis): im gebündelten Server zeigt
+`import.meta.url` nicht mehr neben `drizzle/`.
+
+`npm run dev` setzt `RL_DEV_FAKE=1`: der Kern läuft gegen ein Fake-GitHub
+aus `logs/demo`, `/api/dev/login?as=admin` meldet ohne GitHub an. Beides
+existiert im Produktions-Build nicht (`import.meta.dev`).
 
 | Route | Antwort |
 |---|---|
@@ -77,14 +102,14 @@ angekommen" und „Index von Null neu bauen" sind derselbe Fall.
 - `GET /auth/github/login` leitet zu GitHub weiter.
 - `GET /auth/github/callback` (bei GitHub als Callback-URL hinterlegt) nimmt
   die Antwort entgegen, prüft die Zulassungsliste, setzt bei Erfolg ein
-  Session-Cookie (30 Tage) und leitet auf `/me` weiter.
+  Session-Cookie (30 Tage) und leitet aufs Dashboard weiter. Scheitert die
+  Anmeldung, geht es nach `/anmeldung?fehler=state|github|denied`.
 - `POST /auth/logout` löscht das Cookie.
 - `GET /me` antwortet `{login, isAdmin}` für eine gültige Session, sonst 401.
 
 Adminrecht kommt ausschließlich aus `ADMIN_LOGINS` — es gibt keine
 Datenbankspalte dafür. Wer sonst zugelassen ist, steht in der
-`allowlist`-Tabelle; Admins verwalten sie über das Dashboard (siehe unten,
-`GET`/`POST /admin/allowlist`).
+`allowlist`-Tabelle; Admins verwalten sie unter `/konto`.
 
 ### Repo-Rechte
 
@@ -100,25 +125,29 @@ Fünf-Minuten-Obergrenze wie sonst auch.
 
 ### Dashboard
 
-- `GET /dashboard` — die Logs, auf die das angemeldete Konto Schreibrechte
-  hat (eingefrorene Logs zusätzlich für Admins, sonst wäre eins nie mehr
-  erreichbar).
-- `GET /dashboard/logs/<id>` — Einstellungen, Abgleichfehler, Medien-Upload,
-  Löschen.
-- `POST /dashboard/logs/<id>/settings` — `view`, `visibility`,
-  `curation_notes` als Commit auf `release-log.json`, nie als
-  Datenbankschreibvorgang.
-- `POST /dashboard/logs/<id>/media` — ein Bild (`.png`, `.jpg`, `.webp`,
-  höchstens 10 MB) als Commit unter `media/<Dateiname>`.
-- `POST /dashboard/logs/new` — legt ein Repository auf dem GitHub-Konto der
-  angemeldeten Person an, schreibt die erste `release-log.json` und eine
-  `README.md` hinein und nimmt es in den Index auf. Derselbe Ablauf wie das
-  MCP-Werkzeug `create_log`.
-- `POST /dashboard/logs/<id>/delete` — endgültiges Löschen von Index und
-  Medien, mit Eingabe des Produktnamens zur Bestätigung. Das Repo selbst
-  bleibt unangetastet.
-- `GET`/`POST /admin/allowlist`, `POST /admin/allowlist/<login>/delete` —
-  nur für Admins.
+Nuxt-Seiten über der Seiten-API (`/api/*`, Sitzungs-Cookie, JSON). Die
+Regeln stehen in `lib/api/`:
+
+- `/dashboard` — die Logs, auf die das angemeldete Konto Schreibrechte hat
+  (eingefrorene zusätzlich für Admins). „Neues Log" legt über denselben
+  Ablauf wie `create_log` ein Repository an.
+- `/dashboard/logs/<id>` — Status, Abgleichfehler, Releases, Einstellungen
+  (`view`, `visibility`, `curation_notes` als Commit auf
+  `release-log.json`, nie als Datenbankschreibvorgang), Medien-Upload
+  (`.png`, `.jpg`, `.webp`, höchstens 10 MB, legt an, ersetzt nie) und
+  endgültiges Löschen mit Eingabe des Produktnamens.
+- `/dashboard/logs/<id>/releases/new`, `…/releases/<version>` — der
+  Release-Editor (Editor.js): Überschrift, Absätze, ein Bild und Änderungen
+  als Blöcke. Speichern committet über denselben Weg wie `write_release`
+  gegen die zuletzt gelesene Blob-SHA; hat sich das Release inzwischen
+  geändert, wird nichts überschrieben. Veröffentlichen und Zurückziehen
+  daneben. `covered` und `commits` fasst der Editor nie an.
+- `/konto` — Profil, verbundene MCP-Clients trennen, Zulassungsliste
+  (Admins).
+
+Mutierende `/api`-Aufrufe verlangen `content-type: application/json`
+(Upload: `x-filename`); mit `SameSite=Lax` kann keine fremde Seite sie
+auslösen.
 
 ### MCP und OAuth
 
@@ -126,12 +155,12 @@ Ein eigener OAuth-2.0-Autorisierungsserver (spec §5, "Rolle 2") schützt `/mcp`
 
 - `POST /oauth/register` — Dynamic Client Registration (RFC 7591), nur
   öffentliche Clients (kein Secret, PKCE `S256` ist Pflicht).
-- `GET`/`POST /oauth/authorize` — Zustimmungsbildschirm.
+- `GET /oauth/authorize` — Zustimmungsbildschirm (Nuxt), `POST` löst die
+  Entscheidung im Kern ein. Beide prüfen über `lib/oauthRequest.ts`.
 - `POST /oauth/token` — `authorization_code`- und `refresh_token`-Grant.
 - `GET /.well-known/oauth-protected-resource/mcp`,
   `GET /.well-known/oauth-authorization-server` — Metadaten (RFC 9728/8414).
-- `GET /dashboard/connections`, `POST /dashboard/connections/<clientId>/revoke`
-  — verbundene Clients ansehen und trennen.
+- Verbundene Clients ansehen und trennen: `/konto`.
 - `POST /mcp` — die eigentliche MCP-Fläche, Streamable HTTP, Bearer-Token
   Pflicht: `list_logs`, `get_log`, `get_release` (Scope `logs:read`),
   `create_log`, `write_release`, `publish_release`, `unpublish_release`,
@@ -170,9 +199,12 @@ erst, wenn der Log im Index steht.
 
 ### Gehostete Seite
 
-- `GET /l/<id>` — serverseitig gerendert, `full` oder `timeline` je nach
-  Log-Einstellung. Entwürfe nur für Angemeldete mit Schreibrecht sichtbar.
-- `GET /l/<id>/r/<version>` — Permalink auf eine einzelne Version.
+- `/l/<id>` — Nuxt, serverseitig gerendert als Zeitstrahl: Version und
+  Datum links, Abschnitte (Wichtig, Neu, Änderungen, Behoben) zum
+  Aufklappen. `timeline` öffnet je Release den ersten Abschnitt, `full`
+  alle. Entwürfe nur für Angemeldete mit Schreibrecht; private Logs tragen
+  `noindex` und antworten allen anderen wie ein fehlender Log mit 404.
+- `/l/<id>/r/<version>` — Permalink auf eine einzelne Version.
 
 Der öffentliche JSON-Feed (`/l/<id>/versions`, `/l/<id>/releases`, ...) und
-der Medien-Download existierten schon vor diesem Plan.
+der Medien-Download bleiben im Kern.

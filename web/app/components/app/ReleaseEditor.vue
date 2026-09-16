@@ -17,7 +17,7 @@ const { data: loaded, error: loadError } = props.version
   ? await useFetch<Loaded>(`${logPath}/releases/${enc(props.version)}`)
   : { data: ref<Loaded | null>(null), error: ref(null) }
 if ((loadError.value as { statusCode?: number } | null)?.statusCode === 404) {
-  throw createError({ statusCode: 404, statusMessage: 'Dieses Release gibt es nicht.', fatal: true })
+  throw createError({ statusCode: 404, statusMessage: 'Dieses Release gibt es nicht.' })
 }
 
 const today = new Date().toISOString().slice(0, 10)
