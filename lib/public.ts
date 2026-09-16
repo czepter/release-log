@@ -26,7 +26,7 @@ function encodePath(path: string): string {
 }
 
 // covered is the agent's bookkeeping, not part of the feed (spec §7).
-function detail(release: ReleaseDoc, config: LogConfig): Record<string, unknown> {
+export function detail(release: ReleaseDoc, config: LogConfig): Record<string, unknown> {
   const { changes, covered, image, ...rest } = release;
   return {
     ...rest,
