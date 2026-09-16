@@ -29,8 +29,10 @@ import { exchangeCodeForLogin } from './lib/login.ts';
 import { MEDIA_MAX_BYTES } from './lib/index.ts';
 import { bootCore } from './lib/boot.ts';
 import { mediaTypeOf } from './lib/mediaTypes.ts';
-import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
-import { isValidCodeChallenge } from './lib/pkce.ts';
+import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
+import { accountFromCookie, cookieValue } from './lib/access.ts';
+import type { LoggedIn } from './lib/access.ts';
+import { checkAuthorizeRequest, denyLocation } from './lib/oauthRequest.ts';
 import { redeemUploadToken } from './lib/uploads.ts';
 import { createLog } from './lib/createLog.ts';
 import type { UserTokens } from './lib/userTokens.ts';
@@ -86,15 +88,8 @@ export type Auth = {
   syncNow(ref: RepoRef): Promise<void>;
 };
 
-type LoggedIn = { accountId: number; login: string };
-
-// Read the session cookie, look up the account -- exactly what /me already
-// does, now in one place for every dashboard route.
-function currentAccount(req: import('node:http').IncomingMessage, auth: Auth): LoggedIn | null {
-  const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
-  if (!session) return null;
-  const row = auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0];
-  return row ? { accountId: session.accountId, login: row.login } : null;
+function currentAccount(req: IncomingMessage, auth: Auth): LoggedIn | null {
+  return accountFromCookie(auth, req.headers.cookie);
 }
 
 // Schreibrecht für eine ganze Liste von Logs auf einmal. Zwei Seiten
@@ -121,19 +116,6 @@ async function canWriteEach(
   return new Map(answers);
 }
 
-// A tiny request-cookie parser: Node's IncomingMessage never splits the
-// `cookie` header for you, and pulling in a dependency for "find one
-// name=value pair" would be the opposite of lazy.
-function cookieValue(header: string | undefined, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return undefined;
-}
-
 // The last-resort net: log the message only (never the whole error object,
 // since some error shapes -- e.g. a failed fetch -- can carry request
 // internals) and answer 500 if nothing has gone out yet. Shared by the
@@ -158,37 +140,6 @@ function readFormBody(req: import('node:http').IncomingMessage): Promise<URLSear
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => resolve(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))));
     req.on('error', reject);
-  });
-}
-
-const ALLOWED_SCOPES = ['logs:read', 'logs:write'];
-
-// Task 4's isAcceptableRedirectUri checks a value being REGISTERED (must be
-// https, or http on loopback). This checks a value PRESENTED at /oauth/authorize
-// against what was registered -- exact match, except the redirect_uri's port
-// may vary from what was registered when both are loopback (RFC 8252): a
-// native client picks its callback port at OS-assigned random each run, so
-// pinning one exact port at registration time would be unusable.
-function redirectUriMatches(registered: string[], presented: string): boolean {
-  if (registered.includes(presented)) return true;
-  let presentedUrl: URL;
-  try {
-    presentedUrl = new URL(presented);
-  } catch {
-    return false;
-  }
-  if (presentedUrl.protocol !== 'http:') return false;
-  // URL.hostname returns the bracketed form for IPv6 ('[::1]', not '::1');
-  // both are listed so an already-unbracketed value still matches.
-  if (!['127.0.0.1', '::1', '[::1]', 'localhost'].includes(presentedUrl.hostname)) return false;
-  return registered.some((r) => {
-    try {
-      const reg = new URL(r);
-      return reg.protocol === 'http:' && reg.hostname === presentedUrl.hostname
-        && reg.pathname === presentedUrl.pathname && reg.search === presentedUrl.search;
-    } catch {
-      return false;
-    }
   });
 }
 
@@ -1278,68 +1229,25 @@ export function createHandler(reader: Reader, hooks?: Hooks, auth?: Auth): CoreH
           return;
         }
         const params = method === 'GET' ? url.searchParams : await readFormBody(req);
-        const clientId = params.get('client_id') ?? '';
-        const redirectUri = params.get('redirect_uri') ?? '';
-        const client = findClient(auth.db, clientId);
-        // Unknown client or an unregistered redirect_uri: never redirect --
-        // there is no validated destination to send the error to (spec §5,
-        // "redirect URIs are checked exactly").
-        if (!client) {
+        const check = checkAuthorizeRequest(auth, method, params, url.search.slice(1), currentAccount(req, auth));
+        if (check.kind === 'error') {
           res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Unbekannter Client', '<p>Dieser Client ist nicht registriert.</p>'));
+          res.end(check.reason === 'unknown_client'
+            ? page('Unbekannter Client', '<p>Dieser Client ist nicht registriert.</p>')
+            : page('Ungültige Redirect-URI', '<p>Diese Redirect-URI ist für diesen Client nicht registriert.</p>'));
           return;
         }
-        if (!redirectUriMatches(client.redirectUris, redirectUri)) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Ungültige Redirect-URI', '<p>Diese Redirect-URI ist für diesen Client nicht registriert.</p>'));
-          return;
-        }
-
-        // From here on redirectUri is validated -- every further error may go there.
-        const state = params.get('state') ?? '';
-        const redirectWithError = (error: string): void => {
-          const target = new URL(redirectUri);
-          target.searchParams.set('error', error);
-          if (state) target.searchParams.set('state', state);
-          res.writeHead(302, { location: target.toString() });
-          res.end();
-        };
-
-        const codeChallenge = params.get('code_challenge') ?? '';
-        const codeChallengeMethod = params.get('code_challenge_method') ?? '';
-        // response_type only applies to the initial request (GET) -- it is
-        // not one of the fields the consent form round-trips (see the hidden
-        // fields below), so requiring it again on POST would reject every
-        // decision submission before it ever reaches the allow/deny check.
-        //
-        // isValidCodeChallenge ersetzt die frühere "nicht leer"-Prüfung: mit
-        // S256 ist eine Challenge immer 43 base64url-Zeichen (RFC 7636 §4.2).
-        // Was diese Form verfehlt, kann zu keinem gültigen Verifier gehören
-        // -- das hier ist die Grenze, an der eine Anfrage geprüft wird, also
-        // fällt es hier auf und nicht eine Minute später beim Einlösen.
-        if ((method === 'GET' && params.get('response_type') !== 'code') || !isValidCodeChallenge(codeChallenge) || codeChallengeMethod !== 'S256') {
-          redirectWithError('invalid_request');
-          return;
-        }
-        const scope = params.get('scope') ?? '';
-        const scopes = scope.split(' ').filter((s) => s !== '');
-        if (scopes.length === 0 || !scopes.every((s) => ALLOWED_SCOPES.includes(s))) {
-          redirectWithError('invalid_scope');
-          return;
-        }
-
-        const who = currentAccount(req, auth);
-        if (!who) {
-          const next = `/oauth/authorize?${url.search.slice(1)}`;
-          res.writeHead(302, { location: `/auth/github/login?next=${encodeURIComponent(next)}` });
+        if (check.kind === 'redirect' || check.kind === 'login') {
+          res.writeHead(302, { location: check.location });
           res.end();
           return;
         }
+        const { client, redirectUri, state, scope, codeChallenge, who } = check;
 
         if (method === 'POST') {
-          const decision = params.get('decision');
-          if (decision !== 'allow') {
-            redirectWithError('access_denied');
+          if (params.get('decision') !== 'allow') {
+            res.writeHead(302, { location: denyLocation(redirectUri, state) });
+            res.end();
             return;
           }
           const code = mintAuthorizationCode(auth.db, {
