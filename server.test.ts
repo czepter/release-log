@@ -547,7 +547,7 @@ test('the callback rejects a state that does not match the cookie', async () => 
   });
 });
 
-test('a successful login for an allowed login sets a session cookie and redirects to /me', async () => {
+test('a successful login for an allowed login sets a session cookie and redirects to the dashboard', async () => {
   await withAuth(async (auth, db) => {
     await withServer(reader, async (base) => {
       const res = await fetch(`${base}/auth/github/callback?code=abc&state=right`, {
@@ -555,7 +555,7 @@ test('a successful login for an allowed login sets a session cookie and redirect
         headers: { cookie: 'oauth_state=right' },
       });
       assert.equal(res.status, 302);
-      assert.equal(res.headers.get('location'), '/me');
+      assert.equal(res.headers.get('location'), '/dashboard');
       const sessionCookie = cookieValue(res.headers.getSetCookie(), 'session');
       assert.ok(sessionCookie, 'a session cookie must be set');
 
@@ -809,6 +809,23 @@ test('GET /dashboard without a session redirects to login', async () => {
       assert.equal(res.status, 302);
       assert.equal(res.headers.get('location'), '/auth/github/login');
     }, undefined, auth);
+  });
+});
+
+test('GET / redirects to the dashboard on the public base URL, so the login cookie and callback share one host', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), 'https://example.test/dashboard');
+    }, undefined, auth);
+  });
+});
+
+test('GET / without auth configured stays 404', async () => {
+  await withServer(reader, async (base) => {
+    const res = await fetch(`${base}/`, { redirect: 'manual' });
+    assert.equal(res.status, 404);
   });
 });
 
@@ -2408,7 +2425,7 @@ test('a successful callback redirects to the stored login_next instead of /me, a
   });
 });
 
-test('a callback with no login_next cookie still redirects to /me (unchanged default)', async () => {
+test('a callback with no login_next cookie redirects to the dashboard (the default)', async () => {
   await withAuth(async (auth) => {
     await withServer(reader, async (base) => {
       const loginRes = await fetch(`${base}/auth/github/login`, { redirect: 'manual' });
@@ -2418,7 +2435,7 @@ test('a callback with no login_next cookie still redirects to /me (unchanged def
       const cbRes = await fetch(`${base}/auth/github/callback?code=abc&state=${state}`, {
         redirect: 'manual', headers: { cookie: stateCookie },
       });
-      assert.equal(cbRes.headers.get('location'), '/me');
+      assert.equal(cbRes.headers.get('location'), '/dashboard');
     }, undefined, auth);
   });
 });

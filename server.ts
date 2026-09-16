@@ -480,7 +480,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         auth.users.store(identity.id, login.tokens);
 
         const rawNext = cookieValue(req.headers.cookie, 'login_next');
-        let redirectLocation = '/me';
+        let redirectLocation = '/dashboard';
         if (rawNext !== undefined) {
           const decoded = decodeURIComponent(rawNext);
           if (decoded.startsWith('/oauth/authorize?')) redirectLocation = decoded;
@@ -510,6 +510,17 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           'set-cookie': 'session=; Max-Age=0; Path=/',
         });
         res.end(JSON.stringify({ loggedOut: true }));
+        return;
+      }
+
+      // Wer die nackte Adresse im Browser öffnet, landet im Dashboard -- das
+      // leitet ohne Session selbst zum Login weiter. Absolut auf baseUrl,
+      // weil das oauth_state-Cookie auf demselben Host liegen muss, auf den
+      // GitHub zurückleitet (sonst scheitert der Login von 127.0.0.1 aus).
+      // Ohne auth bleibt / 404.
+      if (pathname === '/' && method === 'GET' && auth) {
+        res.writeHead(302, { location: `${auth.baseUrl}/dashboard` });
+        res.end();
         return;
       }
 
