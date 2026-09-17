@@ -51,6 +51,7 @@ type Harness = {
   createRepoCalls: Array<{ token: string; name: string; private: boolean; description: string }>;
   syncNow: (ref: RepoRef) => Promise<void>;
   baseUrl: string;
+  maxLogsPerOwner: number;
 };
 
 function withHarness(
@@ -74,6 +75,7 @@ function withHarness(
     db, gh, repos, commits, users, createRepo: recordingCreate, createRepoCalls,
     syncNow: async (ref) => { await syncLog(db, gh, ref); },
     baseUrl: 'https://example.test',
+    maxLogsPerOwner: 10,
   }).finally(() => { rmSync(dir, { recursive: true, force: true }); });
 }
 
@@ -368,5 +370,51 @@ test('adopting on someone else\'s account is refused, not attempted', async () =
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.equal(result.error, 'forbidden');
+  });
+});
+
+test('createLog lehnt ab, sobald das Konto seine Grenze erreicht hat, und legt kein Repo an', async () => {
+  await withHarness(async (h) => {
+    h.users.store(42, GRANTED);
+    const limited = { ...h, maxLogsPerOwner: 1 };
+
+    const first = await createLog(limited, INPUT);
+    assert.equal(first.ok, true, first.ok ? '' : `${first.error}: ${first.message}`);
+    const callsAfterFirst = h.createRepoCalls.length;
+
+    const second = await createLog(limited, { ...INPUT, repoName: 'zweites-log' });
+    assert.equal(second.ok, false);
+    if (second.ok) return;
+    assert.equal(second.error, 'forbidden');
+    assert.match(second.message, /already has 1 logs/);
+    assert.equal(h.createRepoCalls.length, callsAfterFirst, 'GitHub wurde nicht gefragt');
+  });
+});
+
+test('createLog ohne Grenze (0) legt weiter an', async () => {
+  await withHarness(async (h) => {
+    h.users.store(42, GRANTED);
+    const open = { ...h, maxLogsPerOwner: 0 };
+    assert.equal((await createLog(open, INPUT)).ok, true);
+    const second = await createLog(open, { ...INPUT, repoName: 'zweites-log' });
+    assert.equal(second.ok, true, second.ok ? '' : `${second.error}: ${second.message}`);
+  });
+});
+
+test('adoptLog zählt gegen dieselbe Grenze und schreibt dann nichts ins Repo', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = {};
+    const limited = { ...h, maxLogsPerOwner: 1 };
+
+    const first = await adoptLog(limited, ADOPT);
+    assert.equal(first.ok, true, first.ok ? '' : `${first.error}: ${first.message}`);
+    const commitsAfterFirst = [...h.commits];
+
+    h.repos['octocat/zweites'] = {};
+    const second = await adoptLog(limited, { ...ADOPT, repoName: 'zweites' });
+    assert.equal(second.ok, false);
+    if (second.ok) return;
+    assert.equal(second.error, 'forbidden');
+    assert.deepEqual(h.commits, commitsAfterFirst, 'nichts wurde ins Repo geschrieben');
   });
 });

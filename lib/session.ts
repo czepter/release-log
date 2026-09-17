@@ -67,7 +67,9 @@ export function isAdmin(login: string, adminLogins: string[]): boolean {
   return adminLogins.includes(login);
 }
 
-export function isAllowed(db: Db, login: string, adminLogins: string[]): boolean {
+export function isAllowed(db: Db, login: string, adminLogins: string[], openSignup: boolean): boolean {
+  // Offene Anmeldung: niemand wird gefragt, auch die Tabelle nicht.
+  if (openSignup) return true;
   // ADMIN_LOGINS zuerst und ohne Datenbankzugriff: es existiert genau
   // dafür, das System erreichbar zu halten, wenn die Tabelle leer ist
   // (spec §5, Henne-Ei-Problem) — ein Tabellen-Miss könnte diese Antwort

@@ -54,7 +54,7 @@ function withServerFor(
   });
   const factory = buildMcpServer({
     db, reader: indexReader(db), perms: permissions(db, resolvedGh), gh: resolvedGh,
-    onRepoWrite: (ref) => { onRepoWriteCalls.push(ref); }, baseUrl: 'https://example.test',
+    onRepoWrite: (ref) => { onRepoWriteCalls.push(ref); }, baseUrl: 'https://example.test', maxLogsPerOwner: 10,
     users,
     createRepo: extra.createRepo ?? (async () => ({ kind: 'unavailable', status: 503 })),
     syncNow: async (ref) => { syncedRefs.push(ref); await extra.syncNow?.(ref); },

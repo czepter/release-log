@@ -37,7 +37,7 @@ export async function createLogApi({ auth }: Core, who: LoggedIn, input: unknown
   // existing: true übernimmt ein vorhandenes Repo, statt eins anzulegen.
   const run = field(input, 'existing') === true ? adoptLog : createLog;
   const created = await run(
-    { db: auth.db, gh: auth.gh, users: auth.users, createRepo: auth.createRepo, syncNow: auth.syncNow, baseUrl: auth.baseUrl },
+    { db: auth.db, gh: auth.gh, users: auth.users, createRepo: auth.createRepo, syncNow: auth.syncNow, baseUrl: auth.baseUrl, maxLogsPerOwner: auth.maxLogsPerOwner },
     {
       accountId: who.accountId, login: who.login, owner: who.login,
       repoName: (text(input, 'repo_name') ?? '').trim(),

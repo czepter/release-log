@@ -20,6 +20,8 @@ const CONFIG: AppConfig = {
   signingKey: 'test-signing-key',
   tokenEncryptionKey: Buffer.alloc(32, 7),
   adminLogins: ['tester'],
+  openSignup: false,
+  maxLogsPerOwner: 10,
 };
 
 function parts(token: string): { header: Record<string, unknown>; payload: Record<string, unknown> } {

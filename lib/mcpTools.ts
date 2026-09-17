@@ -45,6 +45,7 @@ function toolError(error: string, message: string): CallToolResult {
 
 export type McpToolDeps = {
   db: Db; reader: Reader; perms: Permissions; gh: GitHub; onRepoWrite: (ref: RepoRef) => void; baseUrl: string;
+  maxLogsPerOwner: number;
   // Nur create_log braucht diese drei: das Nutzer-Token, mit dem ein Repo
   // überhaupt entstehen kann, der Aufruf, der es anlegt, und der Abgleich,
   // auf den die Antwort warten muss (spec §6, Entscheidung 23).
@@ -73,7 +74,7 @@ Ablauf:
 `.trim();
 
 export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
-  const { db, reader, perms, gh, onRepoWrite, baseUrl, users, createRepo, syncNow } = deps;
+  const { db, reader, perms, gh, onRepoWrite, baseUrl, users, createRepo, syncNow, maxLogsPerOwner } = deps;
   return async (ctx) => {
     const server = new McpServer(
       { name: 'release-log-hub', version: '1.0.0' },
@@ -213,7 +214,7 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
         // jedes andere Werkzeug endet das in canWrite; hier gibt es kein
         // Repo, gegen das man fragen könnte, also steht die Absage hier.
         if (who === null) return toolError('forbidden', 'this token is not bound to an account');
-        const result = await createLog({ db, gh, users, createRepo, syncNow, baseUrl }, {
+        const result = await createLog({ db, gh, users, createRepo, syncNow, baseUrl, maxLogsPerOwner }, {
           accountId: who.accountId, login: who.login, owner, repoName: repo_name, product, view, visibility,
         });
         if (!result.ok) return toolError(result.error, result.message);

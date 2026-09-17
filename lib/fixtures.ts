@@ -49,7 +49,7 @@ export async function withCtx(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   ctx.reader = indexReader(db);
   ctx.auth = {
     db, clientId: 'client-id', clientSecret: 'client-secret', signingKey: SIGNING_KEY,
-    adminLogins: ['admin'], baseUrl: 'https://example.test', http, gh, perms: permissions(db, gh),
+    adminLogins: ['admin'], openSignup: false, maxLogsPerOwner: 10, baseUrl: 'https://example.test', http, gh, perms: permissions(db, gh),
     users: userTokens({ db, http, cipher: cipher(Buffer.alloc(32, 3)), clientId: 'client-id', clientSecret: 'client-secret' }),
     createRepo: async () => ({ kind: 'unavailable', status: 503 }),
     listRepos: async () => ({ kind: 'ok', repos: [] }),

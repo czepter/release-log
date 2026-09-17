@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronRight, ExternalLink, GitBranch, Plus, TriangleAlert, Trash2, Upload, ImageIcon } from '@lucide/vue'
+import { ChevronRight, ExternalLink, GitBranch, Plus, TriangleAlert, Trash2, Upload, ImageIcon, Code2 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 definePageMeta({ layout: 'app', middleware: 'auth' })
@@ -71,6 +71,31 @@ async function upload(file: File | undefined) {
 }
 // Wie lib/public.ts: der Repo-Pfad (media/…) hängt ganz hinter /media/.
 const mediaUrl = (path: string) => `/l/${encodeURIComponent(id.value)}/media/${path.split('/').map(encodeURIComponent).join('/')}`
+
+// Einbinden: die öffentliche Seite im iframe, oder der JSON-Feed direkt.
+// Die Adresse kommt aus der Anfrage, damit Snippets in dev wie in Produktion
+// dieselbe Herkunft zeigen wie die Seite, auf der sie stehen.
+const origin = useRequestURL().origin
+const base = computed(() => `${origin}/l/${encodeURIComponent(id.value)}`)
+const embedMode = ref('iframe')
+const EMBED_OPTIONS = [{ value: 'iframe', label: 'Als iframe' }, { value: 'api', label: 'Über die JSON-API' }]
+// Ein echtes Beispiel liest sich besser als ein Platzhalter.
+const sampleVersion = computed(() => data.value?.releases[0]?.version ?? '1.0.0')
+const iframeSnippet = computed(() => [
+  '<iframe',
+  `  src="${base.value}"`,
+  `  title="Changelog ${data.value?.product ?? ''}"`,
+  '  loading="lazy"',
+  '  style="width:100%;height:760px;border:0"',
+  '></iframe>',
+].join('\n'))
+const fetchSnippet = computed(() => [
+  '// "Was ist neu?" markieren, sobald eine neue Version erschienen ist.',
+  `const res = await fetch('${base.value}/versions')`,
+  'const { product, latest, versions } = await res.json()',
+  "const seen = localStorage.getItem('changelog-seen')",
+  'if (latest && latest !== seen) showBadge(product, latest)',
+].join('\n'))
 
 // Löschen
 const confirmName = ref('')
@@ -177,6 +202,62 @@ async function deleteLog() {
               </NuxtLink>
             </li>
           </ul>
+        </section>
+
+        <section class="flex flex-col gap-4 rounded-xl border bg-card p-5">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="flex flex-col gap-0.5">
+              <h2 class="flex items-center gap-2 text-base font-semibold"><Code2 class="size-4" /> Einbinden</h2>
+              <p class="text-[13px] text-muted-foreground">Die öffentliche Seite in deiner App zeigen, oder die Releases selbst abfragen.</p>
+            </div>
+            <AppSegmented v-model="embedMode" label="Art der Einbindung" :options="EMBED_OPTIONS" class="w-[280px]" />
+          </div>
+
+          <Alert v-if="data.visibility === 'private'">
+            <TriangleAlert />
+            <AlertDescription>
+              Das Log ist privat. Seite und API antworten für alle, die keine Schreibrechte auf
+              {{ data.owner }}/{{ data.repo }} haben, mit 404 — auch im iframe. Für eine öffentliche Einbindung die
+              Sichtbarkeit rechts auf <strong class="text-foreground">Öffentlich</strong> stellen.
+            </AlertDescription>
+          </Alert>
+
+          <template v-if="embedMode === 'iframe'">
+            <AppCopyBlock :code="iframeSnippet" label="HTML" />
+            <p class="text-[13px] leading-5 text-muted-foreground">
+              Die Seite setzt kein <code class="font-mono">X-Frame-Options</code>, lässt sich also von jeder Domain
+              einbetten. Sie bringt ihr eigenes Layout mit und wächst mit der Zahl der Releases — gib dem
+              <code class="font-mono">iframe</code> darum eine feste Höhe und lass ihn intern scrollen, oder rendere
+              in der Ansicht <strong class="text-foreground">Zeitstrahl</strong>, die kompakter baut.
+            </p>
+          </template>
+
+          <template v-else>
+            <div class="flex flex-col gap-2">
+              <span class="text-[13px] font-medium">Endpunkte</span>
+              <ul class="flex flex-col gap-2.5 text-[13px]">
+                <li class="flex flex-col gap-0.5">
+                  <code class="overflow-x-auto font-mono whitespace-nowrap">GET {{ base }}/versions</code>
+                  <span class="text-muted-foreground">Produktname, <code class="font-mono">latest</code> und alle Versionen mit Datum und Überschrift.</span>
+                </li>
+                <li class="flex flex-col gap-0.5">
+                  <code class="overflow-x-auto font-mono whitespace-nowrap">GET {{ base }}/releases?page=1&amp;per_page=10</code>
+                  <span class="text-muted-foreground">Seitenweiser Feed; je Release die Abschnitte mit Anzahl statt Einträgen.</span>
+                </li>
+                <li class="flex flex-col gap-0.5">
+                  <code class="overflow-x-auto font-mono whitespace-nowrap">GET {{ base }}/releases/{{ sampleVersion }}</code>
+                  <span class="text-muted-foreground">Ein Release vollständig, mit allen Einträgen und Bild.</span>
+                </li>
+              </ul>
+            </div>
+            <AppCopyBlock :code="fetchSnippet" label="JavaScript" />
+            <p class="text-[13px] leading-5 text-muted-foreground">
+              Die Antworten sind <code class="font-mono">access-control-allow-origin: *</code>, gehen also direkt aus dem
+              Browser. Sie tragen ein <code class="font-mono">ETag</code> des abgeglichenen Commits und dürfen 60 Sekunden
+              zwischengespeichert werden. Die <code class="font-mono">url</code>-Felder kommen als Pfad ohne Host — davor gehört der Origin dieser Instanz.
+              Entwürfe erscheinen nie, veröffentlichte Releases sofort nach dem Abgleich.
+            </p>
+          </template>
         </section>
       </div>
 

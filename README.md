@@ -30,6 +30,15 @@ Maschinen sprechen, beantwortet der Kern unverändert
 | | `/api/*` — Seiten-API aus `lib/api/` |
 | | `/` — Marketingseite; mit Sitzung führen ihre Knöpfe ins Dashboard |
 
+`OPEN_SIGNUP=1` (optional) öffnet die Anmeldung: Jedes GitHub-Konto darf
+sich anmelden, die Zulassungsliste wird nicht mehr gefragt. Ohne die
+Variable gilt sie wie bisher, und ohne Eintrag kommt niemand herein außer
+den Konten aus `ADMIN_LOGINS`.
+
+`MAX_LOGS_PER_OWNER` (optional, Vorgabe 10) begrenzt, wie viele Logs ein
+Konto führen darf. Die Grenze zählt je Repo-Eigentümer und gilt für neu
+angelegte wie für übernommene Repositories. `0` hebt sie auf.
+
 `RL_SHOWCASE_URL` (optional) bindet das Changelog eines Logs in die
 Startseite ein: die URL seiner öffentlichen Seite, `https://<host>/l/<id>`,
 auch von einer anderen Instanz. Fehlt sie oder antwortet die Quelle nicht,

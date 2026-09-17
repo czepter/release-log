@@ -64,6 +64,9 @@ export type Auth = {
   clientSecret: string;
   signingKey: string;
   adminLogins: string[];
+  // Jedes GitHub-Konto darf sich anmelden (OPEN_SIGNUP).
+  openSignup: boolean;
+  maxLogsPerOwner: number;
   baseUrl: string;
   http: Http;
   gh: GitHub;
@@ -197,6 +200,7 @@ export function createHandler(reader: Reader, hooks?: Hooks, auth?: Auth): CoreH
       ? buildMcpServer({
         db: auth.db, reader, perms: auth.perms, gh: auth.gh, onRepoWrite: auth.onRepoWrite,
         baseUrl: auth.baseUrl, users: auth.users, createRepo: auth.createRepo, syncNow: auth.syncNow,
+        maxLogsPerOwner: auth.maxLogsPerOwner,
       })
       : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' }),
   ));
@@ -380,7 +384,7 @@ export function createHandler(reader: Reader, hooks?: Hooks, auth?: Auth): CoreH
         const identity = login.identity;
         // The allowlist check runs before anything is written: a denied
         // person must leave zero trace -- no account row, no session cookie.
-        if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
+        if (!isAllowed(auth.db, identity.login, auth.adminLogins, auth.openSignup)) {
           res.writeHead(302, { location: '/anmeldung?fehler=denied' });
           res.end();
           return;

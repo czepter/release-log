@@ -60,21 +60,21 @@ test('isAdmin checks ADMIN_LOGINS only, nothing else', () => {
 
 test('isAllowed says yes for an admin login even with an empty allowlist table', () => {
   withDb((db) => {
-    assert.equal(isAllowed(db, 'czepter', ['czepter']), true);
+    assert.equal(isAllowed(db, 'czepter', ['czepter'], false), true);
   });
 });
 
 test('isAllowed says yes for a login the allowlist table names', () => {
   withDb((db) => {
     db.insert(allowlist).values({ githubLogin: 'someone', addedBy: 'czepter', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
-    assert.equal(isAllowed(db, 'someone', ['czepter']), true);
+    assert.equal(isAllowed(db, 'someone', ['czepter'], false), true);
   });
 });
 
 test('isAllowed says no for a login in neither place', () => {
   withDb((db) => {
     db.insert(allowlist).values({ githubLogin: 'someone', addedBy: 'czepter', addedAt: '2026-09-14T00:00:00.000Z', note: null }).run();
-    assert.equal(isAllowed(db, 'a-stranger', ['czepter']), false);
+    assert.equal(isAllowed(db, 'a-stranger', ['czepter'], false), false);
   });
 });
 
@@ -83,4 +83,11 @@ test('a null JSON payload does not throw, but returns null', () => {
   const sig = createHmac('sha256', KEY).update(encoded).digest('base64url');
   const cookie = `${encoded}.${sig}`;
   assert.equal(verifySessionCookie(KEY, cookie, NOW), null);
+});
+
+test('isAllowed lässt bei offener Anmeldung jedes Konto durch, ohne die Tabelle zu fragen', () => {
+  withDb((db) => {
+    assert.equal(isAllowed(db, 'a-stranger', ['czepter'], true), true);
+    assert.equal(isAllowed(db, 'a-stranger', ['czepter'], false), false);
+  });
 });
