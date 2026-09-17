@@ -3,9 +3,10 @@ import { ArrowDown, ArrowRight, ChevronDown, Globe, Pencil, Plug, ScrollText } f
 
 definePageMeta({ layout: 'public' })
 
-// Wer angemeldet ist, will arbeiten (Spec, Entscheidung 33). useAsyncData
-// reicht das Ergebnis vom Server durch; ein nackter Abruf liefe beim
-// Hydratisieren ein zweites Mal und stünde als 401 in der Konsole.
+// Die Sitzung entscheidet nur, wohin die Knöpfe führen (Spec, Entscheidung
+// 33). useAsyncData reicht das Ergebnis vom Server durch; ein nackter
+// Abruf liefe beim Hydratisieren ein zweites Mal und stünde als 401 in
+// der Konsole.
 const session = useSession()
 if (!session.value) {
   const request = useRequestFetch()
@@ -13,7 +14,6 @@ if (!session.value) {
   const { data } = await useAsyncData('landing-session', () => request<Session>('/api/session').catch(() => null))
   session.value = data.value
 }
-if (session.value) await navigateTo('/dashboard', { redirectCode: 302 })
 
 const { data } = await useFetch<{ showcase: Showcase | null }>('/api/showcase')
 const showcase = computed(() => data.value?.showcase ?? null)
@@ -23,7 +23,11 @@ useHead({
   meta: [{ name: 'description', content: 'release-log lässt deinen MCP-Client die Commits in Release Notes übersetzen. Du liest gegen und veröffentlichst, ohne selbst eine Datei im Repo anzufassen.' }],
 })
 
-const LOGIN = '/auth/github/login'
+// Angemeldete lesen die Startseite wie alle anderen; für sie führt jeder
+// Knopf ins Dashboard statt in eine zweite Anmeldung.
+const cta = computed(() => (session.value
+  ? { href: '/dashboard', label: 'Zum Dashboard', short: 'Dashboard' }
+  : { href: '/auth/github/login', label: 'Mit GitHub anmelden', short: 'Anmelden' }))
 
 const pains = [
   { title: 'Release Notes schreibt keiner gern', text: 'Nach dem Release hängt der Kopf schon am nächsten Ticket. Die Notes entstehen spät, knapp oder gar nicht.' },
@@ -74,7 +78,7 @@ const faqs = [
           <a v-if="showcase" href="#changelog" class="hover:text-foreground">Changelog</a>
           <a href="#faq" class="hover:text-foreground">FAQ</a>
         </nav>
-        <Button as="a" :href="LOGIN" class="h-11 sm:h-10">Anmelden</Button>
+        <Button as="a" :href="cta.href" class="h-11 sm:h-10">{{ cta.short }}</Button>
       </div>
     </header>
 
@@ -87,10 +91,10 @@ const faqs = [
           <h1 class="text-[38px] leading-[42px] font-semibold tracking-tight sm:text-6xl sm:leading-[64px]">Deine Nutzer lesen keine Commit-Messages.</h1>
           <p class="max-w-[540px] text-base leading-7 text-muted-foreground sm:text-lg sm:leading-[30px]">Sie wollen wissen, was neu ist und was behoben wurde. release-log lässt deinen MCP-Client die Commits in Release Notes übersetzen. Du liest gegen und veröffentlichst, ohne selbst eine Datei im Repo anzufassen.</p>
           <div class="flex w-full flex-col gap-2.5 pt-1 sm:w-auto sm:flex-row sm:gap-3">
-            <Button as="a" :href="LOGIN" size="lg" class="h-12 px-6">Mit GitHub anmelden</Button>
+            <Button as="a" :href="cta.href" size="lg" class="h-12 px-6">{{ cta.label }}</Button>
             <Button v-if="showcase" as="a" href="#changelog" variant="outline" size="lg" class="h-12 px-6">Live-Changelog ansehen <ArrowRight class="size-4" /></Button>
           </div>
-          <p class="text-[13px] text-muted-foreground">Anmelden können nur GitHub-Konten, die ein Admin freigeschaltet hat.</p>
+          <p v-if="!session" class="text-[13px] text-muted-foreground">Anmelden können nur GitHub-Konten, die ein Admin freigeschaltet hat.</p>
         </div>
 
         <div class="overflow-hidden rounded-2xl border bg-background shadow-[0_24px_48px_-24px_rgba(24,24,27,0.18)]" aria-hidden="true">
@@ -252,9 +256,9 @@ const faqs = [
       <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 pt-16 pb-14 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:gap-16 lg:pt-28 lg:pb-24">
         <div class="flex max-w-[720px] flex-col gap-4">
           <h2 class="text-[32px] leading-[38px] font-semibold tracking-tight sm:text-[44px] sm:leading-[52px]">Schreib dein nächstes Changelog nicht mehr aus dem Git-Log ab.</h2>
-          <p class="text-base leading-[26px] text-zinc-400 sm:text-[17px] sm:leading-7">Melde dich mit GitHub an und verbinde dein erstes Repository.</p>
+          <p class="text-base leading-[26px] text-zinc-400 sm:text-[17px] sm:leading-7">{{ session ? 'Im Dashboard liegen deine Logs und der Editor.' : 'Melde dich mit GitHub an und verbinde dein erstes Repository.' }}</p>
         </div>
-        <Button as="a" :href="LOGIN" size="lg" class="h-13 shrink-0 bg-zinc-50 px-6 text-zinc-950 hover:bg-zinc-200">Mit GitHub anmelden</Button>
+        <Button as="a" :href="cta.href" size="lg" class="h-13 shrink-0 bg-zinc-50 px-6 text-zinc-950 hover:bg-zinc-200">{{ cta.label }}</Button>
       </div>
       <div class="mt-auto border-t border-zinc-800">
         <div class="mx-auto flex max-w-6xl flex-col gap-3.5 px-4 py-6 text-[13px] text-zinc-400 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-7">
@@ -263,7 +267,7 @@ const faqs = [
             <a href="#funktionen" class="hover:text-zinc-50">Funktionen</a>
             <a v-if="showcase" href="#changelog" class="hover:text-zinc-50">Changelog</a>
             <a href="#faq" class="hover:text-zinc-50">FAQ</a>
-            <a :href="LOGIN" class="hover:text-zinc-50">Anmelden</a>
+            <a :href="cta.href" class="hover:text-zinc-50">{{ cta.short }}</a>
           </nav>
         </div>
       </div>

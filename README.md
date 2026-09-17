@@ -28,7 +28,7 @@ Maschinen sprechen, beantwortet der Kern unverändert
 | `/oauth/register`, `/oauth/token`, `POST /oauth/authorize` | `GET /oauth/authorize` (Zustimmung), `/anmeldung` |
 | `/l/<id>/versions`, `/l/<id>/releases…`, `/l/<id>/media/…` | `/l/<id>`, `/l/<id>/r/<version>` |
 | | `/api/*` — Seiten-API aus `lib/api/` |
-| | `/` — Marketingseite; mit Sitzung weiter nach `/dashboard` |
+| | `/` — Marketingseite; mit Sitzung führen ihre Knöpfe ins Dashboard |
 
 `RL_SHOWCASE_URL` (optional) bindet das Changelog eines Logs in die
 Startseite ein: die URL seiner öffentlichen Seite, `https://<host>/l/<id>`,
