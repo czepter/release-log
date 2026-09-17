@@ -13,7 +13,7 @@ const refs = (c: PublicChange) => [c.pr !== null ? `PR #${c.pr}` : null, ...c.is
 
 <template>
   <li class="grid grid-cols-[minmax(0,1fr)] gap-x-0 pb-16 sm:grid-cols-[150px_48px_minmax(0,1fr)]">
-    <div class="mb-3 flex items-center gap-2 sm:mb-0 sm:flex-col sm:items-end sm:gap-2 sm:pt-0.5">
+    <div class="mb-3 flex items-center gap-2 sm:sticky sm:top-24 sm:mb-0 sm:flex-col sm:items-end sm:gap-2 sm:self-start sm:pt-0.5">
       <span class="rounded-md bg-primary px-2 py-0.5 font-mono text-xs font-medium text-primary-foreground">v{{ release.version }}</span>
       <time :datetime="release.date" class="text-[13px] text-muted-foreground">{{ formatDate(release.date) }}</time>
       <Badge v-if="release.published_at === null" variant="outline" class="text-muted-foreground">Entwurf</Badge>
@@ -21,7 +21,7 @@ const refs = (c: PublicChange) => [c.pr !== null ? `PR #${c.pr}` : null, ...c.is
 
     <div class="relative hidden justify-center sm:flex" aria-hidden="true">
       <span v-if="!last" class="absolute top-3.5 -bottom-16 w-px bg-border" />
-      <span class="relative mt-[7px] size-[13px] rounded-full border-[3px] border-primary bg-background" />
+      <span class="sticky top-24 mt-[7px] size-[13px] shrink-0 rounded-full border-[3px] border-primary bg-background" />
     </div>
 
     <article class="flex min-w-0 flex-col gap-4">
