@@ -78,7 +78,7 @@ const faqs = [
           <a v-if="showcase" href="#changelog" class="hover:text-foreground">Changelog</a>
           <a href="#faq" class="hover:text-foreground">FAQ</a>
         </nav>
-        <Button as="a" :href="cta.href" class="h-11 sm:h-10">{{ cta.short }}</Button>
+        <Button as="a" :href="cta.href" class="h-11 sm:h-10"><AppGithubMark v-if="!session" class="size-4" />{{ cta.short }}</Button>
       </div>
     </header>
 
@@ -91,7 +91,7 @@ const faqs = [
           <h1 class="text-[38px] leading-[42px] font-semibold tracking-tight sm:text-6xl sm:leading-[64px]">Deine Nutzer lesen keine Commit-Messages.</h1>
           <p class="max-w-[540px] text-base leading-7 text-muted-foreground sm:text-lg sm:leading-[30px]">Sie wollen wissen, was neu ist und was behoben wurde. release-log lässt deinen MCP-Client die Commits in Release Notes übersetzen. Du liest gegen und veröffentlichst, ohne selbst eine Datei im Repo anzufassen.</p>
           <div class="flex w-full flex-col gap-2.5 pt-1 sm:w-auto sm:flex-row sm:gap-3">
-            <Button as="a" :href="cta.href" size="lg" class="h-12 px-6">{{ cta.label }}</Button>
+            <Button as="a" :href="cta.href" size="lg" class="h-12 px-6"><AppGithubMark v-if="!session" class="size-[18px]" />{{ cta.label }}</Button>
             <Button v-if="showcase" as="a" href="#changelog" variant="outline" size="lg" class="h-12 px-6">Live-Changelog ansehen <ArrowRight class="size-4" /></Button>
           </div>
           <p v-if="!session" class="text-[13px] text-muted-foreground">Anmelden können nur GitHub-Konten, die ein Admin freigeschaltet hat.</p>
@@ -258,7 +258,7 @@ const faqs = [
           <h2 class="text-[32px] leading-[38px] font-semibold tracking-tight sm:text-[44px] sm:leading-[52px]">Schreib dein nächstes Changelog nicht mehr aus dem Git-Log ab.</h2>
           <p class="text-base leading-[26px] text-zinc-400 sm:text-[17px] sm:leading-7">{{ session ? 'Im Dashboard liegen deine Logs und der Editor.' : 'Melde dich mit GitHub an und verbinde dein erstes Repository.' }}</p>
         </div>
-        <Button as="a" :href="cta.href" size="lg" class="h-13 shrink-0 bg-zinc-50 px-6 text-zinc-950 hover:bg-zinc-200">{{ cta.label }}</Button>
+        <Button as="a" :href="cta.href" size="lg" class="h-13 shrink-0 bg-zinc-50 px-6 text-zinc-950 hover:bg-zinc-200"><AppGithubMark v-if="!session" class="size-[18px]" />{{ cta.label }}</Button>
       </div>
       <div class="mt-auto border-t border-zinc-800">
         <div class="mx-auto flex max-w-6xl flex-col gap-3.5 px-4 py-6 text-[13px] text-zinc-400 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-7">
