@@ -724,6 +724,73 @@ test('GET /me with a session whose account row is gone answers 401, not a throw'
   });
 });
 
+test('GET /me from a browser renders an account page for an admin', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(account).values({ githubUserId: 42, login: 'octocat', avatarUrl: 'https://example.test/a.png', lastSeenAt: '2026-09-14T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 42);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { headers: { cookie: `session=${cookie}`, accept: 'text/html,application/xhtml+xml,*/*;q=0.8' } });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/html/);
+      const html = await res.text();
+      assert.ok(html.includes('octocat'), 'the login is shown');
+      assert.ok(html.includes('https://example.test/a.png'), 'the avatar is shown');
+      assert.ok(html.includes('Admin'), 'the role is shown');
+      assert.ok(html.includes('href="/admin/allowlist"'), 'an admin gets the allowlist link');
+      assert.ok(html.includes('href="/dashboard"'));
+      assert.ok(html.includes('action="/auth/logout"'));
+    }, undefined, auth);
+  });
+});
+
+test('GET /me from a browser for a non-admin shows no allowlist link', async () => {
+  await withAuth(async (auth, db) => {
+    db.insert(account).values({ githubUserId: 7, login: 'not-an-admin', avatarUrl: null, lastSeenAt: '2026-09-14T00:00:00.000Z' }).run();
+    const cookie = createSessionCookie(SIGNING_KEY, 7);
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { headers: { cookie: `session=${cookie}`, accept: 'text/html' } });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/html/);
+      const html = await res.text();
+      assert.ok(html.includes('not-an-admin'));
+      assert.equal(html.includes('/admin/allowlist'), false);
+    }, undefined, auth);
+  });
+});
+
+test('GET /me from a browser without a session redirects to login instead of 401 JSON', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/me`, { redirect: 'manual', headers: { accept: 'text/html' } });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/auth/github/login');
+    }, undefined, auth);
+  });
+});
+
+test('POST /auth/logout from a browser clears the cookie and renders a page, not JSON', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/logout`, { method: 'POST', redirect: 'manual', headers: { accept: 'text/html' } });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/html/);
+      const cleared = res.headers.getSetCookie().find((c) => c.startsWith('session='));
+      assert.match(cleared ?? '', /Max-Age=0/);
+      const html = await res.text();
+      assert.ok(html.includes('href="/dashboard"'), 'the page offers the way back in');
+    }, undefined, auth);
+  });
+});
+
+test('POST /auth/logout without an HTML Accept still answers JSON', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/logout`, { method: 'POST' });
+      assert.deepEqual(await res.json(), { loggedOut: true });
+    }, undefined, auth);
+  });
+});
+
 test('POST /auth/logout clears the session cookie', async () => {
   await withAuth(async (auth) => {
     await withServer(reader, async (base) => {

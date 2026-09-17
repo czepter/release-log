@@ -505,6 +505,16 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           res.end(JSON.stringify({ error: 'not_found' }));
           return;
         }
+        // Wie bei /me: ein Browser bekommt eine Seite. Bewusst keine
+        // Weiterleitung zum Login -- GitHub würde sofort still neu anmelden.
+        if ((req.headers.accept ?? '').includes('text/html')) {
+          res.writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'set-cookie': 'session=; Max-Age=0; Path=/',
+          });
+          res.end(page('Abgemeldet', '<h1>Abgemeldet</h1><p>Du bist abgemeldet.</p><p><a href="/dashboard">Erneut anmelden</a></p>'));
+          return;
+        }
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'set-cookie': 'session=; Max-Age=0; Path=/',
@@ -572,6 +582,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           ${isTheAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
           <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
           <p><a href="/dashboard/connections">Verbundene Clients</a></p>
+          <p><a href="/me">Dein Konto</a></p>
         `;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(page('Dashboard', body));
@@ -1451,17 +1462,48 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           res.end(JSON.stringify({ error: 'not_found' }));
           return;
         }
+        // Ein Browser schickt text/html im Accept-Header und bekommt eine
+        // Kontoseite; jeder andere Aufrufer behält das JSON von bisher.
+        const wantsHtml = (req.headers.accept ?? '').includes('text/html');
         const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
         const row = session
           ? auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0]
           : undefined;
         if (!row) {
+          if (wantsHtml) {
+            res.writeHead(302, { location: '/auth/github/login' });
+            res.end();
+            return;
+          }
           res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ error: 'unauthorized' }));
           return;
         }
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ login: row.login, isAdmin: isAdmin(row.login, auth.adminLogins) }));
+        const rowIsAdmin = isAdmin(row.login, auth.adminLogins);
+        if (!wantsHtml) {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ login: row.login, isAdmin: rowIsAdmin }));
+          return;
+        }
+        const clientCount = listConnectedClients(auth.db, row.githubUserId).length;
+        const body = `
+          <p><a href="/dashboard">&larr; Dashboard</a></p>
+          <h1>Dein Konto</h1>
+          <p>
+            ${row.avatarUrl ? `<img src="${escapeHtml(row.avatarUrl)}" alt="" width="64" height="64" style="border-radius:50%;vertical-align:middle;margin-right:.75rem">` : ''}
+            <strong>${escapeHtml(row.login)}</strong>
+            <span class="badge">${rowIsAdmin ? 'Admin' : 'Mitglied'}</span>
+          </p>
+          <table><tbody>
+            <tr><th>GitHub</th><td><a href="https://github.com/${encodeURIComponent(row.login)}">github.com/${escapeHtml(row.login)}</a></td></tr>
+            <tr><th>Zuletzt angemeldet</th><td>${escapeHtml(row.lastSeenAt)}</td></tr>
+            <tr><th>Verbundene Clients</th><td><a href="/dashboard/connections">${clientCount}</a></td></tr>
+          </tbody></table>
+          ${rowIsAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
+          <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
+        `;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(page('Dein Konto', body));
         return;
       }
 

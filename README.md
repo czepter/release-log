@@ -77,9 +77,12 @@ angekommen" und „Index von Null neu bauen" sind derselbe Fall.
 - `GET /auth/github/login` leitet zu GitHub weiter.
 - `GET /auth/github/callback` (bei GitHub als Callback-URL hinterlegt) nimmt
   die Antwort entgegen, prüft die Zulassungsliste, setzt bei Erfolg ein
-  Session-Cookie (30 Tage) und leitet auf `/me` weiter.
-- `POST /auth/logout` löscht das Cookie.
+  Session-Cookie (30 Tage) und leitet aufs Dashboard weiter.
+- `POST /auth/logout` löscht das Cookie (Browser bekommen eine Seite „Abgemeldet", sonst JSON).
 - `GET /me` antwortet `{login, isAdmin}` für eine gültige Session, sonst 401.
+  Ein Browser (`Accept: text/html`) bekommt stattdessen eine Kontoseite bzw.
+  ohne Session eine Weiterleitung zum Login.
+- `GET /` leitet auf `${BASE_URL}/dashboard` weiter.
 
 Adminrecht kommt ausschließlich aus `ADMIN_LOGINS` — es gibt keine
 Datenbankspalte dafür. Wer sonst zugelassen ist, steht in der
