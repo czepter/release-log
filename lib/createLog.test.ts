@@ -11,7 +11,7 @@ import { fakeHttp } from './http.ts';
 import { cipher } from './secrets.ts';
 import { userTokens } from './userTokens.ts';
 import { syncLog } from './index.ts';
-import { createLog, newLogId } from './createLog.ts';
+import { createLog, adoptLog, newLogId } from './createLog.ts';
 
 const KEY = Buffer.alloc(32, 8);
 
@@ -257,4 +257,116 @@ test('every generated id is URL-safe, and two of them differ', () => {
     ids.add(id);
   }
   assert.equal(ids.size, 200, 'ids must not repeat');
+});
+
+// Ein bestehendes Repo übernehmen (spec §8): trägt es schon eine
+// release-log.json, gilt deren id; sonst schreibt die App eine mit frischer
+// id. Nie ein neues Repo, nie eine README über eine fremde.
+const ADOPT = { accountId: 42, login: 'octocat', owner: 'octocat', repoName: 'shop', product: 'Shop' };
+
+test('adopting a repository without release-log.json writes one and indexes it, and touches nothing else', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = { 'README.md': '# my own readme\n', 'releases/1.0.0.json': JSON.stringify({ version: '1.0.0', date: '2026-01-01', published_at: null, headline: 'first' }) };
+    const result = await adoptLog(h, { ...ADOPT, view: 'timeline' });
+    assert.equal(result.ok, true, result.ok ? '' : `${result.error}: ${result.message}`);
+    if (!result.ok) return;
+    assert.deepEqual(h.createRepoCalls, [], 'no repository is created');
+    assert.deepEqual(h.commits, ['release-log.json'], 'only the config is written, the README stays the owner\'s');
+    const written = JSON.parse(String(h.repos['octocat/shop']['release-log.json']));
+    assert.deepEqual(written, { id: result.value.logId, product: 'Shop', view: 'timeline', visibility: 'public', curation_notes: null });
+    const row = h.db.select().from(log).all()[0];
+    assert.equal(row.publicId, result.value.logId);
+    assert.equal(row.repoName, 'shop');
+    assert.equal(result.value.url, `https://example.test/l/${result.value.logId}`);
+  });
+});
+
+test('adopting an empty repository writes the config into it', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = {};
+    const result = await adoptLog(h, ADOPT);
+    assert.equal(result.ok, true, result.ok ? '' : `${result.error}: ${result.message}`);
+    assert.deepEqual(h.commits, ['release-log.json']);
+  });
+});
+
+test('adopting a repository that already carries a valid release-log.json keeps its id and writes nothing', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = { 'release-log.json': JSON.stringify({ id: 'existing-id', product: 'Shop Classic', view: 'full', visibility: 'public' }) };
+    const result = await adoptLog(h, { ...ADOPT, product: 'Form Name' });
+    assert.equal(result.ok, true, result.ok ? '' : `${result.error}: ${result.message}`);
+    if (!result.ok) return;
+    assert.equal(result.value.logId, 'existing-id');
+    assert.deepEqual(h.commits, []);
+    assert.equal(h.db.select().from(log).all()[0].product, 'Shop Classic', 'the file wins over the form');
+  });
+});
+
+test('adopting a repository whose release-log.json is broken is refused with the validator\'s reasons', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = { 'release-log.json': JSON.stringify({ product: 'no id' }) };
+    const result = await adoptLog(h, ADOPT);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, 'invalid_document');
+    assert.match(result.message, /config\.id/);
+    assert.deepEqual(h.commits, []);
+  });
+});
+
+test('adopting needs write access on the repository, not just visibility', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = {};
+    h.gh = { ...h.gh, collaboratorPermission: async () => 'read' };
+    const result = await adoptLog(h, ADOPT);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, 'forbidden');
+    assert.deepEqual(h.commits, []);
+  });
+});
+
+test('adopting a repository that already has a log is a conflict', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/shop'] = {};
+    assert.equal((await adoptLog(h, ADOPT)).ok, true);
+    const again = await adoptLog(h, ADOPT);
+    assert.equal(again.ok, false);
+    if (again.ok) return;
+    assert.equal(again.error, 'conflict');
+    assert.match(again.message, /already has a release log/);
+    assert.equal(h.commits.length, 1, 'the second attempt writes nothing');
+  });
+});
+
+test('adopting a repository whose release-log.json id belongs to another log is a conflict', async () => {
+  await withHarness(async (h) => {
+    h.repos['octocat/first'] = { 'release-log.json': JSON.stringify({ id: 'same-id', product: 'First' }) };
+    await h.syncNow({ owner: 'octocat', repo: 'first' });
+    h.repos['octocat/shop'] = { 'release-log.json': JSON.stringify({ id: 'same-id', product: 'Copy' }) };
+    const result = await adoptLog(h, ADOPT);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, 'conflict');
+    assert.match(result.message, /same-id/);
+  });
+});
+
+test('adopting a repository the installation cannot see is repo_not_installed', async () => {
+  await withHarness(async (h) => {
+    const result = await adoptLog(h, ADOPT);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, 'repo_not_installed');
+  });
+});
+
+test('adopting on someone else\'s account is refused, not attempted', async () => {
+  await withHarness(async (h) => {
+    h.repos['some-org/shop'] = {};
+    const result = await adoptLog(h, { ...ADOPT, owner: 'some-org' });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, 'forbidden');
+  });
 });

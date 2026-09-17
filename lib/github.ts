@@ -155,6 +155,44 @@ export function userRepoCreator(http: Http): CreateUserRepo {
   };
 }
 
+// Die Vorschläge im Dialog „Neues Log" (spec §8: ein bestehendes Repo
+// übernehmen). Ebenfalls mit dem Nutzer-Token: /user/installations liefert
+// nur Installationen DIESER App, auf die der Mensch Zugriff hat, und deren
+// Repo-Liste nur, was er selbst sehen darf -- genau die Schnittmenge aus
+// „App freigegeben" und „meins". Nur das eigene Konto, wie bei createLog.
+export type InstalledRepo = { name: string; private: boolean };
+
+export type ListInstalledRepos = (token: string, owner: string) => Promise<
+  | { kind: 'ok'; repos: InstalledRepo[] }
+  | { kind: 'unauthorized' }
+  | { kind: 'unavailable'; status: number }
+>;
+
+// ponytail: höchstens 10 Seiten (1000 Repos); mehr braucht erst eine Suche.
+const MAX_REPO_PAGES = 10;
+
+export function userInstalledRepos(http: Http): ListInstalledRepos {
+  return async (token, owner) => {
+    const found = await http(`${API}/user/installations?per_page=100`, { headers: headers(token) });
+    if (found.status === 401 || found.status === 403) return { kind: 'unauthorized' };
+    if (!found.ok) return { kind: 'unavailable', status: found.status };
+    const { installations } = (await found.json()) as { installations: { id: number; account: { login: string } }[] };
+    const own = installations.find((i) => i.account.login.toLowerCase() === owner.toLowerCase());
+    if (!own) return { kind: 'ok', repos: [] };
+
+    const repos: InstalledRepo[] = [];
+    for (let page = 1; page <= MAX_REPO_PAGES; page++) {
+      const res = await http(`${API}/user/installations/${own.id}/repositories?per_page=100&page=${page}`, { headers: headers(token) });
+      if (res.status === 401 || res.status === 403) return { kind: 'unauthorized' };
+      if (!res.ok) return { kind: 'unavailable', status: res.status };
+      const body = (await res.json()) as { repositories: { name: string; private: boolean }[] };
+      repos.push(...body.repositories.map((r) => ({ name: r.name, private: r.private })));
+      if (body.repositories.length < 100) break;
+    }
+    return { kind: 'ok', repos };
+  };
+}
+
 // GitHubs Contents-API-Pfad trägt "/" als echten Pfadtrenner -- ihn als
 // Ganzes zu kodieren würde ihn selbst mitkodieren und die URL brechen.
 function encodePath(path: string): string {

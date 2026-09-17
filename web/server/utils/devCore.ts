@@ -47,7 +47,16 @@ export async function devBoot(migrationsFolder: string) {
       return { kind: 'committed' as const, sha: 'dev' }
     },
   }
+  // Zwei Repos ohne Log, damit „bestehendes Repo übernehmen“ im Dialog
+  // etwas vorzuschlagen hat (Anmeldung ?as=admin).
+  repos['admin/website'] = {}
+  repos['admin/shop'] = { 'README.md': Buffer.from('# Shop\n') }
   const booted = bootCore(env, { migrationsFolder, gh })
+  booted.auth.users.tokenFor = async () => ({ ok: true, token: 'dev' })
+  booted.auth.listRepos = async (_token, owner) => ({
+    kind: 'ok',
+    repos: Object.keys(repos).filter((k) => k.startsWith(`${owner}/`)).map((k) => ({ name: k.slice(owner.length + 1), private: false })),
+  })
   await syncLog(booted.db, gh, { owner: 'dev', repo: 'demo' })
   return booted
 }

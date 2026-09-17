@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { blobSha, fakeGitHub, githubClient, userRepoCreator } from './github.ts';
+import { blobSha, fakeGitHub, githubClient, userRepoCreator, userInstalledRepos } from './github.ts';
 import { fakeHttp } from './http.ts';
 import { installations } from './appAuth.ts';
 import type { Installations } from './appAuth.ts';
@@ -502,4 +502,44 @@ test('userRepoCreator maps 422, 401/403 and a 5xx to three different answers', a
     const result = await userRepoCreator(http)('t', { name: 'r', description: '', private: false });
     assert.equal(result.kind, kind, `HTTP ${status} must mean ${kind}`);
   }
+});
+
+// Die Vorschlagsliste im Dialog „Neues Log": nur Repos, die die App auf dem
+// EIGENEN Konto sehen darf. /user/installations mit einem Nutzer-Token
+// liefert ausschließlich Installationen dieser App, auf die der Mensch
+// Zugriff hat -- fremde Organisationen fallen über account.login heraus.
+test('userInstalledRepos lists the repositories of the installation on the own account, across pages', async () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `repo-${i}`, private: i % 2 === 0, owner: { login: 'octocat' } }));
+  const http = fakeHttp({
+    'GET /user/installations?per_page=100': { body: { installations: [
+      { id: 7, account: { login: 'some-org' } },
+      { id: 9, account: { login: 'octocat' } },
+    ] } },
+    'GET /user/installations/9/repositories?per_page=100&page=1': { body: { repositories: page1 } },
+    'GET /user/installations/9/repositories?per_page=100&page=2': { body: { repositories: [{ name: 'last', private: false, owner: { login: 'octocat' } }] } },
+  });
+  const result = await userInstalledRepos(http)('gho_user', 'octocat');
+  assert.equal(result.kind, 'ok');
+  const repos = result.kind === 'ok' ? result.repos : [];
+  assert.equal(repos.length, 101, 'the second page is read too');
+  assert.deepEqual(repos[0], { name: 'repo-0', private: true });
+  assert.deepEqual(repos[100], { name: 'last', private: false });
+  assert.equal(http.calls.some((c) => c.includes('/installations/7/')), false, 'another account\'s installation is never read');
+});
+
+test('userInstalledRepos answers an empty list when the app is not installed on the own account', async () => {
+  const http = fakeHttp({
+    'GET /user/installations?per_page=100': { body: { installations: [{ id: 7, account: { login: 'some-org' } }] } },
+  });
+  assert.deepEqual(await userInstalledRepos(http)('t', 'octocat'), { kind: 'ok', repos: [] });
+});
+
+test('userInstalledRepos maps 401 to unauthorized and a 5xx to unavailable', async () => {
+  const dead = fakeHttp({ 'GET /user/installations?per_page=100': { status: 401 } });
+  assert.deepEqual(await userInstalledRepos(dead)('t', 'octocat'), { kind: 'unauthorized' });
+  const down = fakeHttp({
+    'GET /user/installations?per_page=100': { body: { installations: [{ id: 9, account: { login: 'octocat' } }] } },
+    'GET /user/installations/9/repositories?per_page=100&page=1': { status: 502 },
+  });
+  assert.deepEqual(await userInstalledRepos(down)('t', 'octocat'), { kind: 'unavailable', status: 502 });
 });

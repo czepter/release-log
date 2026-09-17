@@ -52,6 +52,7 @@ export async function withCtx(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
     adminLogins: ['admin'], baseUrl: 'https://example.test', http, gh, perms: permissions(db, gh),
     users: userTokens({ db, http, cipher: cipher(Buffer.alloc(32, 3)), clientId: 'client-id', clientSecret: 'client-secret' }),
     createRepo: async () => ({ kind: 'unavailable', status: 503 }),
+    listRepos: async () => ({ kind: 'ok', repos: [] }),
     onRepoWrite: (ref) => { ctx.repoWrites.push(ref); },
     syncNow: async () => {},
   };

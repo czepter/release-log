@@ -5,7 +5,7 @@ import { withCtx, signIn, addLog } from '../fixtures.ts';
 import type { Ctx } from '../fixtures.ts';
 import { log, release, media, syncError, repoPermission } from '../db/schema.ts';
 import type { Permissions } from '../permissions.ts';
-import { listLogs, createLogApi, logDetail, updateSettings, uploadMedia, deleteLog } from './logs.ts';
+import { listLogs, createLogApi, listRepoCandidates, logDetail, updateSettings, uploadMedia, deleteLog } from './logs.ts';
 
 const core = (ctx: Ctx) => ({ auth: ctx.auth, reader: ctx.reader });
 const body = (reply: { body: unknown }) => reply.body as Record<string, any>;
@@ -222,5 +222,62 @@ test('createLogApi: a repository name that is already taken answers 409 naming i
     const reply = await createLogApi({ auth, reader: ctx.reader }, who, { product: 'Auri CRM', repo_name: 'auri-release-log' });
     assert.equal(reply.status, 409);
     assert.match(body(reply).message, /auri-release-log/);
+  });
+});
+
+const USER_TOKEN = {
+  accessToken: 'gho_user_token', accessExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  refreshToken: 'ghr', refreshExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+};
+
+// Fällt, wenn die Vorschläge nicht über das Nutzer-Token des eigenen Kontos
+// laufen oder ein schon indiziertes Repo nicht als solches markieren.
+test('listRepoCandidates lists the app-visible repositories of the own account and marks those with a log', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.auth.users.store(who.accountId, USER_TOKEN);
+    addLog(ctx, 'existing', { repoOwner: 'dev', repoName: 'has-log' });
+    const seen: Array<[string, string]> = [];
+    const auth = {
+      ...ctx.auth,
+      listRepos: async (token: string, owner: string) => {
+        seen.push([token, owner]);
+        return { kind: 'ok' as const, repos: [{ name: 'shop', private: true }, { name: 'has-log', private: false }] };
+      },
+    };
+    const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);
+    assert.equal(reply.status, 200);
+    assert.deepEqual(seen, [['gho_user_token', 'dev']]);
+    assert.deepEqual(body(reply).repos, [
+      { name: 'has-log', private: false, hasLog: true },
+      { name: 'shop', private: true, hasLog: false },
+    ]);
+  });
+});
+
+test('listRepoCandidates without a usable user token answers 401 reauth_required', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    const reply = await listRepoCandidates(core(ctx), who);
+    assert.equal(reply.status, 401);
+    assert.equal(body(reply).error, 'reauth_required');
+
+    ctx.auth.users.store(who.accountId, USER_TOKEN);
+    const refused = await listRepoCandidates({ auth: { ...ctx.auth, listRepos: async () => ({ kind: 'unauthorized' as const }) }, reader: ctx.reader }, who);
+    assert.equal(refused.status, 401);
+    assert.equal(body(refused).error, 'reauth_required');
+  });
+});
+
+// Fällt, wenn existing: true doch ein neues Repo anlegt.
+test('createLogApi with existing: true adopts the repository instead of creating one', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.permission.shop = 'write';
+    let created = 0;
+    const auth = { ...ctx.auth, createRepo: async () => { created++; return { kind: 'name_taken' as const }; } };
+    await createLogApi({ auth, reader: ctx.reader }, who, { product: 'Shop', repo_name: 'shop', existing: true });
+    assert.equal(created, 0);
+    assert.deepEqual(ctx.puts.map((p) => `${p.ref.owner}/${p.ref.repo}:${p.path}`), ['dev/shop:release-log.json']);
   });
 });

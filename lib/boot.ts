@@ -9,7 +9,7 @@ import { openDb } from './db/client.ts';
 import type { Db } from './db/client.ts';
 import { readConfig } from './config.ts';
 import { installations } from './appAuth.ts';
-import { githubClient, userRepoCreator } from './github.ts';
+import { githubClient, userRepoCreator, userInstalledRepos } from './github.ts';
 import type { GitHub } from './github.ts';
 import { withRetry } from './http.ts';
 import type { Http } from './http.ts';
@@ -80,6 +80,7 @@ export function bootCore(env: NodeJS.ProcessEnv, opts: { migrationsFolder?: stri
       // anlegen (oder das erste als „Name vergeben" zurückmelden), wenn die
       // erste Antwort unterwegs verloren ging. Anlegen ist nicht idempotent.
       createRepo: userRepoCreator(authHttp),
+      listRepos: userInstalledRepos(authHttp),
       onRepoWrite: (ref) => { queue.enqueue(ref); },
       // Durch dieselbe Warteschlange wie jeder andere Abgleich, nur
       // abgewartet: zwei Läufe auf demselben Repo würden einander die Sweeps

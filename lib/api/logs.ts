@@ -3,13 +3,13 @@ import { log, release, media, syncError, repoPermission } from '../db/schema.ts'
 import { parseConfig } from '../document.ts';
 import type { ReleaseDoc } from '../document.ts';
 import { sortReleases } from '../order.ts';
-import { createLog } from '../createLog.ts';
+import { createLog, adoptLog } from '../createLog.ts';
 import { mediaTypeOf } from '../mediaTypes.ts';
 import { MEDIA_MAX_BYTES } from '../index.ts';
 import { logAccess } from '../access.ts';
 import type { LoggedIn, LogRow } from '../access.ts';
 import type { Core, Reply } from './core.ts';
-import { ok, fail, NOT_FOUND, FORBIDDEN, text } from './core.ts';
+import { ok, fail, NOT_FOUND, FORBIDDEN, text, field } from './core.ts';
 
 function summary(row: LogRow) {
   return {
@@ -34,7 +34,9 @@ const CREATE_STATUS: Record<string, number> = {
 };
 
 export async function createLogApi({ auth }: Core, who: LoggedIn, input: unknown): Promise<Reply> {
-  const created = await createLog(
+  // existing: true übernimmt ein vorhandenes Repo, statt eins anzulegen.
+  const run = field(input, 'existing') === true ? adoptLog : createLog;
+  const created = await run(
     { db: auth.db, gh: auth.gh, users: auth.users, createRepo: auth.createRepo, syncNow: auth.syncNow, baseUrl: auth.baseUrl },
     {
       accountId: who.accountId, login: who.login, owner: who.login,
@@ -48,6 +50,25 @@ export async function createLogApi({ auth }: Core, who: LoggedIn, input: unknown
   // Ein Fehlschlag heißt oft, dass auf GitHub trotzdem etwas entstanden ist
   // (das Repo). Die Nachricht aus createLog sagt, was als Nächstes zu tun ist.
   return fail(CREATE_STATUS[created.error] ?? 502, created.error, created.message);
+}
+
+// Die Vorschläge im Dialog „Neues Log“: Repos auf dem eigenen Konto, die
+// die App sehen darf; hasLog markiert die, die schon ein Log sind.
+export async function listRepoCandidates({ auth }: Core, who: LoggedIn): Promise<Reply> {
+  const reauth = fail(401, 'reauth_required', 'Für die Repository-Liste bitte neu bei GitHub anmelden.');
+  const token = await auth.users.tokenFor(who.accountId);
+  if (!token.ok) return token.error === 'reauth_required' ? reauth : fail(502, 'github_unavailable', 'GitHub antwortet gerade nicht.');
+  const listed = await auth.listRepos(token.token, who.login);
+  if (listed.kind === 'unauthorized') {
+    auth.users.forget(who.accountId);
+    return reauth;
+  }
+  if (listed.kind === 'unavailable') return fail(502, 'github_unavailable', `GitHub antwortete mit HTTP ${listed.status}.`);
+  const withLog = new Set(auth.db.select({ name: log.repoName }).from(log).where(eq(log.repoOwner, who.login)).all().map((r) => r.name));
+  const repos = listed.repos
+    .map((r) => ({ name: r.name, private: r.private, hasLog: withLog.has(r.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return ok({ repos });
 }
 
 export async function logDetail({ auth }: Core, who: LoggedIn, logId: string): Promise<Reply> {

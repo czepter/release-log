@@ -13,7 +13,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Db } from './db/client.ts';
 import { log } from './db/schema.ts';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { GitHub, RepoRef, CreateUserRepo } from './github.ts';
 import type { UserTokens } from './userTokens.ts';
 import { parseConfig } from './document.ts';
@@ -200,4 +200,97 @@ export async function createLog(deps: CreateLogDeps, input: CreateLogInput): Pro
   }
 
   return { ok: true, value: { logId, url: `${baseUrl}/l/${logId}`, owner: ref.owner, repo: ref.repo } };
+}
+
+// „Bestehendes Repo übernehmen" (spec §8). Kein Nutzer-Token: das Repo gibt
+// es schon, also läuft alles über die Installation. Dafür eine Prüfung, die
+// createLog nicht braucht: das Installations-Token darf mehr als der
+// Mensch, also muss GitHub bestätigen, dass ER schreiben darf.
+export async function adoptLog(deps: CreateLogDeps, input: CreateLogInput): Promise<CreateLogResult> {
+  const { db, gh, syncNow, baseUrl } = deps;
+  const newId = deps.newId ?? newLogId;
+
+  if (input.owner !== input.login) {
+    return {
+      ok: false, error: 'forbidden',
+      message: `only repositories on your own account (${input.login}) can be adopted, not on ${input.owner}`,
+    };
+  }
+  if (!REPO_NAME.test(input.repoName)) {
+    return {
+      ok: false, error: 'invalid_document',
+      message: 'repo_name: 1-100 characters from A-Z a-z 0-9 . _ -, starting with a letter or digit',
+    };
+  }
+
+  const asked: RepoRef = { owner: input.owner, repo: input.repoName };
+  const probed = await gh.probe(asked);
+  if (probed.kind === 'no_installation' || probed.kind === 'gone') {
+    return {
+      ok: false, error: 'repo_not_installed',
+      message: `The GitHub App cannot see ${asked.owner}/${asked.repo}. Add it to the installation at ${INSTALL_URL}, then try again.`,
+    };
+  }
+  const ref: RepoRef = probed.kind === 'ready'
+    ? { owner: probed.owner ?? asked.owner, repo: probed.repo ?? asked.repo }
+    : asked;
+
+  const permission = await gh.collaboratorPermission(ref, input.login);
+  if (permission !== 'admin' && permission !== 'write') {
+    return { ok: false, error: 'forbidden', message: `you have no write access to ${ref.owner}/${ref.repo}` };
+  }
+
+  const byRepo = () => db.select().from(log)
+    .where(and(eq(log.repoOwner, ref.owner), eq(log.repoName, ref.repo))).all()[0];
+  const entry = probed.kind === 'ready'
+    ? (await gh.tree(ref, probed.head)).find((e) => e.path === 'release-log.json')
+    : undefined;
+
+  if (entry) {
+    const bytes = await gh.blob(ref, entry.sha);
+    let raw: unknown = null;
+    try { raw = JSON.parse(String(bytes)); } catch { /* parseConfig meldet es */ }
+    const parsed = parseConfig(raw);
+    if (!parsed.ok) {
+      return { ok: false, error: 'invalid_document', message: `release-log.json in ${ref.owner}/${ref.repo}: ${parsed.errors.join('; ')}` };
+    }
+    // Eine kopierte Datei trägt die id eines anderen Logs -- der Index würde
+    // sie diesem Repo nicht geben, und die Antwort zeigte ins Leere.
+    const holder = db.select().from(log).where(eq(log.publicId, parsed.value.id)).all()[0];
+    // Ein schon indiziertes Repo landet ebenfalls hier: seine eigene id ist
+    // vergeben.
+    if (holder) {
+      return {
+        ok: false, error: 'conflict',
+        message: holder.repoOwner === ref.owner && holder.repoName === ref.repo
+          ? `${ref.owner}/${ref.repo} already has a release log`
+          : `the id ${parsed.value.id} in release-log.json already belongs to ${holder.repoOwner}/${holder.repoName}`,
+      };
+    }
+  } else {
+    const parsed = parseConfig({
+      id: newId(), product: input.product, view: input.view, visibility: input.visibility, curation_notes: null,
+    });
+    if (!parsed.ok) return { ok: false, error: 'invalid_document', message: parsed.errors.join('; ') };
+    const commit = await gh.putFile(
+      ref, 'release-log.json', Buffer.from(`${JSON.stringify(parsed.value, null, 2)}\n`, 'utf8'),
+      'adopt repository as release log', null,
+    );
+    if (commit.kind === 'no_installation') {
+      return { ok: false, error: 'repo_not_installed', message: `The GitHub App cannot write to ${ref.owner}/${ref.repo}. Add it to the installation at ${INSTALL_URL}.` };
+    }
+    if (commit.kind === 'conflict') {
+      return { ok: false, error: 'conflict', message: `${ref.owner}/${ref.repo} got a release-log.json in the meantime; try again` };
+    }
+  }
+
+  await syncNow(ref);
+  const row = byRepo();
+  if (!row) {
+    return {
+      ok: false, error: 'github_unavailable',
+      message: `${ref.owner}/${ref.repo} carries its release-log.json, but the index has not picked it up yet; it appears within the hour without any further action`,
+    };
+  }
+  return { ok: true, value: { logId: row.publicId, url: `${baseUrl}/l/${row.publicId}`, owner: ref.owner, repo: ref.repo } };
 }
