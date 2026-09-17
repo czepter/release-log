@@ -3,14 +3,15 @@ import { ArrowDown, ArrowRight, ChevronDown, Globe, Pencil, Plug, ScrollText } f
 
 definePageMeta({ layout: 'public' })
 
-// Wer angemeldet ist, will arbeiten (Spec, Entscheidung 33).
+// Wer angemeldet ist, will arbeiten (Spec, Entscheidung 33). useAsyncData
+// reicht das Ergebnis vom Server durch; ein nackter Abruf liefe beim
+// Hydratisieren ein zweites Mal und stünde als 401 in der Konsole.
 const session = useSession()
 if (!session.value) {
-  try {
-    session.value = await useRequestFetch()<Session>('/api/session')
-  } catch {
-    // 401: nicht angemeldet, die Seite rendert.
-  }
+  const request = useRequestFetch()
+  // 401 heißt: nicht angemeldet, die Seite rendert.
+  const { data } = await useAsyncData('landing-session', () => request<Session>('/api/session').catch(() => null))
+  session.value = data.value
 }
 if (session.value) await navigateTo('/dashboard', { redirectCode: 302 })
 
@@ -219,7 +220,7 @@ const faqs = [
         </div>
 
         <div class="rounded-2xl border bg-card px-5 pt-6 pb-8 sm:px-14 sm:pt-12 sm:pb-12">
-          <ol class="flex flex-col">
+          <ol class="flex flex-col [&>li:last-child]:pb-0">
             <AppReleaseEntry :release="showcase.latest" :href="showcase.latest.href" :collapsible="false" last />
             <AppReleaseTeaser v-for="release in showcase.older" :key="release.version" :release="release" />
           </ol>
