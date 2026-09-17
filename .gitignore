@@ -10,3 +10,8 @@ logs/*
 
 # sabotage backups from the fix loop, never part of the tree
 *.bak
+
+# Nuxt
+web/.nuxt
+web/.output
+web/node_modules

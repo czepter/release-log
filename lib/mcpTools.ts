@@ -13,7 +13,8 @@ import type { Reader } from './store.ts';
 import type { Permissions } from './permissions.ts';
 import { sortReleases, latestOf } from './order.ts';
 import { lookupAccessToken } from './oauth.ts';
-import { parseRelease } from './document.ts';
+import { writeRelease, setPublished } from './releaseWrites.ts';
+import type { WriteResult } from './releaseWrites.ts';
 import type { GitHub, RepoRef, CreateUserRepo } from './github.ts';
 import type { UserTokens } from './userTokens.ts';
 import { createLog } from './createLog.ts';
@@ -25,6 +26,17 @@ type CallToolResult = { content: Array<{ type: 'text'; text: string }>; isError?
 
 function toolOk(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value) }] };
+}
+
+// Die Fehler von lib/releaseWrites.ts in der Form, die MCP-Clients seit
+// jeher bekommen: ein write_release-Konflikt trägt den aktuellen Stand als
+// JSON in der Nachricht.
+function toToolResult(result: WriteResult): CallToolResult {
+  if (result.ok) return toolOk({ commit_sha: result.commitSha, permalink: result.permalink });
+  if (result.current) {
+    return toolError(result.error, JSON.stringify({ current_blob_sha: result.current.blobSha, current_document: result.current.document }));
+  }
+  return toolError(result.error, result.message);
 }
 
 function toolError(error: string, message: string): CallToolResult {
@@ -70,6 +82,7 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
     const rawToken = ctx.authInfo?.token;
     const who = rawToken ? lookupAccessToken(db, rawToken) : null;
     const scopes = ctx.authInfo?.scopes ?? [];
+    const writeDeps = { db, perms, gh, onRepoWrite, baseUrl };
 
     // Erreichbarkeit: öffentlich ODER Schreibrecht (dieselbe Regel wie die
     // gehostete Seite, Task 15, spec §7). Ein privater, nicht erreichbarer
@@ -152,44 +165,7 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
       },
       async ({ log_id, version, document, base_blob_sha }) => {
         if (!scopes.includes('logs:write')) return toolError('forbidden', 'logs:write scope required');
-        const row = db.select().from(log).where(eq(log.publicId, log_id)).all()[0];
-        if (!row) return toolError('not_found', `no such log: ${log_id}`);
-        // Frozen ist unconditional (kein Admin-Ausnahmefall wie im
-        // Dashboard, s. Task-16-Kontext): das Repo ist unerreichbar, also
-        // wird nicht erst ein GitHub-Aufruf riskiert, um Schreibrecht zu
-        // prüfen, der ohnehin nur scheitern kann.
-        if (row.state === 'frozen') return toolError('log_frozen', 'this log is frozen; its repository is unreachable');
-        const ref = { owner: row.repoOwner, repo: row.repoName };
-        const canWriteThis = who !== null && await perms.canWrite(who.accountId, who.login, row.publicId, ref);
-        if (!canWriteThis) return toolError('forbidden', 'no write access to this repository');
-
-        const parsed = parseRelease(document, `${version}.json`);
-        if (!parsed.ok) return toolError('invalid_document', parsed.errors.join('; '));
-
-        const existing = db.select().from(releaseTable)
-          .where(and(eq(releaseTable.logId, log_id), eq(releaseTable.version, version))).all()[0];
-        // Blindes Überschreiben ist ausgeschlossen (spec §6): existiert die
-        // Version schon UND wurde keine base_blob_sha mitgegeben, ist das
-        // ein Konflikt, ohne dass überhaupt ein Netzwerk-Aufruf stattfindet.
-        if (existing && !base_blob_sha) {
-          return toolError('conflict', JSON.stringify({ current_blob_sha: existing.blobSha, current_document: JSON.parse(existing.doc) }));
-        }
-
-        const path = `releases/${version}.json`;
-        const content = Buffer.from(JSON.stringify(parsed.value, null, 2), 'utf8');
-        const result = await gh.putFile(ref, path, content, `write release ${version} via MCP`, base_blob_sha ?? null);
-        if (result.kind === 'no_installation') {
-          return toolError('no_installation', 'the GitHub App is not installed on this repository');
-        }
-        if (result.kind === 'conflict') {
-          const fresh = db.select().from(releaseTable)
-            .where(and(eq(releaseTable.logId, log_id), eq(releaseTable.version, version))).all()[0];
-          return toolError('conflict', JSON.stringify({
-            current_blob_sha: fresh?.blobSha ?? null, current_document: fresh ? JSON.parse(fresh.doc) : null,
-          }));
-        }
-        onRepoWrite(ref);
-        return toolOk({ commit_sha: result.sha, permalink: `${baseUrl}/l/${log_id}/r/${encodeURIComponent(version)}` });
+        return toToolResult(await writeRelease(writeDeps, who, log_id, version, document, base_blob_sha ?? null));
       },
     );
 
@@ -199,31 +175,7 @@ export function buildMcpServer(deps: McpToolDeps): McpServerFactory {
     // aktuell bekannte blobSha ist immer die expectedSha.
     async function togglePublish(logId: string, version: string, publishedAt: string | null): Promise<CallToolResult> {
       if (!scopes.includes('logs:write')) return toolError('forbidden', 'logs:write scope required');
-      const row = db.select().from(log).where(eq(log.publicId, logId)).all()[0];
-      if (!row) return toolError('not_found', `no such log: ${logId}`);
-      // Frozen ist unconditional (wie write_release, Task 16): das Repo ist
-      // unerreichbar, also wird nicht erst ein GitHub-Aufruf riskiert, um
-      // Schreibrecht zu prüfen, der ohnehin nur scheitern kann.
-      if (row.state === 'frozen') return toolError('log_frozen', 'this log is frozen; its repository is unreachable');
-      const ref = { owner: row.repoOwner, repo: row.repoName };
-      const canWriteThis = who !== null && await perms.canWrite(who.accountId, who.login, row.publicId, ref);
-      if (!canWriteThis) return toolError('forbidden', 'no write access to this repository');
-
-      const existing = db.select().from(releaseTable)
-        .where(and(eq(releaseTable.logId, logId), eq(releaseTable.version, version))).all()[0];
-      if (!existing) return toolError('not_found', `no such version: ${version}`);
-
-      const doc = { ...JSON.parse(existing.doc), published_at: publishedAt };
-      const path = `releases/${version}.json`;
-      const content = Buffer.from(JSON.stringify(doc, null, 2), 'utf8');
-      const message = `${publishedAt !== null ? 'publish' : 'unpublish'} release ${version} via MCP`;
-      const result = await gh.putFile(ref, path, content, message, existing.blobSha);
-      if (result.kind === 'no_installation') return toolError('no_installation', 'the GitHub App is not installed on this repository');
-      if (result.kind === 'conflict') {
-        return toolError('conflict', 'the release changed since it was last read; call get_release and try again');
-      }
-      onRepoWrite(ref);
-      return toolOk({ commit_sha: result.sha, permalink: `${baseUrl}/l/${logId}/r/${encodeURIComponent(version)}` });
+      return toToolResult(await setPublished(writeDeps, who, logId, version, publishedAt));
     }
 
     server.registerTool(

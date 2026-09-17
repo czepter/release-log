@@ -7,45 +7,30 @@
 // with write access), reading the `viewer` this handler already computed.
 
 import { createServer } from 'node:http';
-import type { Server, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { route } from './lib/public.ts';
 import type { Viewer } from './lib/public.ts';
 import type { Reader } from './lib/store.ts';
 import { verifySignature, refsFor, permissionInvalidationRefsFor } from './lib/webhook.ts';
 import type { RepoRef } from './lib/github.ts';
-import { openDb } from './lib/db/client.ts';
 import type { Db } from './lib/db/client.ts';
-import { account, log, syncError, release, media, repoPermission, allowlist } from './lib/db/schema.ts';
+import { account, log } from './lib/db/schema.ts';
 import { eq } from 'drizzle-orm';
-import { escapeHtml, page } from './lib/render.ts';
-import { publicPage, renderReleaseFull, renderTimeline } from './lib/renderPublic.ts';
-import { sortReleases } from './lib/order.ts';
 import type { GitHub } from './lib/github.ts';
 import type { Permissions } from './lib/permissions.ts';
-import { indexReader } from './lib/indexReader.ts';
-import { readConfig } from './lib/config.ts';
-import { parseConfig } from './lib/document.ts';
-import { installations } from './lib/appAuth.ts';
-import { githubClient } from './lib/github.ts';
-import { withRetry } from './lib/http.ts';
 import type { Http } from './lib/http.ts';
 import { createSessionCookie, verifySessionCookie, isAdmin, isAllowed, SESSION_MAX_AGE_SECONDS } from './lib/session.ts';
 import { exchangeCodeForLogin } from './lib/login.ts';
-import { permissions } from './lib/permissions.ts';
-import { syncLog, MEDIA_MAX_BYTES } from './lib/index.ts';
-import { mediaTypeOf } from './lib/mediaTypes.ts';
-import { syncQueue } from './lib/syncQueue.ts';
-import { startReconcile } from './lib/reconcile.ts';
-import { registerClient, findClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, listConnectedClients, revokeAllForClient, lookupAccessToken } from './lib/oauth.ts';
-import { isValidCodeChallenge } from './lib/pkce.ts';
+import { MEDIA_MAX_BYTES } from './lib/index.ts';
+import { bootCore } from './lib/boot.ts';
+import { registerClient, mintAuthorizationCode, redeemAuthorizationCode, mintTokenPair, rotateRefreshToken, lookupAccessToken } from './lib/oauth.ts';
+import { accountFromCookie, cookieValue } from './lib/access.ts';
+import type { LoggedIn } from './lib/access.ts';
+import { checkAuthorizeRequest, denyLocation } from './lib/oauthRequest.ts';
 import { redeemUploadToken } from './lib/uploads.ts';
-import { createLog } from './lib/createLog.ts';
 import type { UserTokens } from './lib/userTokens.ts';
-import { userTokens } from './lib/userTokens.ts';
-import { cipher } from './lib/secrets.ts';
 import type { CreateUserRepo } from './lib/github.ts';
-import { userRepoCreator } from './lib/github.ts';
 import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
@@ -97,52 +82,8 @@ export type Auth = {
   syncNow(ref: RepoRef): Promise<void>;
 };
 
-type LoggedIn = { accountId: number; login: string };
-
-// Read the session cookie, look up the account -- exactly what /me already
-// does, now in one place for every dashboard route.
-function currentAccount(req: import('node:http').IncomingMessage, auth: Auth): LoggedIn | null {
-  const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
-  if (!session) return null;
-  const row = auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0];
-  return row ? { accountId: session.accountId, login: row.login } : null;
-}
-
-// Schreibrecht für eine ganze Liste von Logs auf einmal. Zwei Seiten
-// brauchen das -- die Log-Liste des Dashboards und der
-// Zustimmungsbildschirm von /oauth/authorize -- und beide fragten es
-// nacheinander ab: ein `await` je Zeile in einer Schleife, also N
-// GitHub-Roundtrips hintereinander, bevor die Seite überhaupt zu rendern
-// beginnt (bei kaltem Cache spürbar, sonst gar nicht). Die Abfragen hängen
-// nicht voneinander ab, also laufen sie zusammen. Was jede einzelne
-// entscheidet, bleibt unverändert: `perms.canWrite` fragt GitHub, nicht
-// diese Datei.
-//
-// Das Ergebnis kommt als Map je publicId zurück, nicht als Array parallel
-// zur Eingabe: der Aufrufer darf Zeilen weglassen, für die er ohnehin nicht
-// fragen will (das Dashboard tut genau das für eingefrorene Logs eines
-// Admins), ohne dass ein Index verrutscht.
-async function canWriteEach(
-  perms: Permissions, who: LoggedIn, rows: Array<typeof log.$inferSelect>,
-): Promise<Map<string, boolean>> {
-  const answers = await Promise.all(rows.map(async (row) => [
-    row.publicId,
-    await perms.canWrite(who.accountId, who.login, row.publicId, { owner: row.repoOwner, repo: row.repoName }),
-  ] as const));
-  return new Map(answers);
-}
-
-// A tiny request-cookie parser: Node's IncomingMessage never splits the
-// `cookie` header for you, and pulling in a dependency for "find one
-// name=value pair" would be the opposite of lazy.
-function cookieValue(header: string | undefined, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return undefined;
+function currentAccount(req: IncomingMessage, auth: Auth): LoggedIn | null {
+  return accountFromCookie(auth, req.headers.cookie);
 }
 
 // The last-resort net: log the message only (never the whole error object,
@@ -169,37 +110,6 @@ function readFormBody(req: import('node:http').IncomingMessage): Promise<URLSear
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => resolve(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))));
     req.on('error', reject);
-  });
-}
-
-const ALLOWED_SCOPES = ['logs:read', 'logs:write'];
-
-// Task 4's isAcceptableRedirectUri checks a value being REGISTERED (must be
-// https, or http on loopback). This checks a value PRESENTED at /oauth/authorize
-// against what was registered -- exact match, except the redirect_uri's port
-// may vary from what was registered when both are loopback (RFC 8252): a
-// native client picks its callback port at OS-assigned random each run, so
-// pinning one exact port at registration time would be unusable.
-function redirectUriMatches(registered: string[], presented: string): boolean {
-  if (registered.includes(presented)) return true;
-  let presentedUrl: URL;
-  try {
-    presentedUrl = new URL(presented);
-  } catch {
-    return false;
-  }
-  if (presentedUrl.protocol !== 'http:') return false;
-  // URL.hostname returns the bracketed form for IPv6 ('[::1]', not '::1');
-  // both are listed so an already-unbracketed value still matches.
-  if (!['127.0.0.1', '::1', '[::1]', 'localhost'].includes(presentedUrl.hostname)) return false;
-  return registered.some((r) => {
-    try {
-      const reg = new URL(r);
-      return reg.protocol === 'http:' && reg.hostname === presentedUrl.hostname
-        && reg.pathname === presentedUrl.pathname && reg.search === presentedUrl.search;
-    } catch {
-      return false;
-    }
   });
 }
 
@@ -258,7 +168,16 @@ function readBodyWithin(
   });
 }
 
+export type CoreHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
 export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
+  return createServer(createHandler(reader, hooks, auth));
+}
+
+// Der ganze Kern als eine Funktion über Nodes req/res: server.ts lauscht
+// damit selbst (Tests, npm start), Nuxt ruft ihn für die Protokoll-Routen
+// im selben Prozess auf (Entscheidung 24).
+export function createHandler(reader: Reader, hooks?: Hooks, auth?: Auth): CoreHandler {
   const oauthRegisterLimiter = rateLimiter(10, 60 * 60 * 1000); // 10 je Stunde
   const oauthTokenLimiter = rateLimiter(60, 60 * 1000); // 60 je Minute
   const mcpVerifier: OAuthTokenVerifier | null = !auth ? null : {
@@ -279,7 +198,7 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
       })
       : () => new McpServer({ name: 'release-log-hub', version: '1.0.0' }),
   ));
-  return createServer(async (req, res) => {
+  return async (req, res) => {
     // Everything below runs inside one try/catch: a synchronous throw
     // anywhere in here -- e.g. isAllowed's db.select() on a locked or
     // corrupted sqlite file, which runs for every /auth/github/callback
@@ -429,8 +348,8 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // -- there is no secret here for a timing side-channel to extract, so
         // plain equality is deliberate, not an oversight (plan, "Abweichungen").
         if (!code || !state || !cookieState || state !== cookieState) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Anmeldung fehlgeschlagen', '<p>Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.</p>'));
+          res.writeHead(302, { location: '/anmeldung?fehler=state' });
+          res.end();
           return;
         }
 
@@ -451,8 +370,8 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           login = null;
         }
         if (!login) {
-          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('GitHub nicht erreichbar', '<p>Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.</p>'));
+          res.writeHead(302, { location: '/anmeldung?fehler=github' });
+          res.end();
           return;
         }
 
@@ -460,8 +379,8 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         // The allowlist check runs before anything is written: a denied
         // person must leave zero trace -- no account row, no session cookie.
         if (!isAllowed(auth.db, identity.login, auth.adminLogins)) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen.</p>'));
+          res.writeHead(302, { location: '/anmeldung?fehler=denied' });
+          res.end();
           return;
         }
 
@@ -505,408 +424,11 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           res.end(JSON.stringify({ error: 'not_found' }));
           return;
         }
-        // Wie bei /me: ein Browser bekommt eine Seite. Bewusst keine
-        // Weiterleitung zum Login -- GitHub würde sofort still neu anmelden.
-        if ((req.headers.accept ?? '').includes('text/html')) {
-          res.writeHead(200, {
-            'content-type': 'text/html; charset=utf-8',
-            'set-cookie': 'session=; Max-Age=0; Path=/',
-          });
-          res.end(page('Abgemeldet', '<h1>Abgemeldet</h1><p>Du bist abgemeldet.</p><p><a href="/dashboard">Erneut anmelden</a></p>'));
-          return;
-        }
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'set-cookie': 'session=; Max-Age=0; Path=/',
         });
         res.end(JSON.stringify({ loggedOut: true }));
-        return;
-      }
-
-      // Wer die nackte Adresse im Browser öffnet, landet im Dashboard -- das
-      // leitet ohne Session selbst zum Login weiter. Absolut auf baseUrl,
-      // weil das oauth_state-Cookie auf demselben Host liegen muss, auf den
-      // GitHub zurückleitet (sonst scheitert der Login von 127.0.0.1 aus).
-      // Ohne auth bleibt / 404.
-      if (pathname === '/' && method === 'GET' && auth) {
-        res.writeHead(302, { location: `${auth.baseUrl}/dashboard` });
-        res.end();
-        return;
-      }
-
-      if (pathname === '/dashboard' && method === 'GET') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        const isTheAdmin = isAdmin(who.login, auth.adminLogins);
-        const allLogs = auth.db.select().from(log).all();
-        // A frozen log is never "writable" for anyone -- GitHub answers a
-        // permission lookup on a deleted repo with 404, which
-        // collaboratorPermission reads as null. Without this exception a
-        // frozen log would become permanently unreachable in the
-        // dashboard, including for deletion (spec, plan deviation 7). Für
-        // genau diese Zeilen wird deshalb gar nicht erst gefragt -- der
-        // Aufruf könnte nur scheitern.
-        const adminSeesFrozen = (row: typeof log.$inferSelect): boolean => row.state === 'frozen' && isTheAdmin;
-        const writable = await canWriteEach(auth.perms, who, allLogs.filter((row) => !adminSeesFrozen(row)));
-        const rows: string[] = [];
-        for (const row of allLogs) {
-          const visible = adminSeesFrozen(row) || writable.get(row.publicId) === true;
-          if (!visible) continue;
-          rows.push(`<tr><td><a href="/dashboard/logs/${encodeURIComponent(row.publicId)}">${escapeHtml(row.product)}</a></td><td class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)}</td><td>${row.state === 'frozen' ? '<span class="badge">eingefroren</span>' : ''}</td></tr>`);
-        }
-        const body = `
-          <h1>Deine Logs</h1>
-          ${rows.length > 0
-            ? `<table><thead><tr><th>Produkt</th><th>Repository</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
-            : `<p class="muted">Keine Logs, auf die du gerade Schreibrechte hast.</p>`}
-          <h2>Neues Log anlegen</h2>
-          <p class="muted">Legt ein Repository auf deinem GitHub-Konto (${escapeHtml(who.login)}) an, schreibt die erste
-            <code>release-log.json</code> hinein und nimmt es in den Index auf. Die GitHub App muss das neue
-            Repository sehen dürfen.</p>
-          <form method="POST" action="/dashboard/logs/new">
-            <p><label>Produkt<br><input name="product" required maxlength="200"></label></p>
-            <p><label>Repository-Name<br><input name="repo_name" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._-]*"></label></p>
-            <p><label>Ansicht<br><select name="view"><option value="full">full</option><option value="timeline">timeline</option></select></label></p>
-            <p><label>Sichtbarkeit<br><select name="visibility"><option value="public">public</option><option value="private">private</option></select></label></p>
-            <button type="submit">Anlegen</button>
-          </form>
-          ${isTheAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
-          <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
-          <p><a href="/dashboard/connections">Verbundene Clients</a></p>
-          <p><a href="/me">Dein Konto</a></p>
-        `;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page('Dashboard', body));
-        return;
-      }
-
-      // Derselbe Ablauf wie das MCP-Werkzeug create_log, nur mit der
-      // Session statt einem Bearer-Token als Ausweis (spec §6, §8).
-      if (pathname === '/dashboard/logs/new' && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        const form = await readFormBody(req);
-        const created = await createLog(
-          {
-            db: auth.db, gh: auth.gh, users: auth.users, createRepo: auth.createRepo,
-            syncNow: auth.syncNow, baseUrl: auth.baseUrl,
-          },
-          {
-            accountId: who.accountId, login: who.login, owner: who.login,
-            repoName: (form.get('repo_name') ?? '').trim(),
-            product: (form.get('product') ?? '').trim(),
-            view: form.get('view') ?? undefined,
-            visibility: form.get('visibility') ?? undefined,
-          },
-        );
-        if (created.ok) {
-          res.writeHead(302, { location: `/dashboard/logs/${encodeURIComponent(created.value.logId)}` });
-          res.end();
-          return;
-        }
-        // Ein Fehlschlag heißt oft, dass auf GitHub trotzdem etwas
-        // entstanden ist (das Repo). Die Meldung sagt deshalb, was als
-        // Nächstes zu tun ist, statt nur „ging nicht".
-        const status = created.error === 'forbidden' ? 403
-          : created.error === 'invalid_document' ? 400
-            : created.error === 'conflict' || created.error === 'repo_not_installed' ? 409
-              : created.error === 'reauth_required' ? 401
-                : 502;
-        const again = created.error === 'reauth_required'
-          ? '<p><a href="/auth/github/login">Neu bei GitHub anmelden</a></p>'
-          : '<p><a href="/dashboard">Zurück zum Dashboard</a></p>';
-        res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page('Log nicht angelegt', `<p>${escapeHtml(created.message)}</p>${again}`));
-        return;
-      }
-
-      const dashboardLog = /^\/dashboard\/logs\/([^/]+)$/.exec(pathname);
-      if (dashboardLog && method === 'GET') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        const logId = dashboardLog[1];
-        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
-        if (!row) {
-          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Nicht gefunden', '<p>Dieses Log gibt es nicht.</p>'));
-          return;
-        }
-        const ref = { owner: row.repoOwner, repo: row.repoName };
-        const isTheAdmin = isAdmin(who.login, auth.adminLogins);
-        // Same frozen-admin exception as /dashboard: a deleted repo answers
-        // every permission lookup as 404/null, which would otherwise lock
-        // even an admin out of a frozen log's own page (spec, plan deviation 7).
-        const allowed = row.state === 'frozen' && isTheAdmin
-          ? true
-          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
-        if (!allowed) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Du hast keine Schreibrechte auf dieses Repository.</p>'));
-          return;
-        }
-
-        const errors = auth.db.select().from(syncError).where(eq(syncError.logId, logId)).all();
-        const errorRows = errors.map((e) =>
-          `<tr><td>${escapeHtml(e.path)}</td><td>${escapeHtml(e.message)}</td></tr>`,
-        ).join('');
-
-        const releases = auth.db.select().from(release).where(eq(release.logId, logId)).all();
-        const releaseRows = releases.map((r) =>
-          `<tr><td>${escapeHtml(r.version)}</td><td>${escapeHtml(r.date)}</td><td>${r.publishedAt ? 'Veröffentlicht' : 'Entwurf'}</td></tr>`,
-        ).join('');
-
-        // Nur hier, hinter canWrite/der frozen-admin-Ausnahme oben: diese
-        // Route ist nicht die anonyme Fläche, für die Spec §7 identische
-        // 404s verlangt (lib/github.ts's Kommentar dazu) -- ein angemeldetes,
-        // berechtigtes Konto darf den Installationsstand live sehen (Plan,
-        // Abweichung 5).
-        const probeResult = await auth.gh.probe(ref);
-        const installationLabel = probeResult.kind === 'no_installation'
-          ? 'keine Installation'
-          : probeResult.kind === 'gone'
-          ? 'Repo nicht mehr auffindbar'
-          : 'erreichbar';
-
-        const body = `
-          <p><a href="/dashboard">&larr; alle Logs</a></p>
-          <h1>${escapeHtml(row.product)}</h1>
-          <p class="muted">${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)} &middot; ${row.state === 'frozen' ? 'eingefroren' : 'aktiv'} &middot; zuletzt abgeglichen: ${row.indexedAt ? escapeHtml(row.indexedAt) : 'nie'} &middot; <span class="badge">${installationLabel}</span></p>
-
-          <h2>Einstellungen</h2>
-          <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/settings">
-            <input type="hidden" name="expected_sha" value="${escapeHtml(row.configBlobSha ?? '')}">
-            <label for="view">Ansicht</label>
-            <select id="view" name="view">
-              <option value="full" ${row.view === 'full' ? 'selected' : ''}>Vollständig</option>
-              <option value="timeline" ${row.view === 'timeline' ? 'selected' : ''}>Zeitstrahl</option>
-            </select>
-            <label for="visibility">Sichtbarkeit</label>
-            <select id="visibility" name="visibility">
-              <option value="public" ${row.visibility === 'public' ? 'selected' : ''}>Öffentlich</option>
-              <option value="private" ${row.visibility === 'private' ? 'selected' : ''}>Privat</option>
-            </select>
-            <label for="curation_notes">Kurationshinweise</label>
-            <textarea id="curation_notes" name="curation_notes">${escapeHtml(row.curationNotes ?? '')}</textarea>
-            <button type="submit">Speichern</button>
-          </form>
-
-          ${errors.length > 0
-            ? `<h2>Abgleichfehler</h2><table><thead><tr><th>Pfad</th><th>Meldung</th></tr></thead><tbody>${errorRows}</tbody></table>`
-            : ''}
-
-          ${releases.length > 0
-            ? `<h2>Releases</h2><table><thead><tr><th>Version</th><th>Datum</th><th>Status</th></tr></thead><tbody>${releaseRows}</tbody></table>`
-            : ''}
-
-          <h2>Medien</h2>
-          <input type="file" id="media-file" accept=".png,.jpg,.jpeg,.webp">
-          <button type="button" id="media-submit">Hochladen</button>
-          <p class="muted" id="media-status"></p>
-          <script>
-            document.getElementById('media-submit').addEventListener('click', async () => {
-              const input = document.getElementById('media-file');
-              const status = document.getElementById('media-status');
-              const file = input.files[0];
-              if (!file) { status.textContent = 'Bitte zuerst eine Datei auswählen.'; return; }
-              status.textContent = 'Lädt hoch…';
-              const res = await fetch(${JSON.stringify(`/dashboard/logs/${encodeURIComponent(row.publicId)}/media`)}, {
-                method: 'POST',
-                headers: { 'content-type': file.type || 'application/octet-stream', 'x-filename': encodeURIComponent(file.name) },
-                body: file,
-              });
-              status.textContent = res.ok ? 'Hochgeladen. Der Abgleich läuft.' : 'Fehlgeschlagen: ' + res.status;
-            });
-          </script>
-
-          <h2>Löschen</h2>
-          <form method="POST" action="/dashboard/logs/${encodeURIComponent(row.publicId)}/delete">
-            <label for="confirm_name">Gib „${escapeHtml(row.product)}" ein, um das endgültige Löschen zu bestätigen</label>
-            <input type="text" id="confirm_name" name="confirm_name">
-            <button type="submit">Log endgültig löschen</button>
-          </form>
-        `;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page(row.product, body));
-        return;
-      }
-
-      const settingsMatch = /^\/dashboard\/logs\/([^/]+)\/settings$/.exec(pathname);
-      if (settingsMatch && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        const logId = settingsMatch[1];
-        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
-        if (!row) {
-          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Nicht gefunden', '<p>Dieses Log gibt es nicht.</p>'));
-          return;
-        }
-        const ref = { owner: row.repoOwner, repo: row.repoName };
-        const allowed = row.state === 'frozen' && isAdmin(who.login, auth.adminLogins)
-          ? true
-          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
-        if (!allowed) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Du hast keine Schreibrechte auf dieses Repository.</p>'));
-          return;
-        }
-
-        const form = await readFormBody(req);
-        // Dieselbe Prüfung wie der Index (spec §6): ein Dokument, das der
-        // Index verwerfen würde, erreicht das Repo nicht.
-        const candidate = {
-          id: row.publicId,
-          product: row.product,
-          view: form.get('view'),
-          visibility: form.get('visibility'),
-          curation_notes: form.get('curation_notes') === '' ? null : form.get('curation_notes'),
-        };
-        const parsed = parseConfig(candidate);
-        if (!parsed.ok) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Ungültige Einstellungen', `<p>${escapeHtml(parsed.errors.join('; '))}</p>`));
-          return;
-        }
-
-        const content = Buffer.from(JSON.stringify(parsed.value, null, 2) + '\n', 'utf8');
-        // URLSearchParams.get returns '' (never null) for a present-but-empty
-        // field, but putFile treats null as "create new" and anything else
-        // (including '') as a sha to check against GitHub -- so an empty
-        // submitted value must become null here, not pass through as "".
-        const expectedSha = form.get('expected_sha') || null;
-        const result = await auth.gh.putFile(
-          ref, 'release-log.json', content, 'update release-log.json settings via dashboard', expectedSha,
-        );
-        if (result.kind === 'conflict') {
-          res.writeHead(409, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Zwischenzeitlich geändert', '<p>Jemand anderes hat die Einstellungen inzwischen geändert. Bitte die Seite neu laden und erneut versuchen.</p>'));
-          return;
-        }
-        if (result.kind === 'no_installation') {
-          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Nicht erreichbar', '<p>Die GitHub-Installation erreicht dieses Repository gerade nicht.</p>'));
-          return;
-        }
-
-        auth.onRepoWrite(ref);
-        res.writeHead(302, { location: `/dashboard/logs/${encodeURIComponent(row.publicId)}` });
-        res.end();
-        return;
-      }
-
-      const mediaUploadMatch = /^\/dashboard\/logs\/([^/]+)\/media$/.exec(pathname);
-      if (mediaUploadMatch && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'unauthorized' }));
-          return;
-        }
-        const logId = mediaUploadMatch[1];
-        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
-        if (!row) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const ref = { owner: row.repoOwner, repo: row.repoName };
-        const allowed = row.state === 'frozen' && isAdmin(who.login, auth.adminLogins)
-          ? true
-          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
-        if (!allowed) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'forbidden' }));
-          return;
-        }
-
-        const rawName = req.headers['x-filename'];
-        let filename: string;
-        try {
-          filename = decodeURIComponent(String(rawName ?? ''));
-        } catch {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'bad_filename' }));
-          return;
-        }
-        // Ein reiner Dateiname, keine Pfadstruktur: media/<Name> ist die
-        // einzige Form, die dieser Upload je erzeugen darf.
-        if (filename === '' || filename.includes('/') || filename.includes('\\') || filename === '.' || filename === '..') {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'bad_filename' }));
-          return;
-        }
-        const contentType = mediaTypeOf(filename);
-        if (!contentType) {
-          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'unsupported_type' }));
-          return;
-        }
-
-        const bytes = await readBodyWithin(req, res, MEDIA_MAX_BYTES);
-        if (bytes === null) return;
-        // expectedSha: null -- ein Medien-Upload legt immer eine neue
-        // Datei an, nie ersetzt er eine bestehende. Existiert der Pfad
-        // schon, lehnt GitHub mit 422 ab (dieselbe Ablehnung, die add_media
-        // als path_exists kennt, spec §6): ein überschriebenes Bild würde
-        // sonst jedes veröffentlichte Release stillschweigend ändern, das
-        // darauf zeigt.
-        const result = await auth.gh.putFile(
-          ref, `media/${filename}`, bytes, `add media/${filename} via dashboard`, null,
-        );
-        if (result.kind === 'conflict') {
-          res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'path_exists' }));
-          return;
-        }
-        if (result.kind === 'no_installation') {
-          res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_installed' }));
-          return;
-        }
-        auth.onRepoWrite(ref);
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true }));
         return;
       }
 
@@ -975,217 +497,6 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         auth.onRepoWrite(ref);
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ ok: true, path: mediaPath, content_type: contentType, commit_sha: result.sha }));
-        return;
-      }
-
-      const deleteMatch = /^\/dashboard\/logs\/([^/]+)\/delete$/.exec(pathname);
-      if (deleteMatch && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        const logId = deleteMatch[1];
-        const row = auth.db.select().from(log).where(eq(log.publicId, logId)).all()[0];
-        if (!row) {
-          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Nicht gefunden', '<p>Dieses Log gibt es nicht.</p>'));
-          return;
-        }
-        const ref = { owner: row.repoOwner, repo: row.repoName };
-        const allowed = row.state === 'frozen' && isAdmin(who.login, auth.adminLogins)
-          ? true
-          : await auth.perms.canWrite(who.accountId, who.login, row.publicId, ref);
-        if (!allowed) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Du hast keine Schreibrechte auf dieses Repository.</p>'));
-          return;
-        }
-
-        const form = await readFormBody(req);
-        if (form.get('confirm_name') !== row.product) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Name stimmt nicht', `<p>Der eingegebene Name stimmt nicht mit „${escapeHtml(row.product)}" überein. Nichts wurde gelöscht.</p>`));
-          return;
-        }
-
-        auth.db.delete(release).where(eq(release.logId, logId)).run();
-        auth.db.delete(media).where(eq(media.logId, logId)).run();
-        auth.db.delete(syncError).where(eq(syncError.logId, logId)).run();
-        auth.db.delete(repoPermission).where(eq(repoPermission.logId, logId)).run();
-        auth.db.delete(log).where(eq(log.publicId, logId)).run();
-
-        res.writeHead(302, { location: '/dashboard' });
-        res.end();
-        return;
-      }
-
-      if (pathname === '/admin/allowlist' && method === 'GET') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        if (!isAdmin(who.login, auth.adminLogins)) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
-          return;
-        }
-        const entries = auth.db.select().from(allowlist).all();
-        const rows = entries.map((e) =>
-          `<tr><td>${escapeHtml(e.githubLogin)}</td><td class="muted">${escapeHtml(e.note ?? '')}</td><td class="muted">${escapeHtml(e.addedBy)}, ${escapeHtml(e.addedAt)}</td><td><form method="POST" action="/admin/allowlist/${encodeURIComponent(e.githubLogin)}/delete"><button type="submit">Entfernen</button></form></td></tr>`,
-        ).join('');
-        const body = `
-          <p><a href="/dashboard">&larr; Dashboard</a></p>
-          <h1>Zulassungsliste</h1>
-          <table><thead><tr><th>Login</th><th>Notiz</th><th>Hinzugefügt</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-          <h2>Hinzufügen</h2>
-          <form method="POST" action="/admin/allowlist">
-            <label for="github_login">GitHub-Login</label>
-            <input type="text" id="github_login" name="github_login" required>
-            <label for="note">Notiz</label>
-            <input type="text" id="note" name="note">
-            <button type="submit">Zulassen</button>
-          </form>
-        `;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page('Zulassungsliste', body));
-        return;
-      }
-
-      if (pathname === '/admin/allowlist' && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        if (!isAdmin(who.login, auth.adminLogins)) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
-          return;
-        }
-        const form = await readFormBody(req);
-        const login = form.get('github_login');
-        if (!login) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Fehlender Login', '<p>Ein GitHub-Login ist erforderlich.</p>'));
-          return;
-        }
-        const note = form.get('note');
-        auth.db.insert(allowlist)
-          .values({ githubLogin: login, addedBy: who.login, addedAt: new Date().toISOString(), note: note === '' ? null : note })
-          .onConflictDoUpdate({
-            target: allowlist.githubLogin,
-            set: { addedBy: who.login, addedAt: new Date().toISOString(), note: note === '' ? null : note },
-          })
-          .run();
-        res.writeHead(302, { location: '/admin/allowlist' });
-        res.end();
-        return;
-      }
-
-      const allowlistDeleteMatch = /^\/admin\/allowlist\/([^/]+)\/delete$/.exec(pathname);
-      if (allowlistDeleteMatch && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        if (!isAdmin(who.login, auth.adminLogins)) {
-          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Kein Zugriff', '<p>Nur Admins verwalten die Zulassungsliste.</p>'));
-          return;
-        }
-        let targetLogin: string;
-        try {
-          targetLogin = decodeURIComponent(allowlistDeleteMatch[1]);
-        } catch {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Ungültige Anfrage', '<p>Der Login in der URL ist kein gültiges Percent-Encoding.</p>'));
-          return;
-        }
-        auth.db.delete(allowlist).where(eq(allowlist.githubLogin, targetLogin)).run();
-        res.writeHead(302, { location: '/admin/allowlist' });
-        res.end();
-        return;
-      }
-
-      if (pathname === '/dashboard/connections' && method === 'GET') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        const clients = listConnectedClients(auth.db, who.accountId);
-        const rows = clients.map((c) =>
-          `<tr><td>${escapeHtml(c.clientName)}</td><td class="muted">${escapeHtml(c.scope)}</td><td><form method="POST" action="/dashboard/connections/${encodeURIComponent(c.clientId)}/revoke"><button type="submit">Trennen</button></form></td></tr>`,
-        ).join('');
-        const body = `
-          <p><a href="/dashboard">&larr; Dashboard</a></p>
-          <h1>Verbundene Clients</h1>
-          ${clients.length > 0
-            ? `<table><thead><tr><th>Client</th><th>Rechte</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-            : '<p class="muted">Keine verbundenen Clients.</p>'}
-        `;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page('Verbundene Clients', body));
-        return;
-      }
-
-      const connectionRevokeMatch = /^\/dashboard\/connections\/([^/]+)\/revoke$/.exec(pathname);
-      if (connectionRevokeMatch && method === 'POST') {
-        if (!auth) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const who = currentAccount(req, auth);
-        if (!who) {
-          res.writeHead(302, { location: '/auth/github/login' });
-          res.end();
-          return;
-        }
-        let clientId: string;
-        try {
-          clientId = decodeURIComponent(connectionRevokeMatch[1]);
-        } catch {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Ungültiger Client', '<p>Der Client-Bezeichner ist ungültig.</p>'));
-          return;
-        }
-        revokeAllForClient(auth.db, who.accountId, clientId, new Date().toISOString());
-        res.writeHead(302, { location: '/dashboard/connections' });
-        res.end();
         return;
       }
 
@@ -1284,116 +595,41 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
         return;
       }
 
-      if (pathname === '/oauth/authorize' && (method === 'GET' || method === 'POST')) {
+      // Die Zustimmungsseite (GET) rendert Nuxt über lib/api/consent.ts;
+      // hier wird nur die Entscheidung eingelöst.
+      if (pathname === '/oauth/authorize' && method === 'POST') {
         if (!auth) {
           res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ error: 'not_found' }));
           return;
         }
-        const params = method === 'GET' ? url.searchParams : await readFormBody(req);
-        const clientId = params.get('client_id') ?? '';
-        const redirectUri = params.get('redirect_uri') ?? '';
-        const client = findClient(auth.db, clientId);
-        // Unknown client or an unregistered redirect_uri: never redirect --
-        // there is no validated destination to send the error to (spec §5,
-        // "redirect URIs are checked exactly").
-        if (!client) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Unbekannter Client', '<p>Dieser Client ist nicht registriert.</p>'));
+        const params = await readFormBody(req);
+        const check = checkAuthorizeRequest(auth, 'POST', params, url.search.slice(1), currentAccount(req, auth));
+        if (check.kind === 'error') {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'invalid_request', error_description: check.reason }));
           return;
         }
-        if (!redirectUriMatches(client.redirectUris, redirectUri)) {
-          res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(page('Ungültige Redirect-URI', '<p>Diese Redirect-URI ist für diesen Client nicht registriert.</p>'));
-          return;
-        }
-
-        // From here on redirectUri is validated -- every further error may go there.
-        const state = params.get('state') ?? '';
-        const redirectWithError = (error: string): void => {
-          const target = new URL(redirectUri);
-          target.searchParams.set('error', error);
-          if (state) target.searchParams.set('state', state);
-          res.writeHead(302, { location: target.toString() });
-          res.end();
-        };
-
-        const codeChallenge = params.get('code_challenge') ?? '';
-        const codeChallengeMethod = params.get('code_challenge_method') ?? '';
-        // response_type only applies to the initial request (GET) -- it is
-        // not one of the fields the consent form round-trips (see the hidden
-        // fields below), so requiring it again on POST would reject every
-        // decision submission before it ever reaches the allow/deny check.
-        //
-        // isValidCodeChallenge ersetzt die frühere "nicht leer"-Prüfung: mit
-        // S256 ist eine Challenge immer 43 base64url-Zeichen (RFC 7636 §4.2).
-        // Was diese Form verfehlt, kann zu keinem gültigen Verifier gehören
-        // -- das hier ist die Grenze, an der eine Anfrage geprüft wird, also
-        // fällt es hier auf und nicht eine Minute später beim Einlösen.
-        if ((method === 'GET' && params.get('response_type') !== 'code') || !isValidCodeChallenge(codeChallenge) || codeChallengeMethod !== 'S256') {
-          redirectWithError('invalid_request');
-          return;
-        }
-        const scope = params.get('scope') ?? '';
-        const scopes = scope.split(' ').filter((s) => s !== '');
-        if (scopes.length === 0 || !scopes.every((s) => ALLOWED_SCOPES.includes(s))) {
-          redirectWithError('invalid_scope');
-          return;
-        }
-
-        const who = currentAccount(req, auth);
-        if (!who) {
-          const next = `/oauth/authorize?${url.search.slice(1)}`;
-          res.writeHead(302, { location: `/auth/github/login?next=${encodeURIComponent(next)}` });
+        if (check.kind === 'redirect' || check.kind === 'login') {
+          res.writeHead(302, { location: check.location });
           res.end();
           return;
         }
+        const { client, redirectUri, state, scope, codeChallenge, who } = check;
 
-        if (method === 'POST') {
-          const decision = params.get('decision');
-          if (decision !== 'allow') {
-            redirectWithError('access_denied');
-            return;
-          }
-          const code = mintAuthorizationCode(auth.db, {
-            clientId: client.clientId, redirectUri, codeChallenge, accountId: who.accountId, scope,
-          });
-          const target = new URL(redirectUri);
-          target.searchParams.set('code', code);
-          if (state) target.searchParams.set('state', state);
-          res.writeHead(302, { location: target.toString() });
+        if (params.get('decision') !== 'allow') {
+          res.writeHead(302, { location: denyLocation(redirectUri, state) });
           res.end();
           return;
         }
-
-        // GET, signed in: consent screen. Lists the logs this account
-        // currently has write access to -- purely informational, the actual
-        // enforcement stays live against GitHub (as in the dashboard, plan
-        // 6) and never depends on this display.
-        const allLogs = auth.db.select().from(log).all();
-        const writable = await canWriteEach(auth.perms, who, allLogs);
-        const affected = allLogs
-          .filter((row) => writable.get(row.publicId) === true)
-          .map((row) => `<li>${escapeHtml(row.product)} (${escapeHtml(row.repoOwner)}/${escapeHtml(row.repoName)})</li>`);
-        const body = `
-          <h1>${escapeHtml(client.clientName)} verbinden</h1>
-          <p>Dieser Client möchte Zugriff mit folgenden Rechten: <strong>${escapeHtml(scope)}</strong></p>
-          ${affected.length > 0
-            ? `<p>Betroffene Logs:</p><ul>${affected.join('')}</ul>`
-            : '<p class="muted">Aktuell keine Logs mit Schreibrecht.</p>'}
-          <form method="POST" action="/oauth/authorize">
-            <input type="hidden" name="client_id" value="${escapeHtml(client.clientId)}">
-            <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">
-            <input type="hidden" name="code_challenge" value="${escapeHtml(codeChallenge)}">
-            <input type="hidden" name="code_challenge_method" value="S256">
-            <input type="hidden" name="state" value="${escapeHtml(state)}">
-            <input type="hidden" name="scope" value="${escapeHtml(scope)}">
-            <button type="submit" name="decision" value="allow">Zulassen</button>
-            <button type="submit" name="decision" value="deny">Ablehnen</button>
-          </form>
-        `;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page('Verbindung erlauben', body));
+        const code = mintAuthorizationCode(auth.db, {
+          clientId: client.clientId, redirectUri, codeChallenge, accountId: who.accountId, scope,
+        });
+        const target = new URL(redirectUri);
+        target.searchParams.set('code', code);
+        if (state) target.searchParams.set('state', state);
+        res.writeHead(302, { location: target.toString() });
+        res.end();
         return;
       }
 
@@ -1462,48 +698,17 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
           res.end(JSON.stringify({ error: 'not_found' }));
           return;
         }
-        // Ein Browser schickt text/html im Accept-Header und bekommt eine
-        // Kontoseite; jeder andere Aufrufer behält das JSON von bisher.
-        const wantsHtml = (req.headers.accept ?? '').includes('text/html');
         const session = verifySessionCookie(auth.signingKey, cookieValue(req.headers.cookie, 'session'));
         const row = session
           ? auth.db.select().from(account).where(eq(account.githubUserId, session.accountId)).all()[0]
           : undefined;
         if (!row) {
-          if (wantsHtml) {
-            res.writeHead(302, { location: '/auth/github/login' });
-            res.end();
-            return;
-          }
           res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ error: 'unauthorized' }));
           return;
         }
-        const rowIsAdmin = isAdmin(row.login, auth.adminLogins);
-        if (!wantsHtml) {
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ login: row.login, isAdmin: rowIsAdmin }));
-          return;
-        }
-        const clientCount = listConnectedClients(auth.db, row.githubUserId).length;
-        const body = `
-          <p><a href="/dashboard">&larr; Dashboard</a></p>
-          <h1>Dein Konto</h1>
-          <p>
-            ${row.avatarUrl ? `<img src="${escapeHtml(row.avatarUrl)}" alt="" width="64" height="64" style="border-radius:50%;vertical-align:middle;margin-right:.75rem">` : ''}
-            <strong>${escapeHtml(row.login)}</strong>
-            <span class="badge">${rowIsAdmin ? 'Admin' : 'Mitglied'}</span>
-          </p>
-          <table><tbody>
-            <tr><th>GitHub</th><td><a href="https://github.com/${encodeURIComponent(row.login)}">github.com/${escapeHtml(row.login)}</a></td></tr>
-            <tr><th>Zuletzt angemeldet</th><td>${escapeHtml(row.lastSeenAt)}</td></tr>
-            <tr><th>Verbundene Clients</th><td><a href="/dashboard/connections">${clientCount}</a></td></tr>
-          </tbody></table>
-          ${rowIsAdmin ? `<p><a href="/admin/allowlist">Zulassungsliste verwalten</a></p>` : ''}
-          <form method="POST" action="/auth/logout" style="margin-top:2rem"><button type="submit">Abmelden</button></form>
-        `;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(page('Dein Konto', body));
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ login: row.login, isAdmin: isAdmin(row.login, auth.adminLogins) }));
         return;
       }
 
@@ -1523,68 +728,6 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
             if (await auth.perms.canWrite(who.accountId, who.login, viewerRow.publicId, ref)) viewer = 'member';
           }
         }
-      }
-
-      // url.pathname is percent-encoded (new URL never decodes it), so a media
-      // filename with a space or non-ASCII character only matches the file on
-      // disk once decoded. Decode the captured path exactly once, here, and
-      // never transform it again — a second decode is how a path guard gets
-      // bypassed (%252e%252e%252f survives one decode as %2e%2e%2f, and a
-      // second decode turns that into ../). decodeURIComponent throws on
-      // malformed input like %zz; that is a 404, not a crashed request.
-      const logPageMatch = /^\/l\/([^/]+)$/.exec(pathname);
-      if (logPageMatch && (method === 'GET' || method === 'HEAD')) {
-        const logId = logPageMatch[1];
-        const config = reader.config(logId);
-        // Ein nicht existierender und ein privater Log antworten identisch
-        // (spec §7) -- derselbe Grundsatz wie route() in lib/public.ts.
-        if (!config || (config.visibility === 'private' && viewer !== 'member')) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const releases = viewer === 'member' ? reader.releases(logId) : reader.releases(logId).filter((r) => r.published_at !== null);
-        const sorted = sortReleases(releases);
-        const body = config.view === 'timeline'
-          ? renderTimeline(logId, sorted)
-          : sorted.map((r) => renderReleaseFull(logId, r)).join('<hr>');
-        const html = publicPage(config.product, `<h1>${escapeHtml(config.product)}</h1>${body}`, { noindex: config.visibility === 'private' });
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(method === 'HEAD' ? undefined : html);
-        return;
-      }
-
-      const permalinkMatch = /^\/l\/([^/]+)\/r\/([^/]+)$/.exec(pathname);
-      if (permalinkMatch && (method === 'GET' || method === 'HEAD')) {
-        const logId = permalinkMatch[1];
-        const config = reader.config(logId);
-        if (!config || (config.visibility === 'private' && viewer !== 'member')) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        let version: string;
-        try {
-          version = decodeURIComponent(permalinkMatch[2]);
-        } catch {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const found = reader.releases(logId).find((r) => r.version === version);
-        if (!found || (found.published_at === null && viewer !== 'member')) {
-          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'not_found' }));
-          return;
-        }
-        const html = publicPage(
-          `${config.product} ${found.version}`,
-          `<p><a href="/l/${encodeURIComponent(logId)}">&larr; ${escapeHtml(config.product)}</a></p>${renderReleaseFull(logId, found)}`,
-          { noindex: config.visibility === 'private' },
-        );
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(method === 'HEAD' ? undefined : html);
-        return;
       }
 
       const mediaMatch = /^\/l\/([^/]+)\/media\/(.+)$/.exec(pathname);
@@ -1661,67 +804,16 @@ export function createApp(reader: Reader, hooks?: Hooks, auth?: Auth): Server {
     } catch (err) {
       respondInternalError(res, err);
     }
-  });
+  };
 }
 
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 8787);
-  const dbPath = process.env.DB_PATH ?? './release-log.sqlite';
-  const db = openDb(dbPath);
-
-  const config = readConfig(process.env);
-  // Node has no default fetch timeout: a hung connection would block this
-  // process's single in-flight sync indefinitely, stalling every
-  // repository's sync, not just the hung one. 30s is generous for a
-  // single GitHub API call, including the blobs a sync fetches one at a
-  // time. Same treatment as bin/reindex.ts, for the same reason.
-  const FETCH_TIMEOUT_MS = 30_000;
-  const gh = githubClient(
-    installations(config, withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }))),
-    withRetry((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })),
-  );
-  const queue = syncQueue(
-    async (ref) => { await syncLog(db, gh, ref); },
-    (ref, err) => { console.error(`${ref.owner}/${ref.repo}: ${(err as Error).message}`); },
-  );
-  startReconcile(db, queue);
-
-  const perms = permissions(db, gh);
-  const authHttp: Http = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  const users = userTokens({
-    db, http: authHttp, cipher: cipher(config.tokenEncryptionKey),
-    clientId: config.clientId, clientSecret: config.clientSecret,
-  });
-
+  const { reader, hooks, auth, dbPath } = bootCore(process.env);
   // Bind an explicit address: without a host Node listens on :: and takes
   // IPv4 only while nothing else holds it, so a busy port turns into a
   // silent IPv6-only start instead of an error (spec §12).
-  createApp(indexReader(db), {
-    webhookSecret: config.webhookSecret,
-    onDelivery: (refs) => { for (const ref of refs) queue.enqueue(ref); },
-    onPermissionInvalidation: (refs) => { for (const ref of refs) perms.invalidate(ref); },
-  }, {
-    db,
-    clientId: config.clientId,
-    clientSecret: config.clientSecret,
-    signingKey: config.signingKey,
-    adminLogins: config.adminLogins,
-    baseUrl: config.baseUrl,
-    http: authHttp,
-    gh,
-    perms,
-    users,
-    // Ohne withRetry, anders als jeder andere GitHub-Aufruf hier: ein
-    // Wiederholungsversuch auf POST /user/repos kann ein zweites Repo
-    // anlegen (oder das erste als „Name vergeben" zurückmelden), wenn die
-    // erste Antwort unterwegs verloren ging. Anlegen ist nicht idempotent.
-    createRepo: userRepoCreator(authHttp),
-    onRepoWrite: (ref) => { queue.enqueue(ref); },
-    // Durch dieselbe Warteschlange wie jeder andere Abgleich, nur
-    // abgewartet: zwei Läufe auf demselben Repo würden einander die Sweeps
-    // unter den Füßen wegziehen (s. lib/syncQueue.ts).
-    syncNow: async (ref) => { queue.enqueue(ref); await queue.idle(); },
-  }).listen(port, '127.0.0.1', () => {
+  createServer(createHandler(reader, hooks, auth)).listen(port, '127.0.0.1', () => {
     console.log(`release-log-hub on http://127.0.0.1:${port}, index at ${dbPath}`);
   });
 }
