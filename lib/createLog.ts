@@ -64,6 +64,10 @@ export type CreateLogDeps = {
   // demselben Repo würden einander die Sweeps unter den Füßen wegziehen.
   syncNow: (ref: RepoRef) => Promise<void>;
   baseUrl: string;
+  // Wie viele Logs ein Konto führen darf (MAX_LOGS_PER_OWNER); 0 hebt die
+  // Grenze auf. Sie zählt je Repo-Eigentümer, und beide Wege hierher legen
+  // eine Zeile an, also prüfen beide.
+  maxLogsPerOwner: number;
   newId?: () => string;
 };
 
@@ -71,6 +75,18 @@ export type CreateLogDeps = {
 // hinzufügt. Ohne App-Slug ist das die allgemeine Übersicht -- sie führt
 // zum Ziel, ohne dass der Dienst raten muss, wie er selbst heißt.
 const INSTALL_URL = 'https://github.com/settings/installations';
+
+function ownerAtLimit(db: Db, owner: string, max: number): boolean {
+  if (max <= 0) return false;
+  return db.select().from(log).where(eq(log.repoOwner, owner)).all().length >= max;
+}
+
+function tooManyLogs(owner: string, max: number): CreateLogResult {
+  return {
+    ok: false, error: 'forbidden',
+    message: `${owner} already has ${max} logs on this service; delete one before adding another`,
+  };
+}
 
 function readme(product: string, logId: string, baseUrl: string): string {
   return [
@@ -102,6 +118,7 @@ export async function createLog(deps: CreateLogDeps, input: CreateLogInput): Pro
       message: `create_log only creates repositories on your own account (${input.login}), not on ${input.owner}`,
     };
   }
+  if (ownerAtLimit(db, input.owner, deps.maxLogsPerOwner)) return tooManyLogs(input.owner, deps.maxLogsPerOwner);
   if (!REPO_NAME.test(input.repoName)) {
     return {
       ok: false, error: 'invalid_document',
@@ -216,6 +233,7 @@ export async function adoptLog(deps: CreateLogDeps, input: CreateLogInput): Prom
       message: `only repositories on your own account (${input.login}) can be adopted, not on ${input.owner}`,
     };
   }
+  if (ownerAtLimit(db, input.owner, deps.maxLogsPerOwner)) return tooManyLogs(input.owner, deps.maxLogsPerOwner);
   if (!REPO_NAME.test(input.repoName)) {
     return {
       ok: false, error: 'invalid_document',

@@ -459,7 +459,7 @@ function withAuth(fn: (auth: Auth, db: ReturnType<typeof openDb>) => Promise<voi
   return fn(
     {
       db, clientId: 'client-id', clientSecret: 'client-secret', signingKey: SIGNING_KEY,
-      adminLogins: ['octocat'], baseUrl: 'https://example.test', http,
+      adminLogins: ['octocat'], openSignup: false, maxLogsPerOwner: 10, baseUrl: 'https://example.test', http,
       gh, perms: permissions(db, gh), onRepoWrite: () => {},
       // Dieselben Vorgaben wie in lib/mcpTools.test.ts: vorhanden, damit
       // jede Route baut, und wirkungslos, bis ein Test sie ersetzt.

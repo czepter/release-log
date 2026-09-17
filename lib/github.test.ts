@@ -289,7 +289,7 @@ test('a 401 invalidates the token and the request is retried once', async () => 
     'GET /repos/o/r/commits/main': { body: { sha: 'c0ffee' } },
   });
   const inst = installations(
-    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', tokenEncryptionKey: Buffer.alloc(32, 7), adminLogins: ['tester'] },
+    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', tokenEncryptionKey: Buffer.alloc(32, 7), adminLogins: ['tester'], openSignup: false, maxLogsPerOwner: 10 },
     http,
   );
   const state = await githubClient(inst, http).probe(REF);
@@ -307,7 +307,7 @@ test('a 401 that survives the retry is reported, not retried forever', async () 
     'GET /repos/o/r': { status: 401 },
   });
   const inst = installations(
-    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', tokenEncryptionKey: Buffer.alloc(32, 7), adminLogins: ['tester'] },
+    { appId: '12345', privateKey: TEST_PEM, webhookSecret: 'shhh', baseUrl: 'https://example.test', clientId: 'Iv1.test', clientSecret: 'test-secret', signingKey: 'test-key', tokenEncryptionKey: Buffer.alloc(32, 7), adminLogins: ['tester'], openSignup: false, maxLogsPerOwner: 10 },
     http,
   );
   await assert.rejects(() => githubClient(inst, http).probe(REF), /HTTP 401/);

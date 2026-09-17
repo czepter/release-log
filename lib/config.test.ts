@@ -157,3 +157,17 @@ test('the thrown message never contains the encryption key itself', () => {
     assert.ok(!(err as Error).message.includes(secret), 'the key value must not appear in an error');
   }
 });
+
+test('readConfig: offene Anmeldung und Log-Grenze sind optional', () => {
+  const base = readConfig(COMPLETE);
+  assert.equal(base.openSignup, false);
+  assert.equal(base.maxLogsPerOwner, 10);
+
+  assert.equal(readConfig({ ...COMPLETE, OPEN_SIGNUP: '1' }).openSignup, true);
+  assert.equal(readConfig({ ...COMPLETE, OPEN_SIGNUP: 'true' }).openSignup, true);
+  assert.equal(readConfig({ ...COMPLETE, OPEN_SIGNUP: 'nein' }).openSignup, false);
+
+  assert.equal(readConfig({ ...COMPLETE, MAX_LOGS_PER_OWNER: '3' }).maxLogsPerOwner, 3);
+  assert.equal(readConfig({ ...COMPLETE, MAX_LOGS_PER_OWNER: '0' }).maxLogsPerOwner, 0);
+  assert.throws(() => readConfig({ ...COMPLETE, MAX_LOGS_PER_OWNER: 'viele' }), /MAX_LOGS_PER_OWNER/);
+});

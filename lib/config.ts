@@ -24,7 +24,22 @@ export type AppConfig = {
   // allowlist table — solves the chicken-and-egg problem of an empty
   // table locking everyone out forever (spec §5, decision 15).
   adminLogins: string[];
+  // Offene Anmeldung: jedes GitHub-Konto darf sich anmelden, die
+  // Zulassungsliste wird gar nicht erst befragt.
+  openSignup: boolean;
+  // Wie viele Logs ein Konto führen darf. 0 heißt: keine Grenze.
+  maxLogsPerOwner: number;
 };
+
+// 0 schaltet die Grenze ab; alles andere als eine ganze Zahl ist ein
+// Tippfehler und soll beim Start auffallen, nicht beim ersten create_log.
+const DEFAULT_MAX_LOGS = 10;
+
+function readMaxLogs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_LOGS;
+  if (!/^\d+$/.test(raw.trim())) throw new Error('MAX_LOGS_PER_OWNER must be a whole number (0 turns the limit off)');
+  return Number(raw.trim());
+}
 
 const REQUIRED = [
   'GITHUB_APP_ID',
@@ -59,6 +74,11 @@ export function readConfig(env: Record<string, string | undefined>): AppConfig {
   // scheitern, nicht erst beim ersten create_log.
   const tokenEncryptionKey = readEncryptionKey(env.TOKEN_ENCRYPTION_KEY as string);
 
+  // Optional, mit Vorgabe: eine Instanz ohne diese Variablen verhält sich
+  // wie vorher, geschlossen und mit zehn Logs je Konto.
+  const openSignup = env.OPEN_SIGNUP === '1' || env.OPEN_SIGNUP === 'true';
+  const maxLogsPerOwner = readMaxLogs(env.MAX_LOGS_PER_OWNER as string | undefined);
+
   const adminLogins = (env.ADMIN_LOGINS as string).split(',').map((s) => s.trim()).filter((s) => s !== '');
   if (adminLogins.length === 0) {
     // A non-empty variable that trims down to nothing is the same
@@ -77,5 +97,7 @@ export function readConfig(env: Record<string, string | undefined>): AppConfig {
     signingKey: env.SIGNING_KEY as string,
     tokenEncryptionKey,
     adminLogins,
+    openSignup,
+    maxLogsPerOwner,
   };
 }

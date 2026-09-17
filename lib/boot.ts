@@ -70,6 +70,8 @@ export function bootCore(env: NodeJS.ProcessEnv, opts: { migrationsFolder?: stri
       clientSecret: config.clientSecret,
       signingKey: config.signingKey,
       adminLogins: config.adminLogins,
+      openSignup: config.openSignup,
+      maxLogsPerOwner: config.maxLogsPerOwner,
       baseUrl: config.baseUrl,
       http: authHttp,
       gh,
