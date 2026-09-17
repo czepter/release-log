@@ -16,3 +16,13 @@ export const SECTION_TONE: Record<string, string> = {
   changed: 'bg-blue-100 text-blue-700',
   fixed: 'bg-orange-100 text-orange-700',
 }
+
+export type ShowcaseTeaser = {
+  version: string; date: string; headline: string; href: string
+  sections: { key: string; label: string; count: number }[]
+}
+export type Showcase = {
+  pageUrl: string; feedUrl: string; product: string
+  latest: PublicRelease & { href: string }
+  older: ShowcaseTeaser[]
+}

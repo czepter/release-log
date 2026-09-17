@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ChevronDown } from '@lucide/vue'
 
-const props = defineProps<{ logId: string; release: PublicRelease; collapsible: boolean; last?: boolean; permalink?: boolean }>()
+const props = defineProps<{ logId?: string; release: PublicRelease; collapsible: boolean; last?: boolean; permalink?: boolean; href?: string }>()
 
 // Zeitstrahl: nur der erste Abschnitt steht offen. Vollständig: alle.
 const open = ref<Record<string, boolean>>(Object.fromEntries(
@@ -26,7 +26,8 @@ const refs = (c: PublicChange) => [c.pr !== null ? `PR #${c.pr}` : null, ...c.is
 
     <article class="flex min-w-0 flex-col gap-4">
       <h2 class="text-[22px] leading-[30px] font-semibold tracking-tight">
-        <NuxtLink v-if="!permalink" :to="`/l/${encodeURIComponent(logId)}/r/${encodeURIComponent(release.version)}`" class="hover:underline">{{ release.headline }}</NuxtLink>
+        <a v-if="href" :href="href" class="hover:underline">{{ release.headline }}</a>
+        <NuxtLink v-else-if="!permalink && logId" :to="`/l/${encodeURIComponent(logId)}/r/${encodeURIComponent(release.version)}`" class="hover:underline">{{ release.headline }}</NuxtLink>
         <template v-else>{{ release.headline }}</template>
       </h2>
       <p v-for="(p, i) in release.body" :key="i" class="text-[15px] leading-[25px] text-muted-foreground">{{ p }}</p>
