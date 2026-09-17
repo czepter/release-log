@@ -15,3 +15,5 @@ logs/*
 web/.nuxt
 web/.output
 web/node_modules
+*.sqlite-shm
+*.sqlite-wal
