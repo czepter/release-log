@@ -17,7 +17,6 @@ export default defineNuxtConfig({
     },
   },
   routeRules: {
-    '/': { redirect: '/dashboard' },
     '/dashboard/connections': { redirect: '/konto' },
     '/admin/allowlist': { redirect: '/konto' },
   },
