@@ -57,7 +57,6 @@ const steps = [
 
 const faqs = [
   { q: 'Brauche ich ein GitHub-Konto?', a: 'Ja. Anmeldung und Rechte laufen über GitHub, und die GitHub App braucht Zugriff auf das Repository deines Logs.' },
-  { q: 'Wer bekommt Zugang?', a: 'Nur GitHub-Konten, die ein Admin auf die Zulassungsliste gesetzt hat. Frag den Admin deiner Instanz.' },
   { q: 'Welche MCP-Clients funktionieren?', a: 'Jeder Client, der MCP mit OAuth unterstützt. Beim ersten Verbinden registriert er sich selbst, und du bestätigst den Zugriff einmal im Browser.' },
   { q: 'Kann ich Releases vor der Veröffentlichung prüfen?', a: 'Ja. Jedes Release beginnt als Entwurf und ist nur für Konten mit Schreibrecht auf das Repository sichtbar.' },
   { q: 'Kann ich das Changelog in meine App einbauen?', a: 'Ja, über den JSON-Feed: /l/<id>/versions, /l/<id>/releases und /l/<id>/releases/<version>.' },
@@ -94,7 +93,6 @@ const faqs = [
             <Button as="a" :href="cta.href" size="lg" class="h-12 px-6"><AppGithubMark v-if="!session" class="size-[18px]" />{{ cta.label }}</Button>
             <Button v-if="showcase" as="a" href="#changelog" variant="outline" size="lg" class="h-12 px-6">Live-Changelog ansehen <ArrowRight class="size-4" /></Button>
           </div>
-          <p v-if="!session" class="text-[13px] text-muted-foreground">Anmelden können nur GitHub-Konten, die ein Admin freigeschaltet hat.</p>
         </div>
 
         <div class="overflow-hidden rounded-2xl border bg-background shadow-[0_24px_48px_-24px_rgba(24,24,27,0.18)]" aria-hidden="true">
