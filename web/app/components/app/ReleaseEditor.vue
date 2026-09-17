@@ -187,9 +187,19 @@ async function togglePublish() {
   }
 }
 
+// Eigener Dialog statt window.confirm; der Guard wartet auf die Antwort.
+const leaveOpen = ref(false)
+let answerLeave: ((leave: boolean) => void) | null = null
 onBeforeRouteLeave(() => {
-  if (dirty.value && !window.confirm('Ungespeicherte Änderungen verwerfen?')) return false
+  if (!dirty.value) return
+  leaveOpen.value = true
+  return new Promise<boolean>((resolve) => { answerLeave = resolve })
 })
+function closeLeave(leave: boolean) {
+  leaveOpen.value = false
+  answerLeave?.(leave)
+  answerLeave = null
+}
 </script>
 
 <template>
@@ -280,5 +290,18 @@ onBeforeRouteLeave(() => {
         </p>
       </aside>
     </div>
+
+    <Dialog :open="leaveOpen" @update:open="(o) => { if (!o) closeLeave(false) }">
+      <DialogContent :show-close-button="false" class="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Änderungen verwerfen?</DialogTitle>
+          <DialogDescription>Was seit dem letzten Speichern geändert wurde, geht verloren.</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" @click="closeLeave(false)">Weiter bearbeiten</Button>
+          <Button variant="destructive" @click="closeLeave(true)">Verwerfen</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
