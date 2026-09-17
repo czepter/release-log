@@ -23,11 +23,6 @@ const now = useNow()
 onMounted(() => { now.value = Date.now() })
 const frozen = computed(() => data.value?.state === 'frozen')
 const drafts = computed(() => (data.value?.releases ?? []).filter((r) => r.published_at === null).length)
-const INSTALLATION = {
-  reachable: 'GitHub App erreichbar',
-  no_installation: 'Keine Installation',
-  gone: 'Repo nicht mehr auffindbar',
-} as const
 
 // Einstellungen
 const settings = reactive({ view: 'full', visibility: 'public', curation_notes: '' })
@@ -117,7 +112,6 @@ async function deleteLog() {
           <span class="text-border">·</span>
           <Badge v-if="frozen" class="bg-amber-100 text-amber-800">Eingefroren</Badge>
           <Badge v-else class="bg-green-50 text-green-700"><span class="size-1.5 rounded-full bg-green-500" />Aktiv</Badge>
-          <Badge :variant="data.installation === 'reachable' ? 'outline' : 'destructive'">{{ INSTALLATION[data.installation] }}</Badge>
           <span class="text-border">·</span>
           <span>Zuletzt abgeglichen {{ relativeTime(data.indexedAt, now) }}</span>
         </div>
@@ -129,6 +123,19 @@ async function deleteLog() {
 
     <div class="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
       <div class="flex flex-col gap-6">
+        <Alert v-if="data.installation === 'no_installation'" variant="destructive">
+          <TriangleAlert />
+          <AlertTitle>Kein Zugriff auf das Repository</AlertTitle>
+          <AlertDescription>
+            Die GitHub App ist auf {{ data.owner }}/{{ data.repo }} nicht installiert. Bis sie wieder installiert ist, schlagen Speichern, Hochladen und Abgleich fehl.
+            <a :href="`https://github.com/${data.owner}/${data.repo}/settings/installations`" target="_blank" rel="noopener" class="underline">Installationen auf GitHub öffnen</a>
+          </AlertDescription>
+        </Alert>
+        <Alert v-else-if="data.installation === 'gone'" variant="destructive">
+          <TriangleAlert />
+          <AlertTitle>Repository nicht auffindbar</AlertTitle>
+          <AlertDescription>{{ data.owner }}/{{ data.repo }} gibt es auf GitHub nicht mehr, es wurde gelöscht oder umbenannt.</AlertDescription>
+        </Alert>
         <Alert v-if="data.errors.length > 0" variant="destructive">
           <TriangleAlert />
           <AlertTitle>{{ data.errors.length }} Abgleichfehler</AlertTitle>
