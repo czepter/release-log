@@ -65,3 +65,5 @@
 .ce-block__content { max-width: 760px; }
 .ce-toolbar__content { max-width: 760px; }
 .codex-editor { font-size: 17px; line-height: 28px; }
+/* Änderungs-Blöcke haben vier Typ-Einträge plus Verschieben/Löschen; 270px scrollt. */
+.ce-settings .ce-popover { --max-height: 400px; }

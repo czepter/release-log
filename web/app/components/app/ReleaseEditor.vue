@@ -227,7 +227,7 @@ function closeLeave(leave: boolean) {
     </header>
 
     <div class="grid flex-1 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <main class="flex justify-center px-4 pt-12 pb-32 sm:px-8">
+      <main class="flex justify-center px-4 pt-12 pb-32 sm:px-20">
         <div class="flex w-full max-w-[760px] flex-col gap-4">
           <Alert v-if="frozen" variant="destructive">
             <TriangleAlert />
@@ -284,10 +284,6 @@ function closeLeave(leave: boolean) {
           </div>
           <p v-if="imageBlocks > 1" class="text-xs text-amber-700">Ein Release hat ein Bild; nur das erste wird gespeichert.</p>
         </div>
-
-        <p class="rounded-lg border bg-background p-3 text-xs leading-[18px] text-muted-foreground">
-          Speichern committet die Datei ins Repository. Hat sich dort inzwischen etwas geändert, bricht der Commit ab und nichts wird überschrieben.
-        </p>
       </aside>
     </div>
 
