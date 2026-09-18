@@ -128,8 +128,12 @@ async function copy() {
       <p class="max-w-lg text-sm leading-relaxed text-muted-foreground">
         {{ t(m.dashboard.installText, { login: session?.login ?? '' }) }}
       </p>
+      <!-- Über /auth/github/install, nicht direkt auf die GitHub-Adresse:
+           die Route prägt den state, den GitHub nach der Installation an
+           den Callback zurückgibt. installUrl sagt hier nur, ob GitHub
+           überhaupt eine Installationsseite genannt hat. -->
       <Button v-if="installUrl" as-child size="lg" class="mt-1">
-        <a :href="installUrl">{{ m.dashboard.installAction }}<ExternalLink /></a>
+        <a href="/auth/github/install">{{ m.dashboard.installAction }}<ExternalLink /></a>
       </Button>
       <p class="text-[13px] text-muted-foreground">{{ m.dashboard.installScope }}</p>
     </div>

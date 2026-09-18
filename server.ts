@@ -343,6 +343,37 @@ export function createHandler(reader: Reader, hooks?: Hooks, auth?: Auth): CoreH
         return;
       }
 
+      // Der Weg zur Installation läuft über uns, nicht direkt auf
+      // github.com: GitHub schickt nach der Installation auf die
+      // Callback-URL zurück, und die verlangt einen state, der zu einem
+      // Cookie passt. Ein Link, den die Oberfläche selbst setzt, könnte
+      // beides nicht -- das Cookie ist HttpOnly. Also wird hier derselbe
+      // state geprägt wie bei der Anmeldung und an die Installations-URL
+      // gehängt, die GitHub unverändert zurückgibt.
+      if (pathname === '/auth/github/install' && method === 'GET') {
+        if (!auth) {
+          res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'not_found' }));
+          return;
+        }
+        const page = await auth.installUrl();
+        if (page === null) {
+          // Ohne Adresse gibt es kein Ziel. Zurück, statt irgendwohin.
+          res.writeHead(302, { location: '/dashboard' });
+          res.end();
+          return;
+        }
+        const state = randomBytes(32).toString('base64url');
+        const target = new URL(page);
+        target.searchParams.set('state', state);
+        res.writeHead(302, {
+          location: target.toString(),
+          'set-cookie': `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=600; Path=/auth/github`,
+        });
+        res.end();
+        return;
+      }
+
       if (pathname === '/auth/github/callback' && method === 'GET') {
         if (!auth) {
           res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });

@@ -534,6 +534,40 @@ test('two logins in a row get two different states', async () => {
   });
 });
 
+// Nach der Installation schickt GitHub zurück auf die Callback-URL. Ohne
+// state im Hinweg käme sie ohne state zurück und der Callback wiese sie ab
+// -- genau der Fehler, den ein frisch installiertes Konto zu sehen bekam.
+// Deshalb führt der Weg zu GitHub über eine eigene Route, die denselben
+// state setzt wie die Anmeldung; die CSRF-Prüfung bleibt, wie sie war.
+test('GET /auth/github/install carries a state to GitHub and remembers it in the cookie', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/install`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      const location = new URL(res.headers.get('location') as string);
+      assert.equal(location.origin, 'https://github.com');
+      assert.equal(location.pathname, '/apps/test-app/installations/new');
+      const state = location.searchParams.get('state');
+      assert.ok(state, 'a state parameter must be present');
+      assert.equal(cookieValue(res.headers.getSetCookie(), 'oauth_state'), state);
+      const rawLine = rawSetCookie(res.headers.getSetCookie(), 'oauth_state');
+      assert.match(rawLine as string, /HttpOnly/);
+      assert.match(rawLine as string, /Path=\/auth\/github/);
+    }, undefined, { ...auth, installUrl: async () => 'https://github.com/apps/test-app/installations/new' });
+  });
+});
+
+// Ohne Adresse gibt es nichts anzusteuern; dann zurück, statt irgendwohin.
+test('GET /auth/github/install falls back to the dashboard when GitHub names no page', async () => {
+  await withAuth(async (auth) => {
+    await withServer(reader, async (base) => {
+      const res = await fetch(`${base}/auth/github/install`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/dashboard');
+    }, undefined, { ...auth, installUrl: async () => null });
+  });
+});
+
 test('the callback rejects a state that does not match the cookie', async () => {
   await withAuth(async (auth) => {
     await withServer(reader, async (base) => {

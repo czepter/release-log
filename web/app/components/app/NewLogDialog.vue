@@ -170,7 +170,7 @@ async function submit() {
           </p>
           <p v-if="blocked" class="rounded-lg border bg-muted/40 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
             {{ blocked === 'no_installation' ? m.newLog.notInstalled : m.newLog.notSelected }}
-            <a v-if="installUrl" :href="installUrl" class="font-medium text-foreground underline">
+            <a v-if="installUrl" href="/auth/github/install" class="font-medium text-foreground underline">
               {{ blocked === 'no_installation' ? m.newLog.installApp : m.newLog.pickRepos }}
             </a>
           </p>
