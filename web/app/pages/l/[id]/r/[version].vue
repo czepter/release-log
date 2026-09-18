@@ -18,7 +18,8 @@ useHead({
 </script>
 
 <template>
-  <div class="mx-auto flex max-w-[1000px] flex-col gap-12 px-4 pt-16 pb-12 sm:px-6">
+  <AppPublicBar />
+  <div class="mx-auto flex max-w-[1000px] flex-col gap-12 px-4 pt-10 pb-12 sm:px-6">
     <NuxtLink :to="`/l/${encodeURIComponent(id)}`" class="inline-flex items-center gap-2 self-start text-sm text-muted-foreground hover:text-foreground">
       <ArrowLeft class="size-4" /> {{ data!.log.product }}
     </NuxtLink>

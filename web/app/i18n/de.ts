@@ -366,6 +366,9 @@ export default {
     empty: 'Noch keine veröffentlichten Releases.',
     alsoJson: 'Auch als JSON:',
     poweredBy: 'Geführt mit release-log',
+    toApp: 'Zur App',
+    ownLog: 'Eigenes Changelog anlegen',
+    ownLogShort: 'Eigenes Log',
     entryCount: { one: '{n} Eintrag', other: '{n} Einträge' },
   },
 

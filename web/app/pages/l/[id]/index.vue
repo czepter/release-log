@@ -22,9 +22,10 @@ useHead({
 </script>
 
 <template>
+  <AppPublicBar />
   <div class="mx-auto flex max-w-[1000px] flex-col px-4 pb-12 sm:px-6">
     <header
-      class="fixed inset-x-0 top-0 z-30 flex items-center justify-center border-b bg-background/85 backdrop-blur transition-[height,background-color,border-color] duration-300 ease-out motion-reduce:transition-none"
+      class="fixed inset-x-0 top-14 z-30 flex items-center justify-center border-b bg-background/85 backdrop-blur transition-[height,background-color,border-color] duration-300 ease-out motion-reduce:transition-none"
       :class="compact ? 'h-16 border-border' : 'h-64 border-transparent bg-background'"
     >
       <div class="flex max-w-[1000px] flex-col items-center px-4 text-center sm:px-6">
