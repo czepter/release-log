@@ -3,6 +3,8 @@ node_modules/
 *.sqlite-journal
 .env
 .DS_Store
+.superpowers/
+.claude/worktrees/
 .env.production
 *.pem
 logs/*

@@ -6,8 +6,6 @@ plain JSON files in the repo — `release-log.json`, `releases/*.json` and a
 yours. The service indexes those files and serves them as a public JSON API,
 plus a web page for readers.
 
-Design note: `docs/superpowers/specs/2026-09-08-release-log-hub-design.md`.
-
 Three ways to write a release:
 
 - **Over MCP.** The built-in MCP server exposes `list_logs`, `get_log`,

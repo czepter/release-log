@@ -25,8 +25,8 @@ export type Cipher = {
 // Der Schlüssel steht kodiert in der Umgebung, aus demselben Grund wie der
 // private Schlüssel der App: 32 rohe Bytes sind keine .env-Zeile.
 //
-// Hex zuerst, weil scripts/setup-github-app.sh ihn mit `openssl rand -hex 32`
-// erzeugt -- ein bereits ausgerollter Schlüssel muss weiter gelten, sonst
+// Hex zuerst, weil der Schlüssel üblicherweise mit `openssl rand -hex 32`
+// erzeugt wird -- ein bereits ausgerollter Schlüssel muss weiter gelten, sonst
 // wäre jedes gespeicherte Nutzer-Token mit einem Deploy wertlos. Base64
 // wird genauso gelesen, damit ein von Hand gesetzter Wert nicht an der
 // Kodierung scheitert.

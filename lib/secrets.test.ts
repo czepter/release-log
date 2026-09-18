@@ -52,8 +52,8 @@ test('an encryption key that is not 32 bytes is refused at startup', () => {
   assert.deepEqual(readEncryptionKey(Buffer.alloc(32, 1).toString('base64')), Buffer.alloc(32, 1));
 });
 
-test('the hex key scripts/setup-github-app.sh writes is read as those 32 bytes', () => {
-  // `openssl rand -hex 32` ist, was das Einrichtungsskript erzeugt. Als
+test('a hex key from openssl rand -hex 32 is read as those 32 bytes', () => {
+  // `openssl rand -hex 32` ist der empfohlene Weg, ihn zu erzeugen. Als
   // base64 gelesen ergäbe derselbe Text 48 Bytes -- ein ausgerollter
   // Schlüssel würde beim Start abgelehnt, und jedes gespeicherte
   // Nutzer-Token wäre mit einem Deploy wertlos.
