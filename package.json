@@ -45,5 +45,13 @@
     "vue-router": "^5.3.1",
     "vue-sonner": "^2.0.9",
     "zod": "^4.2.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "esbuild@0.18.20": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "vue-demi@0.14.10": true,
+    "fsevents@2.3.3": true
   }
 }
