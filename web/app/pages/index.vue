@@ -245,6 +245,7 @@ const commits = [
             <a href="#faq" class="hover:text-zinc-50">{{ m.landing.navFaq }}</a>
             <a :href="cta.href" class="hover:text-zinc-50">{{ cta.short }}</a>
             <NuxtLink to="/datenschutz" class="hover:text-zinc-50">{{ m.landing.navPrivacy }}</NuxtLink>
+            <NuxtLink to="/impressum" class="hover:text-zinc-50">{{ m.landing.navImprint }}</NuxtLink>
             <AppLanguageSwitch tone="dark" />
           </nav>
         </div>

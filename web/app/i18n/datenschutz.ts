@@ -10,41 +10,17 @@
 // falsche Datenschutzerklärung ist schlimmer als keine.
 
 import type { Locale } from './messages.ts';
+import type { LegalMeta, Section } from './legal.ts';
 
-// Ein Absatz ist ein String, eine Aufzählung ein Array von Strings.
-// Reicht für einen Rechtstext; eine Block-Union mit Typfeld wäre für
-// "Text oder Liste" die zweite Abstraktion zu viel.
-export type Block = string | string[];
-// `contact` haengt die Anschrift des Verantwortlichen an den Abschnitt an.
-// Sie steht in keiner der beiden Sprachlisten, weil eine Anschrift sich
-// nicht uebersetzt -- und weil sie sonst zweimal gepflegt werden muesste.
-export type Section = { heading: string; blocks: Block[]; contact?: boolean };
-
-// ==========================================================================
-// AUSFÜLLEN: Der juristische Teil, den nur der Betreiber kennt.
-// Ohne diese Angaben ist die Erklärung nach Art. 13 Abs. 1 lit. a DSGVO
-// unvollständig -- und ein Impressum nach § 5 DDG fehlt dann ebenso.
-// ==========================================================================
-export const CONTROLLER = {
-  name: 'PLATZHALTER — Name bzw. Firma des Verantwortlichen',
-  street: 'PLATZHALTER — Straße und Hausnummer',
-  city: 'PLATZHALTER — PLZ und Ort',
-  country: 'Deutschland',
-  email: 'PLATZHALTER — E-Mail-Adresse',
-  // Betrieb dieses Dienstes: Anbieter, bei dem der Server steht, und ob
-  // ein Auftragsverarbeitungsvertrag (Art. 28 DSGVO) besteht.
-  hosting: 'PLATZHALTER — Hosting-Anbieter, Standort des Servers, AV-Vertrag nach Art. 28 DSGVO',
-  // Aufsichtsbehörde des Bundeslandes des Verantwortlichen.
-  authority: 'PLATZHALTER — zuständige Datenschutz-Aufsichtsbehörde',
-  updated: '2026-09-18',
-};
+// Anschrift, Hoster und Aufsichtsbehörde stehen in legal.ts: das
+// Impressum braucht dieselben Angaben.
 
 const de: Section[] = [
   {
     heading: '1. Überblick',
     blocks: [
       'release-log verwandelt ein GitHub-Repository in ein Release-Log. Diese Erklärung beschreibt, welche personenbezogenen Daten dabei anfallen, wozu sie verarbeitet werden und wie lange sie liegen bleiben.',
-      'Der Dienst kommt ohne Tracking aus: keine Analyse-Werkzeuge, keine Werbenetzwerke, keine Einbindung fremder Schriftarten oder CDNs, keine Weitergabe von Daten zu Werbezwecken. Es gibt deshalb auch keinen Cookie-Banner — die gesetzten Cookies sind technisch notwendig (§ 25 Abs. 2 Nr. 2 TDDDG).',
+      'Der Dienst kommt ohne Tracking aus: keine Analyse-Werkzeuge, keine Werbenetzwerke, keine Einbindung fremder Schriftarten oder CDNs, keine Weitergabe von Daten zu Werbezwecken. Es gibt deshalb auch keinen Cookie-Banner: Wer nur liest, bekommt gar kein Cookie, und die wenigen, die Anmeldung und Sprachwahl setzen, sind technisch notwendig (§ 25 Abs. 2 Nr. 2 TDDDG).',
       'Öffentliche Release-Log-Seiten sind ohne Anmeldung lesbar. Erst wer sich anmeldet, hinterlässt ein Konto.',
     ],
   },
@@ -54,12 +30,13 @@ const de: Section[] = [
     blocks: [
       'Verantwortlich für die Datenverarbeitung auf dieser Website im Sinne des Art. 4 Nr. 7 DSGVO ist:',
       'Ein Datenschutzbeauftragter ist nicht bestellt; die gesetzlichen Voraussetzungen des Art. 37 DSGVO bzw. § 38 BDSG liegen nicht vor.',
+      'Die vollständige Anbieterkennzeichnung nach § 5 DDG steht im Impressum unter /impressum.',
     ],
   },
   {
     heading: '3. Betrieb und Server-Logdateien',
     blocks: [
-      'Der Dienst wird betrieben bei: {hosting}. Beim Aufruf einer Seite überträgt Ihr Browser technisch notwendige Daten (IP-Adresse, Zeitpunkt, angefragte Adresse, Statuscode, User-Agent), die beim Betrieb des Servers anfallen.',
+      'Der Dienst wird betrieben bei {provider}; der Server steht in {location}. Ein Auftragsverarbeitungsvertrag nach Art. 28 DSGVO liegt vor. Beim Aufruf einer Seite überträgt Ihr Browser technisch notwendige Daten (IP-Adresse, Zeitpunkt, angefragte Adresse, Statuscode, User-Agent), die beim Betrieb des Servers anfallen.',
       'Die Anwendung selbst legt keine dauerhaften Zugriffsprotokolle an. Die IP-Adresse wird ausschließlich flüchtig im Arbeitsspeicher verwendet, um die Anfragen an der Client-Registrierung und der Token-Ausgabe zu begrenzen (Missbrauchsschutz); ein Neustart des Dienstes löscht diese Zähler vollständig. Ob und wie lange der Hosting-Anbieter darüber hinaus protokolliert, richtet sich nach dessen Datenschutzhinweisen.',
       'Rechtsgrundlage ist Art. 6 Abs. 1 lit. f DSGVO: das berechtigte Interesse an einem technisch fehlerfreien und gegen Missbrauch geschützten Betrieb.',
       'Die Verbindung ist durchgehend mit TLS verschlüsselt, erkennbar am „https://“ in der Adresszeile.',
@@ -68,7 +45,8 @@ const de: Section[] = [
   {
     heading: '4. Cookies',
     blocks: [
-      'Es werden ausschließlich technisch notwendige Cookies gesetzt. Sie sind nach § 25 Abs. 2 Nr. 2 TDDDG einwilligungsfrei, weil ohne sie die ausdrücklich gewünschte Funktion (Anmeldung, Sprachwahl) nicht möglich wäre. Rechtsgrundlage der damit verbundenen Verarbeitung ist Art. 6 Abs. 1 lit. b DSGVO (Anmeldung) bzw. Art. 6 Abs. 1 lit. f DSGVO (Sprachwahl, Schutz des Anmeldevorgangs).',
+      'Wer diese Seiten nur liest, bekommt kein einziges Cookie gesetzt — auch nicht beim Aufruf eines öffentlichen Release-Logs. Cookies entstehen ausschließlich durch eine Handlung, die Sie selbst auslösen: die Anmeldung und das Umschalten der Sprache.',
+      'Diese Cookies sind technisch notwendig und nach § 25 Abs. 2 Nr. 2 TDDDG einwilligungsfrei, weil ohne sie die ausdrücklich gewünschte Funktion nicht möglich wäre. Rechtsgrundlage der damit verbundenen Verarbeitung ist Art. 6 Abs. 1 lit. b DSGVO (Anmeldung) bzw. Art. 6 Abs. 1 lit. f DSGVO (Sprachwahl, Schutz des Anmeldevorgangs).',
       [
         '`session` — hält Sie angemeldet. Enthält Ihre Konto-Kennung und einen Ablaufzeitpunkt, mit einem Serverschlüssel signiert. Laufzeit 30 Tage, HttpOnly, Secure, SameSite=Lax.',
         '`rl_lang` — merkt sich die gewählte Sprache (Deutsch oder Englisch). Laufzeit ein Jahr, SameSite=Lax. Ohne dieses Cookie entscheidet der Accept-Language-Header Ihres Browsers.',
@@ -163,7 +141,7 @@ const en: Section[] = [
     heading: '1. Overview',
     blocks: [
       'release-log turns a GitHub repository into a release log. This policy describes which personal data that involves, why it is processed and how long it is kept. German data protection law applies; the German version of this page prevails in case of doubt.',
-      'The service runs without tracking: no analytics, no ad networks, no third-party fonts or CDNs, no sharing of data for advertising. There is therefore no cookie banner — the cookies it sets are strictly necessary (§ 25(2)(2) TDDDG).',
+      'The service runs without tracking: no analytics, no ad networks, no third-party fonts or CDNs, no sharing of data for advertising. There is therefore no cookie banner: if you only read, no cookie is set at all, and the few that signing in and switching language do set are strictly necessary (§ 25(2)(2) TDDDG).',
       'Public release log pages can be read without signing in. Only signing in creates an account.',
     ],
   },
@@ -173,12 +151,13 @@ const en: Section[] = [
     blocks: [
       'The controller for data processing on this website within the meaning of Art. 4(7) GDPR is:',
       'No data protection officer has been appointed; the conditions of Art. 37 GDPR and § 38 BDSG are not met.',
+      'The full provider identification under § 5 DDG is on the imprint page at /impressum.',
     ],
   },
   {
     heading: '3. Operation and server logs',
     blocks: [
-      'The service is operated at: {hosting}. When you open a page, your browser transmits technically necessary data (IP address, time, requested address, status code, user agent) that arises from running the server.',
+      'The service is operated at {provider}; the server is located in {location}. A processing agreement under Art. 28 GDPR is in place. When you open a page, your browser transmits technically necessary data (IP address, time, requested address, status code, user agent) that arises from running the server.',
       'The application itself keeps no persistent access logs. Your IP address is used only transiently in memory, to rate-limit requests to client registration and token issuance (abuse protection); restarting the service clears those counters entirely. Whether and for how long the hosting provider logs beyond that is governed by its own privacy notice.',
       'The legal basis is Art. 6(1)(f) GDPR: the legitimate interest in operating the service reliably and protecting it against abuse.',
       'The connection is TLS-encrypted throughout, shown by the "https://" in the address bar.',
@@ -187,7 +166,8 @@ const en: Section[] = [
   {
     heading: '4. Cookies',
     blocks: [
-      'Only strictly necessary cookies are set. They are exempt from consent under § 25(2)(2) TDDDG because the function you explicitly requested (signing in, choosing a language) would not work without them. The legal basis for the associated processing is Art. 6(1)(b) GDPR (sign-in) and Art. 6(1)(f) GDPR (language choice, protecting the sign-in flow).',
+      'If you only read these pages, no cookie is set at all — not even when you open a public release log. Cookies appear solely through an action you take yourself: signing in, and switching the language.',
+      'These cookies are strictly necessary and exempt from consent under § 25(2)(2) TDDDG, because the function you explicitly requested would not work without them. The legal basis for the associated processing is Art. 6(1)(b) GDPR (sign-in) and Art. 6(1)(f) GDPR (language choice, protecting the sign-in flow).',
       [
         '`session` — keeps you signed in. Holds your account id and an expiry, signed with a server key. Lifetime 30 days, HttpOnly, Secure, SameSite=Lax.',
         '`rl_lang` — remembers the chosen language (German or English). Lifetime one year, SameSite=Lax. Without it, your browser\'s Accept-Language header decides.',
@@ -279,7 +259,7 @@ const en: Section[] = [
 
 export const PRIVACY: Record<Locale, Section[]> = { de, en };
 
-export const PRIVACY_META: Record<Locale, { title: string; description: string; intro: string; updated: string; back: string }> = {
+export const PRIVACY_META: Record<Locale, LegalMeta> = {
   de: {
     title: 'Datenschutzerklärung · release-log',
     description: 'Welche Daten release-log verarbeitet, wozu und wie lange.',

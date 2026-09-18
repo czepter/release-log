@@ -59,6 +59,7 @@ export default {
     navChangelog: 'Changelog',
     navFaq: 'FAQ',
     navPrivacy: 'Privacy',
+    navImprint: 'Imprint',
     ctaDashboardLong: 'Go to dashboard',
     ctaDashboardShort: 'Dashboard',
     ctaSignInShort: 'Sign in',

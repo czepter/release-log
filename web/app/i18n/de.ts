@@ -58,6 +58,7 @@ export default {
     navChangelog: 'Changelog',
     navFaq: 'FAQ',
     navPrivacy: 'Datenschutz',
+    navImprint: 'Impressum',
     ctaDashboardLong: 'Zum Dashboard',
     ctaDashboardShort: 'Dashboard',
     ctaSignInShort: 'Anmelden',
