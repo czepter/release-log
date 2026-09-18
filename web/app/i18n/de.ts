@@ -57,6 +57,7 @@ export default {
     navHow: 'So funktioniert’s',
     navChangelog: 'Changelog',
     navFaq: 'FAQ',
+    navPrivacy: 'Datenschutz',
     ctaDashboardLong: 'Zum Dashboard',
     ctaDashboardShort: 'Dashboard',
     ctaSignInShort: 'Anmelden',

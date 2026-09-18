@@ -18,6 +18,7 @@ useHead({ title: () => message.value.title })
       <CardFooter class="flex-col items-stretch gap-3">
         <Button as="a" href="/auth/github/login" class="w-full">{{ m.common.signIn }}</Button>
         <AppLanguageSwitch class="self-center" />
+        <NuxtLink to="/datenschutz" class="self-center text-xs text-muted-foreground hover:text-foreground">{{ m.landing.navPrivacy }}</NuxtLink>
       </CardFooter>
     </Card>
   </main>

@@ -244,6 +244,7 @@ const commits = [
             <a v-if="showcase" href="#changelog" class="hover:text-zinc-50">{{ m.landing.navChangelog }}</a>
             <a href="#faq" class="hover:text-zinc-50">{{ m.landing.navFaq }}</a>
             <a :href="cta.href" class="hover:text-zinc-50">{{ cta.short }}</a>
+            <NuxtLink to="/datenschutz" class="hover:text-zinc-50">{{ m.landing.navPrivacy }}</NuxtLink>
             <AppLanguageSwitch tone="dark" />
           </nav>
         </div>
