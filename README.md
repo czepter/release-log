@@ -75,7 +75,7 @@ npm run reindex -- <owner>/<repo> [...]
 
 Liest jedes genannte Repository über die installierte GitHub App und
 schreibt seinen Log-Index in die SQLite-Datenbank (`DB_PATH`, Vorgabe
-`./release-log.sqlite`). Die Werte kommen aus `.env` — das Skript liest die Datei selbst, wenn es
+`./data/release-log.sqlite`). Die Werte kommen aus `.env` — das Skript liest die Datei selbst, wenn es
 sie findet. `readConfig` verlangt vier Umgebungsvariablen:
 
 | Variable | Bedeutung |
@@ -104,7 +104,7 @@ angekommen" und „Index von Null neu bauen" sind derselbe Fall.
 
 | Variable | Bedeutung |
 |---|---|
-| `DB_PATH` | Pfad der SQLite-Datei, Vorgabe `./release-log.sqlite` |
+| `DB_PATH` | Pfad der SQLite-Datei, Vorgabe `./data/release-log.sqlite` |
 | `PORT` | Port des Dienstes, Vorgabe 8787 |
 | `GITHUB_CLIENT_ID` | Client-ID der GitHub App, für die Anmeldung |
 | `GITHUB_CLIENT_SECRET` | Client-Secret der GitHub App, für die Anmeldung |

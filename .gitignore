@@ -17,3 +17,5 @@ web/.output
 web/node_modules
 *.sqlite-shm
 *.sqlite-wal
+
+data/

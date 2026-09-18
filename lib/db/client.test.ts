@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -175,6 +175,19 @@ test('openDb reads migrations from the folder it is given', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rlh-db-nomig-'));
   try {
     assert.throws(() => openDb(':memory:', dir), /_journal\.json/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// DB_PATH liegt in einem Ordner, damit er als Volume eingehängt werden kann.
+// Ein frisches Volume ist leer -- better-sqlite3 legt fehlende Ordner nicht an.
+test('openDb creates the missing parent directory of the database file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rlh-db-mkdir-'));
+  try {
+    const path = join(dir, 'data', 'release-log.sqlite');
+    openDb(path);
+    assert.ok(existsSync(path));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -28,7 +28,7 @@ export type Core = { reader: Reader; hooks: Hooks; auth: Auth; db: Db; dbPath: s
 // opts.gh ersetzt den GitHub-Client -- nur für die lokale Entwicklung der
 // Oberfläche (web/server/utils/core.ts), nie im Betrieb.
 export function bootCore(env: NodeJS.ProcessEnv, opts: { migrationsFolder?: string; gh?: GitHub } = {}): Core {
-  const dbPath = env.DB_PATH ?? './release-log.sqlite';
+  const dbPath = env.DB_PATH ?? './data/release-log.sqlite';
   const db = opts.migrationsFolder ? openDb(dbPath, opts.migrationsFolder) : openDb(dbPath);
 
   const config = readConfig(env);

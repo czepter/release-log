@@ -46,7 +46,7 @@ export function statusLine(ref: RepoRef, outcome: SyncOutcome): string {
 }
 
 if (import.meta.main) {
-  const dbPath = process.env.DB_PATH ?? './release-log.sqlite';
+  const dbPath = process.env.DB_PATH ?? './data/release-log.sqlite';
   const refs = process.argv.slice(2).map((arg) => {
     const [owner, repo, ...rest] = arg.split('/');
     if (!owner || !repo || rest.length > 0) {
