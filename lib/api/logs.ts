@@ -64,11 +64,15 @@ export async function listRepoCandidates({ auth }: Core, who: LoggedIn): Promise
     return reauth;
   }
   if (listed.kind === 'unavailable') return fail(502, 'github_unavailable', `GitHub antwortete mit HTTP ${listed.status}.`);
+  // Nicht installiert ist etwas anderes als „keine Repos": ohne diesen
+  // Unterschied steht der Dialog mit einer leeren Liste da und nennt den
+  // Grund nicht.
+  if (listed.kind === 'no_installation') return ok({ repos: [], installed: false });
   const withLog = new Set(auth.db.select({ name: log.repoName }).from(log).where(eq(log.repoOwner, who.login)).all().map((r) => r.name));
   const repos = listed.repos
     .map((r) => ({ name: r.name, private: r.private, hasLog: withLog.has(r.name) }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  return ok({ repos });
+  return ok({ repos, installed: true });
 }
 
 export async function logDetail({ auth }: Core, who: LoggedIn, logId: string): Promise<Reply> {

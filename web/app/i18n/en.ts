@@ -192,6 +192,8 @@ export default {
     existing2: ', its settings apply.',
     charsHint: 'Letters, digits,',
     listFailed: 'List not loaded: {message}',
+    notInstalled: 'The app is not installed on this account, so the suggestion list stays empty.',
+    installApp: 'Install the app',
     view: 'View',
     visibility: 'Visibility',
     submitAdopting: 'Adopting…',

@@ -164,6 +164,10 @@ export type InstalledRepo = { name: string; private: boolean };
 
 export type ListInstalledRepos = (token: string, owner: string) => Promise<
   | { kind: 'ok'; repos: InstalledRepo[] }
+  // Die App ist auf dem eigenen Konto gar nicht installiert. Das ist kein
+  // Fehler, aber auch kein leeres Konto -- wer das nicht unterscheidet,
+  // zeigt eine leere Vorschlagsliste und verschweigt den Grund.
+  | { kind: 'no_installation' }
   | { kind: 'unauthorized' }
   | { kind: 'unavailable'; status: number }
 >;
@@ -178,7 +182,7 @@ export function userInstalledRepos(http: Http): ListInstalledRepos {
     if (!found.ok) return { kind: 'unavailable', status: found.status };
     const { installations } = (await found.json()) as { installations: { id: number; account: { login: string } }[] };
     const own = installations.find((i) => i.account.login.toLowerCase() === owner.toLowerCase());
-    if (!own) return { kind: 'ok', repos: [] };
+    if (!own) return { kind: 'no_installation' };
 
     const repos: InstalledRepo[] = [];
     for (let page = 1; page <= MAX_REPO_PAGES; page++) {

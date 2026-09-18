@@ -252,6 +252,19 @@ test('listRepoCandidates lists the app-visible repositories of the own account a
       { name: 'has-log', private: false, hasLog: true },
       { name: 'shop', private: true, hasLog: false },
     ]);
+    assert.equal(body(reply).installed, true);
+  });
+});
+
+// Fällt, wenn eine nicht installierte App wieder als leeres Konto durchgeht.
+test('listRepoCandidates reports a missing installation instead of an unexplained empty list', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.auth.users.store(who.accountId, USER_TOKEN);
+    const auth = { ...ctx.auth, listRepos: async () => ({ kind: 'no_installation' as const }) };
+    const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);
+    assert.equal(reply.status, 200);
+    assert.deepEqual(body(reply), { repos: [], installed: false });
   });
 });
 

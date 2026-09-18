@@ -527,11 +527,13 @@ test('userInstalledRepos lists the repositories of the installation on the own a
   assert.equal(http.calls.some((c) => c.includes('/installations/7/')), false, 'another account\'s installation is never read');
 });
 
-test('userInstalledRepos answers an empty list when the app is not installed on the own account', async () => {
+// Nicht 'ok' mit leerer Liste: der Dialog kann „nicht installiert" sonst
+// nicht von „keine Repos" unterscheiden und schweigt über den Grund.
+test('userInstalledRepos answers no_installation when the app is not installed on the own account', async () => {
   const http = fakeHttp({
     'GET /user/installations?per_page=100': { body: { installations: [{ id: 7, account: { login: 'some-org' } }] } },
   });
-  assert.deepEqual(await userInstalledRepos(http)('t', 'octocat'), { kind: 'ok', repos: [] });
+  assert.deepEqual(await userInstalledRepos(http)('t', 'octocat'), { kind: 'no_installation' });
 });
 
 test('userInstalledRepos maps 401 to unauthorized and a 5xx to unavailable', async () => {

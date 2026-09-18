@@ -191,6 +191,8 @@ export default {
     existing2: ', gelten deren Einstellungen.',
     charsHint: 'Buchstaben, Ziffern,',
     listFailed: 'Liste nicht geladen: {message}',
+    notInstalled: 'Die App ist auf diesem Konto nicht installiert, deshalb bleibt die Vorschlagsliste leer.',
+    installApp: 'App installieren',
     view: 'Ansicht',
     visibility: 'Sichtbarkeit',
     submitAdopting: 'Wird übernommen…',
