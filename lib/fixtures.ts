@@ -53,6 +53,7 @@ export async function withCtx(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
     users: userTokens({ db, http, cipher: cipher(Buffer.alloc(32, 3)), clientId: 'client-id', clientSecret: 'client-secret' }),
     createRepo: async () => ({ kind: 'unavailable', status: 503 }),
     listRepos: async () => ({ kind: 'ok', repos: [] }),
+    installUrl: async () => 'https://github.com/apps/test-app/installations/new',
     onRepoWrite: (ref) => { ctx.repoWrites.push(ref); },
     syncNow: async () => {},
   };

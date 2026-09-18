@@ -67,7 +67,7 @@ export async function listRepoCandidates({ auth }: Core, who: LoggedIn): Promise
   // Nicht installiert ist etwas anderes als „keine Repos": ohne diesen
   // Unterschied steht der Dialog mit einer leeren Liste da und nennt den
   // Grund nicht.
-  if (listed.kind === 'no_installation') return ok({ repos: [], installed: false });
+  if (listed.kind === 'no_installation') return ok({ repos: [], installed: false, installUrl: await auth.installUrl() });
   const withLog = new Set(auth.db.select({ name: log.repoName }).from(log).where(eq(log.repoOwner, who.login)).all().map((r) => r.name));
   const repos = listed.repos
     .map((r) => ({ name: r.name, private: r.private, hasLog: withLog.has(r.name) }))

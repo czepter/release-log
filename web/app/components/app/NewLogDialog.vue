@@ -17,13 +17,15 @@ const candidatesError = ref<{ message: string; reauth: boolean } | null>(null)
 // null = noch nicht gefragt. false heißt: die App ist auf diesem Konto nicht
 // installiert -- eine leere Liste mit einem Grund, nicht ohne.
 const installed = ref<boolean | null>(null)
+const installUrl = ref<string | null>(null)
 watch(open, async (isOpen) => {
   if (!isOpen) return
   candidatesError.value = null
   try {
-    const listed = await $fetch<{ repos: Candidate[]; installed: boolean }>('/api/github/repos')
+    const listed = await $fetch<{ repos: Candidate[]; installed: boolean; installUrl?: string | null }>('/api/github/repos')
     candidates.value = listed.repos
     installed.value = listed.installed
+    installUrl.value = listed.installUrl ?? null
   } catch (err) {
     candidatesError.value = { message: apiText(err), reauth: apiError(err) === 'reauth_required' }
   }
@@ -140,14 +142,14 @@ async function submit() {
           <p v-else-if="existing" class="text-xs text-muted-foreground">{{ m.newLog.existing1 }} <code class="font-mono">release-log.json</code>{{ m.newLog.existing2 }}</p>
           <p v-else class="text-xs text-muted-foreground">
             {{ m.newLog.charsHint }} <code class="font-mono">. _ -</code>
-            <template v-if="installed === false">
-              {{ m.newLog.notInstalled }}
-              <a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" class="font-medium underline">{{ m.newLog.installApp }}</a>
-            </template>
             <template v-if="candidatesError">
               {{ t(m.newLog.listFailed, { message: candidatesError.message }) }}
               <a v-if="candidatesError.reauth" href="/auth/github/login" class="font-medium underline">{{ m.newLog.reauthShort }}</a>
             </template>
+          </p>
+          <p v-if="installed === false" class="rounded-lg border bg-muted/40 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
+            {{ m.newLog.notInstalled }}
+            <a v-if="installUrl" :href="installUrl" class="font-medium text-foreground underline">{{ m.newLog.installApp }}</a>
           </p>
         </div>
 

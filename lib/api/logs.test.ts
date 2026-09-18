@@ -257,14 +257,49 @@ test('listRepoCandidates lists the app-visible repositories of the own account a
 });
 
 // Fällt, wenn eine nicht installierte App wieder als leeres Konto durchgeht.
-test('listRepoCandidates reports a missing installation instead of an unexplained empty list', async () => {
+test('listRepoCandidates reports a missing installation with the page that fixes it', async () => {
   await withCtx(async (ctx) => {
     const { who } = signIn(ctx, 'dev');
     ctx.auth.users.store(who.accountId, USER_TOKEN);
     const auth = { ...ctx.auth, listRepos: async () => ({ kind: 'no_installation' as const }) };
     const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);
     assert.equal(reply.status, 200);
-    assert.deepEqual(body(reply), { repos: [], installed: false });
+    assert.deepEqual(body(reply), {
+      repos: [], installed: false, installUrl: 'https://github.com/apps/test-app/installations/new',
+    });
+  });
+});
+
+// Ein Knopf, der ins Leere führte, wäre schlimmer als ein Satz ohne Knopf.
+test('listRepoCandidates carries no install link when GitHub would not name one', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.auth.users.store(who.accountId, USER_TOKEN);
+    const auth = {
+      ...ctx.auth,
+      listRepos: async () => ({ kind: 'no_installation' as const }),
+      installUrl: async () => null,
+    };
+    assert.deepEqual(body(await listRepoCandidates({ auth, reader: ctx.reader }, who)), {
+      repos: [], installed: false, installUrl: null,
+    });
+  });
+});
+
+// Der Aufruf kostet eine GitHub-Runde; wer installiert ist, braucht ihn nie.
+test('listRepoCandidates never asks for the install page once the app is installed', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.auth.users.store(who.accountId, USER_TOKEN);
+    let asked = 0;
+    const auth = {
+      ...ctx.auth,
+      listRepos: async () => ({ kind: 'ok' as const, repos: [{ name: 'shop', private: false }] }),
+      installUrl: async () => { asked += 1; return null; },
+    };
+    const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);
+    assert.equal(body(reply).installed, true);
+    assert.equal(asked, 0);
   });
 });
 

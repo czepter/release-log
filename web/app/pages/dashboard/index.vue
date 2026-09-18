@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ChevronRight, GitBranch, Globe, Lock, Plug, Search, Snowflake, Copy, Check } from '@lucide/vue'
+import { ChevronRight, ExternalLink, GitBranch, Globe, Lock, Plug, Search, Snowflake, Copy, Check } from '@lucide/vue'
 
 definePageMeta({ layout: 'app', middleware: 'auth' })
 const { m, t, p: plural, viewLabel, relativeTime, apiText } = useI18n()
+const session = useSession()
 useHead({ title: () => m.value.dashboard.title })
 
 type LogSummary = { id: string; product: string; owner: string; repo: string; view: string; visibility: string; state: string; indexedAt: string | null }
@@ -15,6 +16,26 @@ const logs = computed(() => {
   return q ? all.filter((l) => `${l.product} ${l.owner}/${l.repo}`.toLowerCase().includes(q)) : all
 })
 const frozenCount = computed(() => (data.value?.logs ?? []).filter((l) => l.state === 'frozen').length)
+
+// Der Installationsstand wird NUR gefragt, wenn die Liste leer zurückkommt:
+// wer Logs hat, hat die App installiert, und der Aufruf kostet eine
+// GitHub-Runde. Erst im Browser, nicht beim Rendern auf dem Server: die
+// Antwort käme dort zu spät für das HTML und würde die Runde doppelt
+// zahlen. null heißt „noch nicht gefragt".
+const installed = ref<boolean | null>(null)
+const installUrl = ref<string | null>(null)
+onMounted(async () => {
+  if ((data.value?.logs.length ?? 0) > 0) return
+  try {
+    const listed = await $fetch<{ installed: boolean; installUrl?: string | null }>('/api/github/repos')
+    installed.value = listed.installed
+    installUrl.value = listed.installUrl ?? null
+  } catch {
+    // Ein Fehlschlag hier ist kein Grund, den Leerzustand zu verstecken:
+    // er bleibt, wie er ohne diese Frage aussähe.
+    installed.value = true
+  }
+})
 
 const mcpUrl = useRequestURL().origin + '/mcp'
 const now = useNow()
@@ -100,6 +121,18 @@ async function copy() {
         </table>
       </div>
     </template>
+
+    <div v-else-if="installed === false" class="flex flex-col items-center justify-center gap-4 rounded-xl border bg-card px-6 py-16 text-center">
+      <span class="flex size-13 items-center justify-center rounded-xl bg-muted text-muted-foreground"><Plug class="size-6" /></span>
+      <h2 class="text-xl font-semibold tracking-tight">{{ m.dashboard.installTitle }}</h2>
+      <p class="max-w-lg text-sm leading-relaxed text-muted-foreground">
+        {{ t(m.dashboard.installText, { login: session?.login ?? '' }) }}
+      </p>
+      <Button v-if="installUrl" as-child size="lg" class="mt-1">
+        <a :href="installUrl">{{ m.dashboard.installAction }}<ExternalLink /></a>
+      </Button>
+      <p class="text-[13px] text-muted-foreground">{{ m.dashboard.installScope }}</p>
+    </div>
 
     <div v-else class="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed bg-card px-6 py-20 text-center">
       <span class="flex size-11 items-center justify-center rounded-lg bg-muted text-muted-foreground"><GitBranch class="size-5" /></span>

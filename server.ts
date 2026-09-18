@@ -30,7 +30,7 @@ import type { LoggedIn } from './lib/access.ts';
 import { checkAuthorizeRequest, denyLocation } from './lib/oauthRequest.ts';
 import { redeemUploadToken } from './lib/uploads.ts';
 import type { UserTokens } from './lib/userTokens.ts';
-import type { CreateUserRepo, ListInstalledRepos } from './lib/github.ts';
+import type { AppInstallUrl, CreateUserRepo, ListInstalledRepos } from './lib/github.ts';
 import { buildMcpServer } from './lib/mcpTools.ts';
 import { rateLimiter } from './lib/rateLimit.ts';
 import {
@@ -77,6 +77,8 @@ export type Auth = {
   createRepo: CreateUserRepo;
   // Vorschläge für „bestehendes Repo übernehmen“, ebenfalls mit dem Nutzer-Token.
   listRepos: ListInstalledRepos;
+  // Die Installationsseite dieser App. Nur gefragt, wenn sie fehlt.
+  installUrl: AppInstallUrl;
   // Called after a dashboard write action (Task 5, Task 6) commits
   // successfully -- the same reconcile the webhook otherwise triggers, only
   // right away instead of only after delivery.

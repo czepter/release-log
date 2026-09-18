@@ -197,6 +197,28 @@ export function userInstalledRepos(http: Http): ListInstalledRepos {
   };
 }
 
+// Wohin ein Konto geschickt wird, das die App noch nicht installiert hat.
+// Die Adresse braucht den Slug der App, und den kennt die Konfiguration
+// nicht -- GET /app nennt ihn, mit dem JWT, das die App ohnehin signiert.
+// Ein Slug ändert sich nicht, also wird die Antwort behalten; ein
+// Fehlschlag nicht, sonst bliebe der Link für die Lebensdauer des
+// Prozesses weg. null heißt: den Satz ohne Link zeigen, nie einen Knopf,
+// der ins Leere führt.
+export type AppInstallUrl = () => Promise<string | null>;
+
+export function appInstallUrl(http: Http, jwt: () => string): AppInstallUrl {
+  let known: string | null = null;
+  return async () => {
+    if (known !== null) return known;
+    const res = await http(`${API}/app`, { headers: headers(jwt()) });
+    if (!res.ok) return null;
+    const { html_url: page } = (await res.json()) as { html_url?: string };
+    if (typeof page !== 'string') return null;
+    known = `${page}/installations/new`;
+    return known;
+  };
+}
+
 // GitHubs Contents-API-Pfad trägt "/" als echten Pfadtrenner -- ihn als
 // Ganzes zu kodieren würde ihn selbst mitkodieren und die URL brechen.
 function encodePath(path: string): string {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { blobSha, fakeGitHub, githubClient, userRepoCreator, userInstalledRepos } from './github.ts';
+import { appInstallUrl, blobSha, fakeGitHub, githubClient, userRepoCreator, userInstalledRepos } from './github.ts';
 import { fakeHttp } from './http.ts';
 import { installations } from './appAuth.ts';
 import type { Installations } from './appAuth.ts';
@@ -534,6 +534,27 @@ test('userInstalledRepos answers no_installation when the app is not installed o
     'GET /user/installations?per_page=100': { body: { installations: [{ id: 7, account: { login: 'some-org' } }] } },
   });
   assert.deepEqual(await userInstalledRepos(http)('t', 'octocat'), { kind: 'no_installation' });
+});
+
+// Die Adresse der eigenen Installationsseite braucht den Slug der App, und
+// den kennt die Konfiguration nicht -- GET /app nennt ihn.
+test('appInstallUrl derives the install page from the app itself and asks GitHub once', async () => {
+  const http = fakeHttp({
+    'GET /app': { body: { html_url: 'https://github.com/apps/release-log-hub' } },
+  });
+  const url = appInstallUrl(http, () => 'jwt');
+  assert.equal(await url(), 'https://github.com/apps/release-log-hub/installations/new');
+  assert.equal(await url(), 'https://github.com/apps/release-log-hub/installations/new');
+  assert.equal(http.calls.filter((c) => c.includes('/app')).length, 1, 'the slug never changes, so it is read once');
+});
+
+// Kein toter Knopf: ohne Adresse zeigt die Oberflaeche den Satz ohne Link.
+test('appInstallUrl answers null when GitHub does not, and tries again next time', async () => {
+  const dead = fakeHttp({ 'GET /app': { status: 500 } });
+  const url = appInstallUrl(dead, () => 'jwt');
+  assert.equal(await url(), null);
+  assert.equal(await url(), null);
+  assert.equal(dead.calls.filter((c) => c.includes('/app')).length, 2, 'a failure is not cached');
 });
 
 test('userInstalledRepos maps 401 to unauthorized and a 5xx to unavailable', async () => {

@@ -469,6 +469,7 @@ function withAuth(fn: (auth: Auth, db: ReturnType<typeof openDb>) => Promise<voi
       }),
       createRepo: async () => ({ kind: 'unavailable', status: 503 }),
       listRepos: async () => ({ kind: 'ok', repos: [] }),
+      installUrl: async () => null,
       syncNow: async () => {},
     },
     db,
