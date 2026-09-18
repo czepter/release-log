@@ -3,6 +3,7 @@ import { Plus } from '@lucide/vue'
 
 const open = ref(false)
 const session = useSession()
+const { m, t, viewOptions, visibilityOptions, apiText } = useI18n()
 const form = reactive({ product: '', repo_name: '', view: 'timeline', visibility: 'public' })
 const pending = ref(false)
 const error = ref<{ message: string; reauth: boolean } | null>(null)
@@ -19,7 +20,7 @@ watch(open, async (isOpen) => {
   try {
     candidates.value = (await $fetch<{ repos: Candidate[] }>('/api/github/repos')).repos
   } catch (err) {
-    candidatesError.value = { message: apiMessage(err), reauth: apiError(err) === 'reauth_required' }
+    candidatesError.value = { message: apiText(err), reauth: apiError(err) === 'reauth_required' }
   }
 })
 const match = computed(() => candidates.value.find((c) => c.name.toLowerCase() === form.repo_name.trim().toLowerCase()))
@@ -59,7 +60,7 @@ async function submit() {
     open.value = false
     await navigateTo(`/dashboard/logs/${encodeURIComponent(created.logId)}`)
   } catch (err) {
-    error.value = { message: apiMessage(err), reauth: apiError(err) === 'reauth_required' }
+    error.value = { message: apiText(err), reauth: apiError(err) === 'reauth_required' }
   } finally {
     pending.value = false
   }
@@ -69,22 +70,22 @@ async function submit() {
 <template>
   <Dialog v-model:open="open">
     <DialogTrigger as-child>
-      <Button size="lg"><Plus /> Neues Log</Button>
+      <Button size="lg"><Plus /> {{ m.newLog.trigger }}</Button>
     </DialogTrigger>
     <DialogContent class="sm:max-w-[520px]">
       <form class="flex flex-col gap-5" @submit.prevent="submit">
         <DialogHeader>
-          <DialogTitle>Neues Log anlegen</DialogTitle>
+          <DialogTitle>{{ m.newLog.title }}</DialogTitle>
           <DialogDescription>
             <template v-if="existing">
-              Übernimmt das bestehende Repository, ergänzt bei Bedarf die
+              {{ m.newLog.descriptionExisting1 }}
               <code class="rounded bg-muted px-1 py-px font-mono text-xs text-foreground">release-log.json</code>
-              und nimmt es in den Index auf.
+              {{ m.newLog.descriptionExisting2 }}
             </template>
             <template v-else>
-            Legt ein Repository auf deinem GitHub-Konto an, schreibt die erste
-            <code class="rounded bg-muted px-1 py-px font-mono text-xs text-foreground">release-log.json</code>
-            hinein und nimmt es in den Index auf.
+              {{ m.newLog.descriptionNew1 }}
+              <code class="rounded bg-muted px-1 py-px font-mono text-xs text-foreground">release-log.json</code>
+              {{ m.newLog.descriptionNew2 }}
             </template>
           </DialogDescription>
         </DialogHeader>
@@ -92,17 +93,17 @@ async function submit() {
         <Alert v-if="error" variant="destructive">
           <AlertDescription>
             {{ error.message }}
-            <a v-if="error.reauth" href="/auth/github/login" class="mt-1 block font-medium underline">Neu bei GitHub anmelden</a>
+            <a v-if="error.reauth" href="/auth/github/login" class="mt-1 block font-medium underline">{{ m.newLog.reauth }}</a>
           </AlertDescription>
         </Alert>
 
         <div class="flex flex-col gap-2">
-          <Label for="product">Produkt</Label>
-          <Input id="product" v-model="form.product" required maxlength="200" placeholder="z. B. Release Log Hub" />
+          <Label for="product">{{ m.newLog.product }}</Label>
+          <Input id="product" v-model="form.product" required maxlength="200" :placeholder="m.newLog.productPlaceholder" />
         </div>
 
         <div class="flex flex-col gap-2">
-          <Label for="repo">Repository</Label>
+          <Label for="repo">{{ m.newLog.repo }}</Label>
           <div class="relative">
             <div class="flex h-9 overflow-hidden rounded-md border shadow-xs focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
               <span class="flex items-center border-r bg-muted px-3 font-mono text-[13px] text-muted-foreground">{{ session?.login }} /</span>
@@ -126,37 +127,37 @@ async function submit() {
                 @mousedown.prevent="choose(c)" @mouseenter="active = i"
               >
                 <span class="truncate">{{ c.name }}</span>
-                <span class="shrink-0 font-sans text-xs text-muted-foreground">{{ c.private ? 'privat' : 'öffentlich' }}</span>
+                <span class="shrink-0 font-sans text-xs text-muted-foreground">{{ c.private ? m.newLog.repoPrivate : m.newLog.repoPublic }}</span>
               </li>
             </ul>
           </div>
-          <p v-if="taken" class="text-xs text-destructive">Dieses Repository ist schon ein Log.</p>
-          <p v-else-if="existing" class="text-xs text-muted-foreground">Bestehendes Repository · wird übernommen. Trägt es schon eine <code class="font-mono">release-log.json</code>, gelten deren Einstellungen.</p>
+          <p v-if="taken" class="text-xs text-destructive">{{ m.newLog.taken }}</p>
+          <p v-else-if="existing" class="text-xs text-muted-foreground">{{ m.newLog.existing1 }} <code class="font-mono">release-log.json</code>{{ m.newLog.existing2 }}</p>
           <p v-else class="text-xs text-muted-foreground">
-            Buchstaben, Ziffern, <code class="font-mono">. _ -</code>
+            {{ m.newLog.charsHint }} <code class="font-mono">. _ -</code>
             <template v-if="candidatesError">
-              Liste nicht geladen: {{ candidatesError.message }}
-              <a v-if="candidatesError.reauth" href="/auth/github/login" class="font-medium underline">Neu anmelden</a>
+              {{ t(m.newLog.listFailed, { message: candidatesError.message }) }}
+              <a v-if="candidatesError.reauth" href="/auth/github/login" class="font-medium underline">{{ m.newLog.reauthShort }}</a>
             </template>
           </p>
         </div>
 
         <fieldset class="flex flex-col gap-2">
-          <legend class="mb-2 text-sm font-medium">Ansicht</legend>
-          <AppChoiceCards v-model="form.view" name="view" :options="VIEW_OPTIONS" />
+          <legend class="mb-2 text-sm font-medium">{{ m.newLog.view }}</legend>
+          <AppChoiceCards v-model="form.view" name="view" :options="viewOptions" />
         </fieldset>
 
         <fieldset class="flex flex-col gap-2">
-          <legend class="mb-2 text-sm font-medium">Sichtbarkeit</legend>
-          <AppChoiceCards v-model="form.visibility" name="visibility" :options="VISIBILITY_OPTIONS" />
+          <legend class="mb-2 text-sm font-medium">{{ m.newLog.visibility }}</legend>
+          <AppChoiceCards v-model="form.visibility" name="visibility" :options="visibilityOptions" />
         </fieldset>
 
         <DialogFooter>
           <DialogClose as-child>
-            <Button type="button" variant="outline" size="lg">Abbrechen</Button>
+            <Button type="button" variant="outline" size="lg">{{ m.common.cancel }}</Button>
           </DialogClose>
           <Button type="submit" size="lg" :disabled="pending || taken">
-            {{ pending ? (existing ? 'Wird übernommen…' : 'Wird angelegt…') : (existing ? 'Log übernehmen' : 'Log anlegen') }}
+            {{ pending ? (existing ? m.newLog.submitAdopting : m.newLog.submitCreating) : (existing ? m.newLog.submitAdopt : m.newLog.submitCreate) }}
           </Button>
         </DialogFooter>
       </form>

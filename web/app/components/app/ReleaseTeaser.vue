@@ -4,6 +4,7 @@ import { ArrowRight } from '@lucide/vue'
 // Ein älteres Release auf der Startseite: Kopf und Anzahl je Abschnitt,
 // denn der Feed liefert keine Einträge (lib/public.ts).
 defineProps<{ release: ShowcaseTeaser }>()
+const { section, formatDate } = useI18n()
 </script>
 
 <template>
@@ -19,7 +20,7 @@ defineProps<{ release: ShowcaseTeaser }>()
       <span class="flex min-w-0 flex-col gap-2.5">
         <span class="text-lg leading-[26px] font-semibold tracking-tight group-hover:underline">{{ release.headline }}</span>
         <span class="flex flex-wrap gap-2">
-          <span v-for="s in release.sections" :key="s.key" class="rounded-md px-2 py-0.5 text-xs font-medium" :class="SECTION_TONE[s.key]">{{ s.label }} · {{ s.count }}</span>
+          <span v-for="s in release.sections" :key="s.key" class="rounded-md px-2 py-0.5 text-xs font-medium" :class="SECTION_TONE[s.key]">{{ section(s.key, s.label) }} · {{ s.count }}</span>
         </span>
       </span>
       <span class="hidden size-11 shrink-0 items-center justify-center rounded-lg border sm:flex" aria-hidden="true"><ArrowRight class="size-4" /></span>

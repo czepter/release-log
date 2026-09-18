@@ -10,6 +10,7 @@ const props = defineProps<{ logId: string; version: string | null }>()
 type LogDetail = { product: string; state: string; media: string[]; releases: Array<{ version: string }> }
 type Loaded = { document: ReleaseDoc; blob_sha: string }
 
+const { m, t, apiText } = useI18n()
 const enc = encodeURIComponent
 const logPath = `/api/logs/${enc(props.logId)}`
 const { data: log, refresh: refreshLog } = await useFetch<LogDetail>(logPath)
@@ -17,7 +18,7 @@ const { data: loaded, error: loadError } = props.version
   ? await useFetch<Loaded>(`${logPath}/releases/${enc(props.version)}`)
   : { data: ref<Loaded | null>(null), error: ref(null) }
 if ((loadError.value as { statusCode?: number } | null)?.statusCode === 404) {
-  throw createError({ statusCode: 404, statusMessage: 'Dieses Release gibt es nicht.' })
+  throw createError({ statusCode: 404, statusMessage: m.value.error.releaseNotFound })
 }
 
 const today = new Date().toISOString().slice(0, 10)
@@ -29,7 +30,7 @@ const isNew = computed(() => previous.value === null)
 const published = computed(() => previous.value?.published_at != null)
 const frozen = computed(() => log.value?.state === 'frozen')
 
-useHead({ title: () => (isNew.value ? 'Neues Release' : `${log.value?.product ?? ''} ${head.version}`) })
+useHead({ title: () => (isNew.value ? m.value.editor.newTitle : `${log.value?.product ?? ''} ${head.version}`) })
 
 // Tag folgt der Version, bis jemand ihn selbst ändert.
 watch(() => head.version, (v, old) => {
@@ -56,39 +57,45 @@ async function uploadImage(file: File): Promise<string> {
     await waitFor(async () => { await refreshLog(); return log.value?.media.includes(res.path) ?? false })
     return res.path
   } catch (err) {
-    throw new Error(apiMessage(err, 'Hochladen fehlgeschlagen.'))
+    throw new Error(apiText(err, m.value.editor.uploadFailed))
   }
 }
 
 onMounted(async () => {
-  const [{ default: Editor }, { default: Paragraph }, { default: ChangeTool }, { default: ReleaseImageTool }] = await Promise.all([
+  const [{ default: Editor }, { default: Paragraph }, { default: ChangeTool, setChangeText }, { default: ReleaseImageTool, setImageText }] = await Promise.all([
     import('@editorjs/editorjs'), import('@editorjs/paragraph'), import('~/editor/ChangeTool'), import('~/editor/ReleaseImageTool'),
   ])
+  // Der Werkzeugkasten fragt die Titel statisch ab, bevor ein Block entsteht.
+  setChangeText(m.value.editor.change)
+  setImageText(m.value.editor.image)
+  const js = m.value.editor.js
   editor = new Editor({
     holder: holder.value!,
-    placeholder: 'Tippe, oder „+" für einen Absatz, eine Änderung oder ein Bild',
+    placeholder: m.value.editor.placeholder,
     minHeight: 80,
     readOnly: frozen.value,
     tools: {
       paragraph: { class: Paragraph as never, inlineToolbar: ['bold', 'italic', 'link'] },
-      change: { class: ChangeTool as never, config: { date: () => head.date } },
-      releaseImage: { class: ReleaseImageTool as never, config: { media: () => log.value?.media ?? [], mediaUrl, upload: uploadImage } },
+      change: { class: ChangeTool as never, config: { date: () => head.date, text: () => m.value.editor.change } },
+      releaseImage: { class: ReleaseImageTool as never, config: { media: () => log.value?.media ?? [], mediaUrl, upload: uploadImage, text: () => m.value.editor.image } },
     },
     data: { blocks: initial.blocks as never },
     onChange: () => { markChanged() },
+    // Die Oberfläche von Editor.js selbst; sie wird beim Erzeugen gesetzt
+    // und folgt darum der Sprache, die beim Öffnen des Editors galt.
     i18n: {
       messages: {
         ui: {
-          blockTunes: { toggler: { 'Click to tune': 'Einstellungen', 'or drag to move': 'oder ziehen' } },
-          inlineToolbar: { converter: { 'Convert to': 'Umwandeln in' } },
-          toolbar: { toolbox: { Add: 'Hinzufügen' } },
-          popover: { Filter: 'Filtern', 'Nothing found': 'Nichts gefunden' },
+          blockTunes: { toggler: { 'Click to tune': js.tune, 'or drag to move': js.drag } },
+          inlineToolbar: { converter: { 'Convert to': js.convertTo } },
+          toolbar: { toolbox: { Add: js.add } },
+          popover: { Filter: js.filter, 'Nothing found': js.nothingFound },
         },
-        toolNames: { Text: 'Absatz', Bold: 'Fett', Italic: 'Kursiv', Link: 'Link' },
+        toolNames: { Text: js.text, Bold: js.bold, Italic: js.italic, Link: js.link },
         blockTunes: {
-          delete: { Delete: 'Löschen', 'Click to delete': 'Zum Löschen klicken' },
-          moveUp: { 'Move up': 'Nach oben' },
-          moveDown: { 'Move down': 'Nach unten' },
+          delete: { Delete: js.delete, 'Click to delete': js.clickToDelete },
+          moveUp: { 'Move up': js.moveUp },
+          moveDown: { 'Move down': js.moveDown },
         },
       },
     },
@@ -111,10 +118,10 @@ function markChanged() {
 const summary = computed(() => {
   const changes = blocks.value.filter((b) => b.type === 'change').map((b) => b.data as ReleaseDoc['changes'][number])
   const rows = [
-    { key: 'important', label: 'Wichtig', count: changes.filter((c) => c.breaking).length },
-    { key: 'new', label: 'Neu', count: changes.filter((c) => !c.breaking && c.type === 'feat').length },
-    { key: 'changed', label: 'Änderungen', count: changes.filter((c) => !c.breaking && c.type === 'perf').length },
-    { key: 'fixed', label: 'Behoben', count: changes.filter((c) => !c.breaking && c.type === 'fix').length },
+    { key: 'important', label: m.value.sections.important, count: changes.filter((c) => c.breaking).length },
+    { key: 'new', label: m.value.sections.new, count: changes.filter((c) => !c.breaking && c.type === 'feat').length },
+    { key: 'changed', label: m.value.sections.changed, count: changes.filter((c) => !c.breaking && c.type === 'perf').length },
+    { key: 'fixed', label: m.value.sections.fixed, count: changes.filter((c) => !c.breaking && c.type === 'fix').length },
   ]
   return rows.filter((r) => r.count > 0)
 })
@@ -157,17 +164,17 @@ async function save() {
     })
     dirty.value = false
     const synced = await reload((fresh) => fresh.blob_sha !== before)
-    toast.success(synced ? 'Gespeichert.' : 'Gespeichert. Der Abgleich dauert noch; vor dem nächsten Speichern neu laden.')
+    toast.success(synced ? m.value.editor.savedToast : m.value.editor.savedNotSynced)
     if (isNew.value === false && props.version === null && synced) {
       await navigateTo(`/dashboard/logs/${enc(props.logId)}/releases/${enc(head.version.trim())}`, { replace: true })
     }
   } catch (err) {
     const code = apiError(err)
     problem.value = code === 'conflict'
-      ? { kind: 'conflict', message: isNew.value ? `Version ${head.version} gibt es schon. Wähle eine andere Versionsnummer oder öffne die bestehende.` : 'Das Release wurde inzwischen anderswo geändert (im Repo oder über MCP). Nichts wurde überschrieben.' }
+      ? { kind: 'conflict', message: isNew.value ? t(m.value.editor.conflictExisting, { version: head.version }) : m.value.editor.conflictChanged }
       : code === 'invalid_document'
-        ? { kind: 'invalid', message: apiMessage(err) }
-        : { kind: 'error', message: apiMessage(err) }
+        ? { kind: 'invalid', message: apiMessage(err, m.value.common.somethingWrong) }
+        : { kind: 'error', message: apiText(err) }
   } finally {
     saving.value = false
   }
@@ -179,9 +186,9 @@ async function togglePublish() {
   try {
     await $fetch(`${logPath}/releases/${enc(head.version)}/${target ? 'publish' : 'unpublish'}`, { method: 'POST', body: {} })
     await reload((fresh) => (fresh.document.published_at !== null) === target)
-    toast.success(target ? 'Veröffentlicht.' : 'Zurückgezogen. Das Release ist wieder ein Entwurf.')
+    toast.success(target ? m.value.editor.publishedToast : m.value.editor.unpublishedToast)
   } catch (err) {
-    toast.error(apiMessage(err))
+    toast.error(apiText(err))
   } finally {
     publishing.value = false
   }
@@ -205,24 +212,24 @@ function closeLeave(leave: boolean) {
 <template>
   <div class="flex min-h-screen flex-col">
     <header class="sticky top-0 z-30 flex h-16 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur sm:px-8">
-      <Button as-child variant="ghost" size="icon" aria-label="Zurück zum Log">
+      <Button as-child variant="ghost" size="icon" :aria-label="m.editor.backToLog">
         <NuxtLink :to="`/dashboard/logs/${enc(logId)}`"><ArrowLeft /></NuxtLink>
       </Button>
-      <nav aria-label="Brotkrumen" class="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
+      <nav :aria-label="m.common.breadcrumb" class="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
         <NuxtLink :to="`/dashboard/logs/${enc(logId)}`" class="truncate hover:text-foreground">{{ log?.product }}</NuxtLink>
         <span class="text-border">/</span>
-        <span class="rounded-md bg-primary px-2 py-0.5 font-mono text-xs text-primary-foreground">{{ isNew ? 'neu' : `v${head.version}` }}</span>
+        <span class="rounded-md bg-primary px-2 py-0.5 font-mono text-xs text-primary-foreground">{{ isNew ? m.editor.new : `v${head.version}` }}</span>
         <Badge v-if="!isNew" :variant="published ? 'default' : 'secondary'" :class="published && 'bg-green-100 text-green-700'">
-          {{ published ? 'Veröffentlicht' : 'Entwurf' }}
+          {{ published ? m.common.published : m.common.draft }}
         </Badge>
-        <span class="hidden text-[13px] sm:inline">{{ dirty ? 'Ungespeicherte Änderungen' : isNew ? '' : 'Gespeichert' }}</span>
+        <span class="hidden text-[13px] sm:inline">{{ dirty ? m.editor.unsaved : isNew ? '' : m.editor.saved }}</span>
       </nav>
       <Button v-if="!isNew" as-child variant="ghost">
-        <a :href="`/l/${enc(logId)}/r/${enc(head.version)}`" target="_blank" rel="noopener"><Eye /> Vorschau</a>
+        <a :href="`/l/${enc(logId)}/r/${enc(head.version)}`" target="_blank" rel="noopener"><Eye /> {{ m.editor.preview }}</a>
       </Button>
-      <Button variant="outline" :disabled="saving || frozen || !head.version.trim()" @click="save">{{ saving ? 'Speichert…' : 'Speichern' }}</Button>
-      <Button v-if="!isNew" :disabled="publishing || dirty || frozen" :title="dirty ? 'Erst speichern' : ''" @click="togglePublish">
-        {{ publishing ? '…' : published ? 'Zurückziehen' : 'Veröffentlichen' }}
+      <Button variant="outline" :disabled="saving || frozen || !head.version.trim()" @click="save">{{ saving ? m.common.saving : m.common.save }}</Button>
+      <Button v-if="!isNew" :disabled="publishing || dirty || frozen" :title="dirty ? m.editor.saveFirst : ''" @click="togglePublish">
+        {{ publishing ? '…' : published ? m.editor.unpublish : m.editor.publish }}
       </Button>
     </header>
 
@@ -231,19 +238,19 @@ function closeLeave(leave: boolean) {
         <div class="flex w-full max-w-[760px] flex-col gap-4">
           <Alert v-if="frozen" variant="destructive">
             <TriangleAlert />
-            <AlertDescription>Dieses Log ist eingefroren; sein Repository ist nicht erreichbar. Nur lesen.</AlertDescription>
+            <AlertDescription>{{ m.editor.frozenWarn }}</AlertDescription>
           </Alert>
           <Alert v-if="problem" variant="destructive">
             <TriangleAlert />
-            <AlertTitle>{{ problem.kind === 'conflict' ? 'Zwischenzeitlich geändert' : problem.kind === 'invalid' ? 'Das Dokument ist so nicht gültig' : 'Nicht gespeichert' }}</AlertTitle>
+            <AlertTitle>{{ problem.kind === 'conflict' ? m.editor.problemConflict : problem.kind === 'invalid' ? m.editor.problemInvalid : m.editor.problemError }}</AlertTitle>
             <AlertDescription>
               <p class="whitespace-pre-line">{{ problem.kind === 'invalid' ? problem.message.split('; ').join('\n') : problem.message }}</p>
-              <button v-if="problem.kind === 'conflict' && !isNew" type="button" class="mt-2 font-medium underline" @click="dirty = false; reloadNuxtApp()">Neu laden (verwirft deine Änderungen)</button>
+              <button v-if="problem.kind === 'conflict' && !isNew" type="button" class="mt-2 font-medium underline" @click="dirty = false; reloadNuxtApp()">{{ m.editor.reloadDiscard }}</button>
             </AlertDescription>
           </Alert>
 
           <textarea
-            v-model="head.headline" rows="1" placeholder="Überschrift des Release" aria-label="Überschrift" :readonly="frozen"
+            v-model="head.headline" rows="1" :placeholder="m.editor.headlinePlaceholder" :aria-label="m.editor.headlineLabel" :readonly="frozen"
             class="field-sizing-content w-full resize-none bg-transparent text-4xl leading-[46px] font-semibold tracking-tight outline-none placeholder:text-muted-foreground/60"
             @input="dirty = true"
           />
@@ -252,37 +259,37 @@ function closeLeave(leave: boolean) {
       </main>
 
       <aside class="flex flex-col gap-6 border-l bg-muted/30 px-6 py-8">
-        <h2 class="text-sm font-semibold">Release</h2>
+        <h2 class="text-sm font-semibold">{{ m.editor.release }}</h2>
         <div class="grid grid-cols-2 gap-3">
           <div class="flex flex-col gap-1.5">
-            <Label for="version">Version</Label>
+            <Label for="version">{{ m.editor.version }}</Label>
             <Input id="version" v-model="head.version" :readonly="!isNew" placeholder="1.2.0" class="bg-background font-mono" :class="!isNew && 'text-muted-foreground'" @input="dirty = true" />
           </div>
           <div class="flex flex-col gap-1.5">
-            <Label for="tag">Tag</Label>
+            <Label for="tag">{{ m.editor.tag }}</Label>
             <Input id="tag" v-model="head.tag" placeholder="v1.2.0" class="bg-background font-mono" :readonly="frozen" @input="dirty = true" />
           </div>
         </div>
         <div class="flex flex-col gap-1.5">
-          <Label for="date">Datum</Label>
+          <Label for="date">{{ m.editor.date }}</Label>
           <Input id="date" v-model="head.date" type="date" class="bg-background" :readonly="frozen" @input="dirty = true" />
         </div>
-        <p v-if="!isNew" class="-mt-3 text-xs text-muted-foreground">Die Version ist der Dateiname und lässt sich nach dem Anlegen nicht mehr ändern.</p>
+        <p v-if="!isNew" class="-mt-3 text-xs text-muted-foreground">{{ m.editor.versionFixed }}</p>
 
         <dl class="flex flex-col gap-2.5 border-t pt-5 text-[13px]">
-          <div class="flex justify-between"><dt class="text-muted-foreground">Status</dt><dd>{{ isNew ? 'Noch nicht gespeichert' : published ? 'Veröffentlicht' : 'Entwurf' }}</dd></div>
-          <div v-if="previous" class="flex justify-between"><dt class="text-muted-foreground">Commits</dt><dd>{{ previous.commits }}</dd></div>
-          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Datei</dt><dd class="truncate font-mono text-xs">releases/{{ head.version || '…' }}.json</dd></div>
+          <div class="flex justify-between"><dt class="text-muted-foreground">{{ m.editor.state }}</dt><dd>{{ isNew ? m.editor.notSavedYet : published ? m.common.published : m.common.draft }}</dd></div>
+          <div v-if="previous" class="flex justify-between"><dt class="text-muted-foreground">{{ m.editor.commits }}</dt><dd>{{ previous.commits }}</dd></div>
+          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">{{ m.editor.file }}</dt><dd class="truncate font-mono text-xs">releases/{{ head.version || '…' }}.json</dd></div>
         </dl>
 
         <div class="flex flex-col gap-2.5 border-t pt-5">
-          <h3 class="text-[13px] font-semibold">So erscheint es</h3>
-          <p v-if="summary.length === 0" class="text-xs text-muted-foreground">Noch keine Änderungen. „+" → Änderung.</p>
+          <h3 class="text-[13px] font-semibold">{{ m.editor.preview2 }}</h3>
+          <p v-if="summary.length === 0" class="text-xs text-muted-foreground">{{ m.editor.noChanges }}</p>
           <div v-for="row in summary" :key="row.key" class="flex items-center justify-between text-[13px]">
             <span class="rounded-md px-2 py-0.5 text-xs font-medium" :class="SECTION_TONE[row.key]">{{ row.label }}</span>
             <span class="text-muted-foreground">{{ row.count }}</span>
           </div>
-          <p v-if="imageBlocks > 1" class="text-xs text-amber-700">Ein Release hat ein Bild; nur das erste wird gespeichert.</p>
+          <p v-if="imageBlocks > 1" class="text-xs text-amber-700">{{ m.editor.tooManyImages }}</p>
         </div>
       </aside>
     </div>
@@ -290,12 +297,12 @@ function closeLeave(leave: boolean) {
     <Dialog :open="leaveOpen" @update:open="(o) => { if (!o) closeLeave(false) }">
       <DialogContent :show-close-button="false" class="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>Änderungen verwerfen?</DialogTitle>
-          <DialogDescription>Was seit dem letzten Speichern geändert wurde, geht verloren.</DialogDescription>
+          <DialogTitle>{{ m.editor.leaveTitle }}</DialogTitle>
+          <DialogDescription>{{ m.editor.leaveText }}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" @click="closeLeave(false)">Weiter bearbeiten</Button>
-          <Button variant="destructive" @click="closeLeave(true)">Verwerfen</Button>
+          <Button variant="outline" @click="closeLeave(false)">{{ m.editor.leaveStay }}</Button>
+          <Button variant="destructive" @click="closeLeave(true)">{{ m.editor.leaveDiscard }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

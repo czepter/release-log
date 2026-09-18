@@ -16,8 +16,9 @@ type Detail = {
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const { data, error, refresh } = await useFetch<Detail>(() => `/api/logs/${encodeURIComponent(id.value)}`)
-if (error.value?.statusCode === 404) throw createError({ statusCode: 404, statusMessage: 'Dieses Log gibt es nicht.' })
-useHead({ title: () => data.value?.product ?? 'Log' })
+const { m, t, p: plural, viewOptions, visibilityOptions, formatDate, relativeTime, apiText } = useI18n()
+if (error.value?.statusCode === 404) throw createError({ statusCode: 404, statusMessage: m.value.error.logNotFound })
+useHead({ title: () => data.value?.product ?? m.value.log.fallbackTitle })
 
 const now = useNow()
 onMounted(() => { now.value = Date.now() })
@@ -39,10 +40,10 @@ async function saveSettings() {
     await $fetch(`/api/logs/${encodeURIComponent(id.value)}/settings`, {
       method: 'PUT', body: { ...settings, expected_sha: data.value?.configBlobSha ?? '' },
     })
-    toast.success('Gespeichert. Der Abgleich übernimmt die Änderung gleich.')
+    toast.success(m.value.log.settingsSaved)
     setTimeout(() => refresh(), 1500)
   } catch (err) {
-    toast.error(apiMessage(err))
+    toast.error(apiText(err))
   } finally {
     saving.value = false
   }
@@ -60,10 +61,10 @@ async function upload(file: File | undefined) {
       method: 'POST', body: file,
       headers: { 'content-type': file.type || 'application/octet-stream', 'x-filename': encodeURIComponent(file.name) },
     })
-    toast.success(`${res.path} hochgeladen.`)
+    toast.success(t(m.value.log.uploaded, { path: res.path }))
     setTimeout(() => refresh(), 1500)
   } catch (err) {
-    toast.error(apiMessage(err))
+    toast.error(apiText(err))
   } finally {
     uploading.value = false
     if (fileInput.value) fileInput.value.value = ''
@@ -78,19 +79,19 @@ const mediaUrl = (path: string) => `/l/${encodeURIComponent(id.value)}/media/${p
 const origin = useRequestURL().origin
 const base = computed(() => `${origin}/l/${encodeURIComponent(id.value)}`)
 const embedMode = ref('iframe')
-const EMBED_OPTIONS = [{ value: 'iframe', label: 'Als iframe' }, { value: 'api', label: 'Über die JSON-API' }]
+const embedOptions = computed(() => [{ value: 'iframe', label: m.value.log.embedIframe }, { value: 'api', label: m.value.log.embedApi }])
 // Ein echtes Beispiel liest sich besser als ein Platzhalter.
 const sampleVersion = computed(() => data.value?.releases[0]?.version ?? '1.0.0')
 const iframeSnippet = computed(() => [
   '<iframe',
   `  src="${base.value}"`,
-  `  title="Changelog ${data.value?.product ?? ''}"`,
+  `  title="${t(m.value.log.iframeTitle, { product: data.value?.product ?? '' })}"`,
   '  loading="lazy"',
   '  style="width:100%;height:760px;border:0"',
   '></iframe>',
 ].join('\n'))
 const fetchSnippet = computed(() => [
-  '// "Was ist neu?" markieren, sobald eine neue Version erschienen ist.',
+  m.value.log.snippetComment,
   `const res = await fetch('${base.value}/versions')`,
   'const { product, latest, versions } = await res.json()',
   "const seen = localStorage.getItem('changelog-seen')",
@@ -104,10 +105,10 @@ async function deleteLog() {
   deleting.value = true
   try {
     await $fetch(`/api/logs/${encodeURIComponent(id.value)}`, { method: 'DELETE', body: { confirm_name: confirmName.value } })
-    toast.success('Log gelöscht.')
+    toast.success(m.value.log.deleted)
     await navigateTo('/dashboard')
   } catch (err) {
-    toast.error(apiMessage(err))
+    toast.error(apiText(err))
   } finally {
     deleting.value = false
   }
@@ -116,13 +117,13 @@ async function deleteLog() {
 
 <template>
   <div v-if="error && !data" class="flex flex-col gap-4">
-    <Alert variant="destructive"><AlertDescription>{{ apiMessage(error, 'Das Log konnte nicht geladen werden.') }}</AlertDescription></Alert>
-    <NuxtLink to="/dashboard" class="text-sm underline">Zurück zu den Logs</NuxtLink>
+    <Alert variant="destructive"><AlertDescription>{{ apiText(error, m.log.loadFailed) }}</AlertDescription></Alert>
+    <NuxtLink to="/dashboard" class="text-sm underline">{{ m.log.backToLogs }}</NuxtLink>
   </div>
 
   <div v-else-if="data" class="flex flex-col gap-7">
-    <nav aria-label="Brotkrumen" class="flex items-center gap-1.5 text-[13px] text-muted-foreground">
-      <NuxtLink to="/dashboard" class="hover:text-foreground">Logs</NuxtLink>
+    <nav :aria-label="m.common.breadcrumb" class="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+      <NuxtLink to="/dashboard" class="hover:text-foreground">{{ m.header.logs }}</NuxtLink>
       <ChevronRight class="size-3.5" />
       <span class="text-foreground">{{ data.product }}</span>
     </nav>
@@ -135,14 +136,14 @@ async function deleteLog() {
             <GitBranch class="size-3.5" />{{ data.owner }}/{{ data.repo }}
           </a>
           <span class="text-border">·</span>
-          <Badge v-if="frozen" class="bg-amber-100 text-amber-800">Eingefroren</Badge>
-          <Badge v-else class="bg-green-50 text-green-700"><span class="size-1.5 rounded-full bg-green-500" />Aktiv</Badge>
+          <Badge v-if="frozen" class="bg-amber-100 text-amber-800">{{ m.common.frozen }}</Badge>
+          <Badge v-else class="bg-green-50 text-green-700"><span class="size-1.5 rounded-full bg-green-500" />{{ m.common.active }}</Badge>
           <span class="text-border">·</span>
-          <span>Zuletzt abgeglichen {{ relativeTime(data.indexedAt, now) }}</span>
+          <span>{{ t(m.log.lastSynced, { when: relativeTime(data.indexedAt, now) }) }}</span>
         </div>
       </div>
       <Button as-child variant="outline" size="lg">
-        <a :href="`/l/${encodeURIComponent(data.id)}`" target="_blank" rel="noopener">Öffentliche Seite <ExternalLink /></a>
+        <a :href="`/l/${encodeURIComponent(data.id)}`" target="_blank" rel="noopener">{{ m.log.publicPage }} <ExternalLink /></a>
       </Button>
     </div>
 
@@ -150,20 +151,20 @@ async function deleteLog() {
       <div class="flex flex-col gap-6">
         <Alert v-if="data.installation === 'no_installation'" variant="destructive">
           <TriangleAlert />
-          <AlertTitle>Kein Zugriff auf das Repository</AlertTitle>
+          <AlertTitle>{{ m.log.noInstallTitle }}</AlertTitle>
           <AlertDescription>
-            Die GitHub App ist auf {{ data.owner }}/{{ data.repo }} nicht installiert. Bis sie wieder installiert ist, schlagen Speichern, Hochladen und Abgleich fehl.
-            <a :href="`https://github.com/${data.owner}/${data.repo}/settings/installations`" target="_blank" rel="noopener" class="underline">Installationen auf GitHub öffnen</a>
+            {{ t(m.log.noInstallText, { repo: `${data.owner}/${data.repo}` }) }}
+            <a :href="`https://github.com/${data.owner}/${data.repo}/settings/installations`" target="_blank" rel="noopener" class="underline">{{ m.log.noInstallLink }}</a>
           </AlertDescription>
         </Alert>
         <Alert v-else-if="data.installation === 'gone'" variant="destructive">
           <TriangleAlert />
-          <AlertTitle>Repository nicht auffindbar</AlertTitle>
-          <AlertDescription>{{ data.owner }}/{{ data.repo }} gibt es auf GitHub nicht mehr, es wurde gelöscht oder umbenannt.</AlertDescription>
+          <AlertTitle>{{ m.log.goneTitle }}</AlertTitle>
+          <AlertDescription>{{ t(m.log.goneText, { repo: `${data.owner}/${data.repo}` }) }}</AlertDescription>
         </Alert>
         <Alert v-if="data.errors.length > 0" variant="destructive">
           <TriangleAlert />
-          <AlertTitle>{{ data.errors.length }} Abgleichfehler</AlertTitle>
+          <AlertTitle>{{ plural(m.log.syncErrors, data.errors.length) }}</AlertTitle>
           <AlertDescription>
             <dl class="mt-1 grid grid-cols-[minmax(0,220px)_minmax(0,1fr)] gap-x-3 gap-y-1">
               <template v-for="e in data.errors" :key="e.path">
@@ -177,17 +178,17 @@ async function deleteLog() {
         <section class="overflow-hidden rounded-xl border bg-card">
           <div class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
             <div class="flex flex-col gap-0.5">
-              <h2 class="text-base font-semibold">Releases</h2>
-              <p class="text-[13px] text-muted-foreground">Hier im Editor oder über MCP geschrieben; öffentlich erst nach dem Veröffentlichen.</p>
+              <h2 class="text-base font-semibold">{{ m.log.releases }}</h2>
+              <p class="text-[13px] text-muted-foreground">{{ m.log.releasesHint }}</p>
             </div>
             <div class="flex items-center gap-3">
-              <span class="text-[13px] text-muted-foreground">{{ data.releases.length }} {{ data.releases.length === 1 ? 'Release' : 'Releases' }} · {{ drafts }} {{ drafts === 1 ? 'Entwurf' : 'Entwürfe' }}</span>
+              <span class="text-[13px] text-muted-foreground">{{ plural(m.log.releaseCount, data.releases.length) }} · {{ plural(m.log.draftCount, drafts) }}</span>
               <Button v-if="!frozen" as-child size="sm">
-                <NuxtLink :to="`/dashboard/logs/${encodeURIComponent(data.id)}/releases/new`"><Plus /> Neues Release</NuxtLink>
+                <NuxtLink :to="`/dashboard/logs/${encodeURIComponent(data.id)}/releases/new`"><Plus /> {{ m.log.newRelease }}</NuxtLink>
               </Button>
             </div>
           </div>
-          <div v-if="data.releases.length === 0" class="px-5 py-12 text-center text-sm text-muted-foreground">Noch keine Releases.</div>
+          <div v-if="data.releases.length === 0" class="px-5 py-12 text-center text-sm text-muted-foreground">{{ m.log.noReleases }}</div>
           <ul v-else>
             <li v-for="r in data.releases" :key="r.version" class="relative border-b last:border-b-0 hover:bg-muted/40">
               <NuxtLink
@@ -197,8 +198,8 @@ async function deleteLog() {
                 <span><span class="rounded-md bg-primary px-2 py-0.5 font-mono text-xs text-primary-foreground">{{ r.version }}</span></span>
                 <span class="truncate">{{ r.headline }}</span>
                 <span class="text-[13px] text-muted-foreground">{{ formatDate(r.date) }}</span>
-                <AppStatusDot v-if="r.published_at" tone="green"><span class="text-green-700">Veröffentlicht</span></AppStatusDot>
-                <AppStatusDot v-else tone="gray"><span class="text-muted-foreground">Entwurf</span></AppStatusDot>
+                <AppStatusDot v-if="r.published_at" tone="green"><span class="text-green-700">{{ m.common.published }}</span></AppStatusDot>
+                <AppStatusDot v-else tone="gray"><span class="text-muted-foreground">{{ m.common.draft }}</span></AppStatusDot>
               </NuxtLink>
             </li>
           </ul>
@@ -207,55 +208,51 @@ async function deleteLog() {
         <section class="flex flex-col gap-4 rounded-xl border bg-card p-5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="flex flex-col gap-0.5">
-              <h2 class="flex items-center gap-2 text-base font-semibold"><Code2 class="size-4" /> Einbinden</h2>
-              <p class="text-[13px] text-muted-foreground">Die öffentliche Seite in deiner App zeigen, oder die Releases selbst abfragen.</p>
+              <h2 class="flex items-center gap-2 text-base font-semibold"><Code2 class="size-4" /> {{ m.log.embed }}</h2>
+              <p class="text-[13px] text-muted-foreground">{{ m.log.embedHint }}</p>
             </div>
-            <AppSegmented v-model="embedMode" label="Art der Einbindung" :options="EMBED_OPTIONS" class="w-[280px]" />
+            <AppSegmented v-model="embedMode" :label="m.log.embedMode" :options="embedOptions" class="w-[280px]" />
           </div>
 
           <Alert v-if="data.visibility === 'private'">
             <TriangleAlert />
             <AlertDescription>
-              Das Log ist privat. Seite und API antworten für alle, die keine Schreibrechte auf
-              {{ data.owner }}/{{ data.repo }} haben, mit 404 — auch im iframe. Für eine öffentliche Einbindung die
-              Sichtbarkeit rechts auf <strong class="text-foreground">Öffentlich</strong> stellen.
+              {{ m.log.privateWarn1 }} {{ data.owner }}/{{ data.repo }} {{ m.log.privateWarn2 }}
+              <strong class="text-foreground">{{ m.common.public }}</strong>{{ m.log.privateWarn3 }}
             </AlertDescription>
           </Alert>
 
           <template v-if="embedMode === 'iframe'">
             <AppCopyBlock :code="iframeSnippet" label="HTML" />
             <p class="text-[13px] leading-5 text-muted-foreground">
-              Die Seite setzt kein <code class="font-mono">X-Frame-Options</code>, lässt sich also von jeder Domain
-              einbetten. Sie bringt ihr eigenes Layout mit und wächst mit der Zahl der Releases — gib dem
-              <code class="font-mono">iframe</code> darum eine feste Höhe und lass ihn intern scrollen, oder rendere
-              in der Ansicht <strong class="text-foreground">Zeitstrahl</strong>, die kompakter baut.
+              {{ m.log.iframeNote1 }} <code class="font-mono">X-Frame-Options</code>{{ m.log.iframeNote2 }}
+              <code class="font-mono">iframe</code> {{ t(m.log.iframeNote3, { view: m.options.viewTimeline }) }}
             </p>
           </template>
 
           <template v-else>
             <div class="flex flex-col gap-2">
-              <span class="text-[13px] font-medium">Endpunkte</span>
+              <span class="text-[13px] font-medium">{{ m.log.endpoints }}</span>
               <ul class="flex flex-col gap-2.5 text-[13px]">
                 <li class="flex flex-col gap-0.5">
                   <code class="overflow-x-auto font-mono whitespace-nowrap">GET {{ base }}/versions</code>
-                  <span class="text-muted-foreground">Produktname, <code class="font-mono">latest</code> und alle Versionen mit Datum und Überschrift.</span>
+                  <span class="text-muted-foreground">{{ m.log.endpointVersions1 }} <code class="font-mono">latest</code> {{ m.log.endpointVersions2 }}</span>
                 </li>
                 <li class="flex flex-col gap-0.5">
                   <code class="overflow-x-auto font-mono whitespace-nowrap">GET {{ base }}/releases?page=1&amp;per_page=10</code>
-                  <span class="text-muted-foreground">Seitenweiser Feed; je Release die Abschnitte mit Anzahl statt Einträgen.</span>
+                  <span class="text-muted-foreground">{{ m.log.endpointReleases }}</span>
                 </li>
                 <li class="flex flex-col gap-0.5">
                   <code class="overflow-x-auto font-mono whitespace-nowrap">GET {{ base }}/releases/{{ sampleVersion }}</code>
-                  <span class="text-muted-foreground">Ein Release vollständig, mit allen Einträgen und Bild.</span>
+                  <span class="text-muted-foreground">{{ m.log.endpointRelease }}</span>
                 </li>
               </ul>
             </div>
             <AppCopyBlock :code="fetchSnippet" label="JavaScript" />
             <p class="text-[13px] leading-5 text-muted-foreground">
-              Die Antworten sind <code class="font-mono">access-control-allow-origin: *</code>, gehen also direkt aus dem
-              Browser. Sie tragen ein <code class="font-mono">ETag</code> des abgeglichenen Commits und dürfen 60 Sekunden
-              zwischengespeichert werden. Die <code class="font-mono">url</code>-Felder kommen als Pfad ohne Host — davor gehört der Origin dieser Instanz.
-              Entwürfe erscheinen nie, veröffentlichte Releases sofort nach dem Abgleich.
+              {{ m.log.apiNote1 }} <code class="font-mono">access-control-allow-origin: *</code>{{ m.log.apiNote2 }}
+              <code class="font-mono">ETag</code> {{ m.log.apiNote3 }}
+              <code class="font-mono">url</code>{{ m.log.apiNote4 }}
             </p>
           </template>
         </section>
@@ -263,27 +260,27 @@ async function deleteLog() {
 
       <div class="flex flex-col gap-6">
         <Card class="gap-4 p-5">
-          <h2 class="text-base font-semibold">Einstellungen</h2>
+          <h2 class="text-base font-semibold">{{ m.log.settings }}</h2>
           <form class="flex flex-col gap-4" @submit.prevent="saveSettings">
             <div class="flex flex-col gap-2">
-              <span class="text-sm font-medium">Ansicht</span>
-              <AppSegmented v-model="settings.view" label="Ansicht" :options="VIEW_OPTIONS" />
+              <span class="text-sm font-medium">{{ m.log.view }}</span>
+              <AppSegmented v-model="settings.view" :label="m.log.view" :options="viewOptions" />
             </div>
             <div class="flex flex-col gap-2">
-              <span class="text-sm font-medium">Sichtbarkeit</span>
-              <AppSegmented v-model="settings.visibility" label="Sichtbarkeit" :options="VISIBILITY_OPTIONS" />
+              <span class="text-sm font-medium">{{ m.log.visibility }}</span>
+              <AppSegmented v-model="settings.visibility" :label="m.log.visibility" :options="visibilityOptions" />
             </div>
             <div class="flex flex-col gap-2">
-              <Label for="notes">Kurationshinweise</Label>
-              <Textarea id="notes" v-model="settings.curation_notes" rows="4" placeholder="Hinweise für den MCP-Client: Tonfall, was ins Log gehört, was nicht." />
-              <p class="text-xs text-muted-foreground">Landet in <code class="font-mono">release-log.json</code> im Repository.</p>
+              <Label for="notes">{{ m.log.curationNotes }}</Label>
+              <Textarea id="notes" v-model="settings.curation_notes" rows="4" :placeholder="m.log.curationPlaceholder" />
+              <p class="text-xs text-muted-foreground">{{ m.log.curationHint1 }} <code class="font-mono">release-log.json</code> {{ m.log.curationHint2 }}</p>
             </div>
-            <Button type="submit" size="lg" :disabled="saving || frozen">{{ saving ? 'Speichert…' : 'Speichern' }}</Button>
+            <Button type="submit" size="lg" :disabled="saving || frozen">{{ saving ? m.common.saving : m.common.save }}</Button>
           </form>
         </Card>
 
         <Card class="gap-3.5 p-5">
-          <h2 class="text-base font-semibold">Medien</h2>
+          <h2 class="text-base font-semibold">{{ m.log.media }}</h2>
           <label
             class="relative flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center transition-colors"
             :class="dragging ? 'border-primary bg-muted' : 'bg-muted/40 hover:bg-muted/70'"
@@ -291,8 +288,8 @@ async function deleteLog() {
             @drop.prevent="dragging = false; upload($event.dataTransfer?.files[0])"
           >
             <Upload class="size-5 text-muted-foreground" />
-            <span class="text-sm font-medium">{{ uploading ? 'Lädt hoch…' : 'Bild hierher ziehen oder auswählen' }}</span>
-            <span class="text-xs text-muted-foreground">PNG, JPG oder WebP</span>
+            <span class="text-sm font-medium">{{ uploading ? m.log.uploading : m.log.dropHint }}</span>
+            <span class="text-xs text-muted-foreground">{{ m.log.fileTypes }}</span>
             <input ref="fileInput" type="file" accept=".png,.jpg,.jpeg,.webp" class="sr-only" :disabled="uploading || frozen" @change="upload(($event.target as HTMLInputElement).files?.[0])">
           </label>
           <ul v-if="data.media.length > 0" class="grid grid-cols-3 gap-2">
@@ -301,18 +298,18 @@ async function deleteLog() {
               <span class="truncate font-mono text-[11px] text-muted-foreground" :title="path">{{ path.replace(/^media\//, '') }}</span>
             </li>
           </ul>
-          <p v-else class="flex items-center gap-2 text-xs text-muted-foreground"><ImageIcon class="size-3.5" /> Noch keine Bilder.</p>
+          <p v-else class="flex items-center gap-2 text-xs text-muted-foreground"><ImageIcon class="size-3.5" /> {{ m.log.noImages }}</p>
         </Card>
 
         <Card class="gap-3 border-destructive/30 p-5">
-          <h2 class="text-base font-semibold text-destructive">Log löschen</h2>
+          <h2 class="text-base font-semibold text-destructive">{{ m.log.deleteTitle }}</h2>
           <p class="text-[13px] leading-5 text-muted-foreground">
-            Entfernt das Log endgültig aus dem Index. Das Repository auf GitHub bleibt. Gib zur Bestätigung
-            <strong class="text-foreground">{{ data.product }}</strong> ein.
+            {{ m.log.deleteText1 }}
+            <strong class="text-foreground">{{ data.product }}</strong>{{ m.log.deleteText2 }}
           </p>
-          <Input v-model="confirmName" aria-label="Produktname zur Bestätigung" />
+          <Input v-model="confirmName" :aria-label="m.log.deleteConfirmLabel" />
           <Button variant="destructive" size="lg" :disabled="confirmName !== data.product || deleting" @click="deleteLog">
-            <Trash2 /> Endgültig löschen
+            <Trash2 /> {{ m.log.deleteButton }}
           </Button>
         </Card>
       </div>

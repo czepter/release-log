@@ -2,8 +2,9 @@
 import type { NuxtError } from '#app'
 
 const props = defineProps<{ error: NuxtError }>()
+const { m } = useI18n()
 const notFound = computed(() => props.error.statusCode === 404)
-useHead({ title: () => (notFound.value ? 'Nicht gefunden' : 'Fehler') })
+useHead({ title: () => (notFound.value ? m.value.error.titleNotFound : m.value.error.titleGeneric) })
 </script>
 
 <template>
@@ -11,13 +12,12 @@ useHead({ title: () => (notFound.value ? 'Nicht gefunden' : 'Fehler') })
     <Card class="w-full max-w-sm">
       <CardHeader>
         <p class="font-mono text-xs text-muted-foreground">{{ error.statusCode }}</p>
-        <CardTitle>{{ notFound ? 'Nicht gefunden' : 'Etwas ist schiefgegangen' }}</CardTitle>
-        <CardDescription>
-          {{ notFound ? 'Diese Seite gibt es nicht, oder sie ist nicht öffentlich.' : 'Bitte lade die Seite neu. Hält der Fehler an, liegt er bei uns.' }}
-        </CardDescription>
+        <CardTitle>{{ notFound ? m.error.headingNotFound : m.error.headingGeneric }}</CardTitle>
+        <CardDescription>{{ notFound ? m.error.textNotFound : m.error.textGeneric }}</CardDescription>
       </CardHeader>
-      <CardFooter>
-        <Button variant="outline" class="w-full" @click="clearError({ redirect: '/dashboard' })">Zum Dashboard</Button>
+      <CardFooter class="flex-col items-stretch gap-3">
+        <Button variant="outline" class="w-full" @click="clearError({ redirect: '/dashboard' })">{{ m.error.toDashboard }}</Button>
+        <AppLanguageSwitch class="self-center" />
       </CardFooter>
     </Card>
   </main>

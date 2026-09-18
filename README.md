@@ -35,6 +35,14 @@ sich anmelden, die Zulassungsliste wird nicht mehr gefragt. Ohne die
 Variable gilt sie wie bisher, und ohne Eintrag kommt niemand herein außer
 den Konten aus `ADMIN_LOGINS`.
 
+Die Oberfläche spricht Deutsch und Englisch. Die Sprache steht im Cookie
+`rl_lang`; ohne Cookie entscheidet `Accept-Language`, ohne passende Sprache
+Deutsch. Die Texte liegen in `web/app/i18n/de.ts` und `en.ts` -- `de.ts` ist
+die Quelle der Wahrheit, `en.ts` wird dagegen typgeprüft, und
+`messages.test.ts` hält beide auf derselben Schlüsselmenge. Die Maschinen-
+Fläche bleibt unberührt: die Abschnitts-Labels im JSON (`lib/sections.ts`)
+sind weiter deutsch, die Oberfläche übersetzt sie über den stabilen `key`.
+
 `MAX_LOGS_PER_OWNER` (optional, Vorgabe 10) begrenzt, wie viele Logs ein
 Konto führen darf. Die Grenze zählt je Repo-Eigentümer und gilt für neu
 angelegte wie für übernommene Repositories. `0` hebt sie auf.

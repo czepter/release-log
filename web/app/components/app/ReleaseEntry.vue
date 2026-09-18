@@ -2,12 +2,14 @@
 import { ChevronDown } from '@lucide/vue'
 
 const props = defineProps<{ logId?: string; release: PublicRelease; collapsible: boolean; last?: boolean; permalink?: boolean; href?: string }>()
+const { m, p: plural, section, formatDate } = useI18n()
 
 // Zeitstrahl: nur der erste Abschnitt steht offen. Vollständig: alle.
 const open = ref<Record<string, boolean>>(Object.fromEntries(
   props.release.sections.map((s, i) => [s.key, !props.collapsible || i === 0]),
 ))
 const paragraphs = (text: string) => text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
+const sectionLabelOf = (s: PublicSection) => section(s.key, s.label)
 const refs = (c: PublicChange) => [c.pr !== null ? `PR #${c.pr}` : null, ...c.issues.map((n) => `#${n}`)].filter(Boolean).join(' · ')
 </script>
 
@@ -16,7 +18,7 @@ const refs = (c: PublicChange) => [c.pr !== null ? `PR #${c.pr}` : null, ...c.is
     <div class="mb-3 flex items-center gap-2 sm:sticky sm:top-24 sm:mb-0 sm:flex-col sm:items-end sm:gap-2 sm:self-start sm:pt-0.5">
       <span class="rounded-md bg-primary px-2 py-0.5 font-mono text-xs font-medium text-primary-foreground">v{{ release.version }}</span>
       <time :datetime="release.date" class="text-[13px] text-muted-foreground">{{ formatDate(release.date) }}</time>
-      <Badge v-if="release.published_at === null" variant="outline" class="text-muted-foreground">Entwurf</Badge>
+      <Badge v-if="release.published_at === null" variant="outline" class="text-muted-foreground">{{ m.common.draft }}</Badge>
     </div>
 
     <div class="relative hidden justify-center sm:flex" aria-hidden="true">
@@ -41,8 +43,8 @@ const refs = (c: PublicChange) => [c.pr !== null ? `PR #${c.pr}` : null, ...c.is
               :aria-expanded="open[section.key]" @click="open[section.key] = !open[section.key]"
             >
               <span class="flex items-center gap-2">
-                <span class="rounded-md px-2 py-0.5 text-xs font-medium" :class="SECTION_TONE[section.key]">{{ section.label }}</span>
-                <span class="text-xs text-muted-foreground">{{ section.items.length }} {{ section.items.length === 1 ? 'Eintrag' : 'Einträge' }}</span>
+                <span class="rounded-md px-2 py-0.5 text-xs font-medium" :class="SECTION_TONE[section.key]">{{ sectionLabelOf(section) }}</span>
+                <span class="text-xs text-muted-foreground">{{ plural(m.publicLog.entryCount, section.items.length) }}</span>
               </span>
               <ChevronDown class="size-4 text-muted-foreground transition-transform group-hover:text-foreground" :class="open[section.key] && 'rotate-180'" />
             </button>

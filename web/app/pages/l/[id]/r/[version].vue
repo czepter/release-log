@@ -9,7 +9,7 @@ const version = String(route.params.version)
 const { data, error } = await useFetch<{ log: PublicLogHead; release: PublicRelease }>(
   `/api/public/logs/${encodeURIComponent(id)}/r/${encodeURIComponent(version)}`,
 )
-if (error.value || !data.value) throw createError({ statusCode: 404, statusMessage: 'Nicht gefunden' })
+if (error.value || !data.value) throw createError({ statusCode: 404, statusMessage: 'not_found' })
 
 useHead({
   title: () => `${data.value!.log.product} ${data.value!.release.version}`,
@@ -25,5 +25,6 @@ useHead({
     <ol>
       <AppReleaseEntry :log-id="id" :release="data!.release" :collapsible="false" last permalink />
     </ol>
+    <AppLanguageSwitch class="self-start" />
   </div>
 </template>

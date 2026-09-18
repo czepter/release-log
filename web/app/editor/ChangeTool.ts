@@ -1,14 +1,31 @@
 import type { Change, ChangeType } from '../../../lib/document.ts'
+import type { Messages } from '../i18n/messages.ts'
+import de from '../i18n/de.ts'
 import { el, plainField, readPlain, ICON } from './dom.ts'
 import { newChange } from '../utils/releaseBlocks.ts'
 
-const TYPES: Array<{ value: ChangeType; label: string; tone: string }> = [
-  { value: 'feat', label: 'Neu', tone: 'bg-green-100 text-green-700' },
-  { value: 'perf', label: 'Änderung', tone: 'bg-blue-100 text-blue-700' },
-  { value: 'fix', label: 'Behoben', tone: 'bg-orange-100 text-orange-700' },
-]
+// Die Texte kommen aus den Nachrichten der Seite (useI18n), durchgereicht
+// als Konfiguration -- ein Editor.js-Werkzeug ist kein Vue-Bauteil und kann
+// selbst kein Composable aufrufen.
+export type ChangeText = Messages['editor']['change']
 
-type Options = { data: Partial<Change>; config?: { date?: () => string }; api: { blocks: { getCurrentBlockIndex(): number } } }
+const TONES: Record<ChangeType, string> = {
+  feat: 'bg-green-100 text-green-700',
+  perf: 'bg-blue-100 text-blue-700',
+  fix: 'bg-orange-100 text-orange-700',
+}
+const TYPES: ChangeType[] = ['feat', 'perf', 'fix']
+const LABEL: Record<ChangeType, keyof ChangeText> = { feat: 'typeFeat', perf: 'typePerf', fix: 'typeFix' }
+
+// Der Werkzeugkasten von Editor.js fragt den Titel statisch ab, ohne Zugriff
+// auf die Konfiguration; die Seite setzt ihn darum vor dem Erzeugen des
+// Editors selbst (setChangeText).
+let toolboxText: ChangeText = de.editor.change
+export function setChangeText(text: ChangeText): void {
+  toolboxText = text
+}
+
+type Options = { data: Partial<Change>; config?: { date?: () => string; text?: () => ChangeText }; api: { blocks: { getCurrentBlockIndex(): number } } }
 
 const numberList = (text: string): number[] =>
   text.split(/[\s,;#]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n > 0)
@@ -17,7 +34,7 @@ const numberList = (text: string): number[] =>
 // Block-Menü (⋮⋮), der Typ auf dem farbigen Knopf -- beides wie im Canvas.
 export default class ChangeTool {
   static get toolbox() {
-    return { title: 'Änderung', icon: ICON.change }
+    return { title: toolboxText.toolbox, icon: ICON.change }
   }
 
   static get enableLineBreaks() {
@@ -25,6 +42,7 @@ export default class ChangeTool {
   }
 
   private data: Change
+  private text: ChangeText
   private root!: HTMLElement
   private typeButton!: HTMLButtonElement
   private breakingBadge!: HTMLElement
@@ -33,22 +51,23 @@ export default class ChangeTool {
   constructor({ data, config }: Options) {
     const base = newChange(config?.date?.() ?? new Date().toISOString().slice(0, 10))
     this.data = { ...base, ...data, issues: [...(data.issues ?? [])] }
+    this.text = config?.text?.() ?? toolboxText
   }
 
   render(): HTMLElement {
     const small = 'h-7 rounded-md border border-dashed border-zinc-300 bg-transparent px-2 font-mono text-xs text-zinc-600 outline-none focus:border-zinc-900 focus:border-solid'
-    this.typeButton = el('button', 'inline-flex h-6 items-center gap-1 rounded-md pr-1.5 pl-2.5 text-xs font-medium cursor-pointer', { type: 'button', title: 'Typ wechseln' })
+    this.typeButton = el('button', 'inline-flex h-6 items-center gap-1 rounded-md pr-1.5 pl-2.5 text-xs font-medium cursor-pointer', { type: 'button', title: this.text.switchType })
     this.typeButton.addEventListener('click', () => this.cycleType())
-    this.breakingBadge = el('span', 'rounded-md bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700', {}, ['Breaking · erscheint unter „Wichtig"'])
+    this.breakingBadge = el('span', 'rounded-md bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700', {}, [this.text.breakingBadge])
 
     this.fields = {
-      scope: el('input', `${small} w-28`, { placeholder: 'scope', 'aria-label': 'Bereich (scope)' }),
-      title: plainField(this.data.title, 'text-base font-semibold leading-6', 'Titel des Eintrags', 'Titel'),
-      description: plainField(this.data.description, 'min-h-[22px] whitespace-pre-wrap text-sm leading-[22px] text-zinc-600', 'Beschreibung: was jetzt geht, warum, was nebenbei behoben wurde', 'Beschreibung', true),
-      pr: el('input', `${small} w-20`, { placeholder: 'PR #', inputmode: 'numeric', 'aria-label': 'Pull-Request-Nummer' }),
-      issues: el('input', `${small} w-32`, { placeholder: 'Issues 3, 4', 'aria-label': 'Issue-Nummern' }),
-      commit: el('input', `${small} w-28`, { placeholder: 'Commit', 'aria-label': 'Commit' }),
-      date: el('input', `${small} w-36 font-sans`, { type: 'date', 'aria-label': 'Datum des Eintrags' }),
+      scope: el('input', `${small} w-28`, { placeholder: 'scope', 'aria-label': this.text.scopeLabel }),
+      title: plainField(this.data.title, 'text-base font-semibold leading-6', this.text.titlePlaceholder, this.text.titleLabel),
+      description: plainField(this.data.description, 'min-h-[22px] whitespace-pre-wrap text-sm leading-[22px] text-zinc-600', this.text.descriptionPlaceholder, this.text.descriptionLabel, true),
+      pr: el('input', `${small} w-20`, { placeholder: 'PR #', inputmode: 'numeric', 'aria-label': this.text.prLabel }),
+      issues: el('input', `${small} w-32`, { placeholder: this.text.issuesPlaceholder, 'aria-label': this.text.issuesLabel }),
+      commit: el('input', `${small} w-28`, { placeholder: this.text.commitPlaceholder, 'aria-label': this.text.commitLabel }),
+      date: el('input', `${small} w-36 font-sans`, { type: 'date', 'aria-label': this.text.dateLabel }),
     }
     this.fields.scope.value = this.data.scope ?? ''
     this.fields.pr.value = this.data.pr === null ? '' : String(this.data.pr)
@@ -67,15 +86,15 @@ export default class ChangeTool {
   }
 
   private paint(): void {
-    const type = TYPES.find((t) => t.value === this.data.type) ?? TYPES[0]
-    this.typeButton.className = `inline-flex h-6 items-center gap-1 rounded-md pr-1.5 pl-2.5 text-xs font-medium cursor-pointer ${type.tone}`
-    this.typeButton.innerHTML = `${type.label}${ICON.type.replace('width="17" height="17"', 'width="12" height="12"')}`
+    const type = TYPES.includes(this.data.type) ? this.data.type : TYPES[0]!
+    this.typeButton.className = `inline-flex h-6 items-center gap-1 rounded-md pr-1.5 pl-2.5 text-xs font-medium cursor-pointer ${TONES[type]}`
+    this.typeButton.innerHTML = `${this.text[LABEL[type]]}${ICON.type.replace('width="17" height="17"', 'width="12" height="12"')}`
     this.breakingBadge.hidden = !this.data.breaking
   }
 
   private cycleType(): void {
-    const i = TYPES.findIndex((t) => t.value === this.data.type)
-    this.data.type = TYPES[(i + 1) % TYPES.length].value
+    const i = TYPES.indexOf(this.data.type)
+    this.data.type = TYPES[(i + 1) % TYPES.length]!
     this.changed()
   }
 
@@ -88,12 +107,12 @@ export default class ChangeTool {
 
   renderSettings() {
     return [
-      ...TYPES.map((t) => ({
-        icon: ICON.type, title: t.label, isActive: () => this.data.type === t.value, closeOnActivate: true,
-        onActivate: () => { this.data.type = t.value; this.changed() },
+      ...TYPES.map((value) => ({
+        icon: ICON.type, title: this.text[LABEL[value]], isActive: () => this.data.type === value, closeOnActivate: true,
+        onActivate: () => { this.data.type = value; this.changed() },
       })),
       {
-        icon: ICON.alert, title: 'Breaking', toggle: true, isActive: () => this.data.breaking, closeOnActivate: true,
+        icon: ICON.alert, title: this.text.breaking, toggle: true, isActive: () => this.data.breaking, closeOnActivate: true,
         onActivate: () => { this.data.breaking = !this.data.breaking; this.changed() },
       },
     ]

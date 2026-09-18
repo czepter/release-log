@@ -1,12 +1,10 @@
 <script setup lang="ts">
 const route = useRoute()
-const MESSAGES: Record<string, { title: string; text: string }> = {
-  state: { title: 'Anmeldung abgelaufen', text: 'Der Anmeldevorgang ist ungültig oder abgelaufen. Bitte erneut versuchen.' },
-  github: { title: 'GitHub nicht erreichbar', text: 'Die Anmeldung bei GitHub ist fehlgeschlagen. Bitte erneut versuchen.' },
-  denied: { title: 'Kein Zugriff', text: 'Dieses GitHub-Konto ist für diesen Dienst nicht zugelassen. Ein Admin kann es auf die Zulassungsliste setzen.' },
-  logout: { title: 'Abgemeldet', text: 'Du bist abgemeldet.' },
-}
-const message = computed(() => MESSAGES[String(route.query.fehler ?? '')] ?? MESSAGES.state)
+const { m } = useI18n()
+const message = computed(() => {
+  const key = String(route.query.fehler ?? '')
+  return (m.value.signin as Record<string, { title: string; text: string }>)[key] ?? m.value.signin.state
+})
 useHead({ title: () => message.value.title })
 </script>
 
@@ -17,8 +15,9 @@ useHead({ title: () => message.value.title })
         <CardTitle>{{ message.title }}</CardTitle>
         <CardDescription>{{ message.text }}</CardDescription>
       </CardHeader>
-      <CardFooter>
-        <Button as="a" href="/auth/github/login" class="w-full">Mit GitHub anmelden</Button>
+      <CardFooter class="flex-col items-stretch gap-3">
+        <Button as="a" href="/auth/github/login" class="w-full">{{ m.common.signIn }}</Button>
+        <AppLanguageSwitch class="self-center" />
       </CardFooter>
     </Card>
   </main>

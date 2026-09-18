@@ -5,9 +5,10 @@ definePageMeta({ layout: 'public' })
 
 const route = useRoute()
 const id = String(route.params.id)
+const { m, t } = useI18n()
 const { data, error } = await useFetch<{ log: PublicLogHead; releases: PublicRelease[] }>(`/api/public/logs/${encodeURIComponent(id)}`)
 // Privat und fehlend sind dieselbe 404 (spec §7).
-if (error.value || !data.value) throw createError({ statusCode: 404, statusMessage: 'Nicht gefunden' })
+if (error.value || !data.value) throw createError({ statusCode: 404, statusMessage: 'not_found' })
 
 const log = computed(() => data.value!.log)
 // Der Kopf bleibt oben stehen und schrumpft, sobald der erste Release hochgescrollt ist.
@@ -15,7 +16,7 @@ const { y } = useWindowScroll()
 const compact = computed(() => y.value > 80)
 
 useHead({
-  title: () => `${log.value.product} · Changelog`,
+  title: () => t(m.value.publicLog.title, { product: log.value.product }),
   meta: () => (log.value.visibility === 'private' ? [{ name: 'robots', content: 'noindex' }] : []),
 })
 </script>
@@ -31,7 +32,7 @@ useHead({
           class="inline-flex items-center gap-2 overflow-hidden rounded-full border text-[13px] text-muted-foreground transition-all duration-300 ease-out motion-reduce:transition-none"
           :class="compact ? 'h-0 border-transparent px-0 opacity-0' : 'mb-3.5 h-7 px-3 opacity-100'"
         >
-          <span class="size-1.5 shrink-0 rounded-full bg-green-500" />Changelog
+          <span class="size-1.5 shrink-0 rounded-full bg-green-500" />{{ m.publicLog.badge }}
         </span>
         <h1
           class="font-semibold tracking-tight transition-all duration-300 ease-out motion-reduce:transition-none"
@@ -43,14 +44,14 @@ useHead({
           class="max-w-xl overflow-hidden text-[17px] leading-7 text-muted-foreground transition-all duration-300 ease-out motion-reduce:transition-none"
           :class="compact ? 'max-h-0 opacity-0' : 'max-h-28 opacity-100'"
         >
-          Was neu ist, was sich geändert hat und was behoben wurde, Release für Release.
+          {{ m.publicLog.intro }}
         </p>
       </div>
     </header>
     <!-- Platzhalter für den fixierten Kopf: die Liste soll beim Schrumpfen nicht springen. -->
     <div class="mb-20 h-64 shrink-0" aria-hidden="true" />
 
-    <p v-if="data!.releases.length === 0" class="text-center text-muted-foreground">Noch keine veröffentlichten Releases.</p>
+    <p v-if="data!.releases.length === 0" class="text-center text-muted-foreground">{{ m.publicLog.empty }}</p>
     <ol v-else class="flex flex-col">
       <AppReleaseEntry
         v-for="(release, i) in data!.releases" :key="release.version"
@@ -58,9 +59,10 @@ useHead({
       />
     </ol>
 
-    <footer class="mt-8 flex flex-wrap justify-between gap-3 border-t pt-6 text-[13px] text-muted-foreground">
-      <span>Auch als JSON: <a :href="`/l/${encodeURIComponent(log.id)}/releases`" class="font-mono text-xs text-foreground/80 hover:underline">/l/{{ log.id }}/releases</a></span>
-      <span>Geführt mit release-log</span>
+    <footer class="mt-8 flex flex-wrap items-center justify-between gap-3 border-t pt-6 text-[13px] text-muted-foreground">
+      <AppLanguageSwitch class="order-last sm:order-none" />
+      <span>{{ m.publicLog.alsoJson }} <a :href="`/l/${encodeURIComponent(log.id)}/releases`" class="font-mono text-xs text-foreground/80 hover:underline">/l/{{ log.id }}/releases</a></span>
+      <span>{{ m.publicLog.poweredBy }}</span>
     </footer>
   </div>
 </template>

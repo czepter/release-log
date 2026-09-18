@@ -3,9 +3,10 @@ import { LogOut, UserRound } from '@lucide/vue'
 
 const session = useSession()
 const route = useRoute()
+const { m, t } = useI18n()
 const links = computed(() => [
-  { to: '/dashboard', label: 'Logs', active: route.path.startsWith('/dashboard') },
-  { to: '/konto', label: 'Konto & Clients', active: route.path === '/konto' },
+  { to: '/dashboard', label: m.value.header.logs, active: route.path.startsWith('/dashboard') },
+  { to: '/konto', label: m.value.header.account, active: route.path === '/konto' },
 ])
 const initial = computed(() => (session.value?.login ?? '?').slice(0, 1).toUpperCase())
 </script>
@@ -26,9 +27,10 @@ const initial = computed(() => (session.value?.login ?? '?').slice(0, 1).toUpper
           {{ link.label }}
         </NuxtLink>
       </nav>
+      <AppLanguageSwitch />
       <DropdownMenu v-if="session">
         <DropdownMenuTrigger as-child>
-          <button type="button" class="flex items-center gap-2.5 rounded-full text-sm" aria-label="Kontomenü">
+          <button type="button" class="flex items-center gap-2.5 rounded-full text-sm" :aria-label="m.header.accountMenu">
             <span class="hidden font-mono text-[13px] text-muted-foreground sm:inline">{{ session.login }}</span>
             <Avatar class="size-8">
               <AvatarImage v-if="session.avatarUrl" :src="session.avatarUrl" alt="" />
@@ -37,12 +39,12 @@ const initial = computed(() => (session.value?.login ?? '?').slice(0, 1).toUpper
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" class="w-48">
-          <DropdownMenuLabel class="font-normal text-muted-foreground">Angemeldet als {{ session.login }}</DropdownMenuLabel>
+          <DropdownMenuLabel class="font-normal text-muted-foreground">{{ t(m.header.signedInAs, { login: session.login }) }}</DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem as-child>
-            <NuxtLink to="/konto"><UserRound /> Dein Konto</NuxtLink>
+            <NuxtLink to="/konto"><UserRound /> {{ m.header.yourAccount }}</NuxtLink>
           </DropdownMenuItem>
-          <DropdownMenuItem @select="logout"><LogOut /> Abmelden</DropdownMenuItem>
+          <DropdownMenuItem @select="logout"><LogOut /> {{ m.common.signOut }}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
