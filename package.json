@@ -26,6 +26,8 @@
   "dependencies": {
     "@editorjs/editorjs": "^2.31.6",
     "@editorjs/paragraph": "^2.11.7",
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
     "@lucide/vue": "^1.46.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
