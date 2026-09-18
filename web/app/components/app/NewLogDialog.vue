@@ -16,6 +16,12 @@ const candidates = ref<Candidate[]>([])
 const candidatesError = ref<{ message: string; reauth: boolean } | null>(null)
 // null = noch nicht gefragt. false heißt: die App ist auf diesem Konto nicht
 // installiert -- eine leere Liste mit einem Grund, nicht ohne.
+//
+// Und ein gesperrter Knopf: create_log legt das Repository über das
+// NUTZER-Token an, wofür es keine Installation braucht, und scheitert erst
+// danach am Installations-Token (lib/createLog.ts, probe nach createRepo).
+// Wer hier drückt, behielte also ein leeres Repo auf dem Konto und hätte
+// trotzdem kein Log.
 const installed = ref<boolean | null>(null)
 const installUrl = ref<string | null>(null)
 watch(open, async (isOpen) => {
@@ -167,7 +173,7 @@ async function submit() {
           <DialogClose as-child>
             <Button type="button" variant="outline" size="lg">{{ m.common.cancel }}</Button>
           </DialogClose>
-          <Button type="submit" size="lg" :disabled="pending || taken">
+          <Button type="submit" size="lg" :disabled="pending || taken || installed === false">
             {{ pending ? (existing ? m.newLog.submitAdopting : m.newLog.submitCreating) : (existing ? m.newLog.submitAdopt : m.newLog.submitCreate) }}
           </Button>
         </DialogFooter>
