@@ -1,236 +1,244 @@
 # release-log-hub
 
-Release-Logs als GitHub-Repos, geschrieben über einen MCP-Server, ausgeliefert
-als JSON. Entwurf: `docs/superpowers/specs/2026-09-08-release-log-hub-design.md`.
+**release-log** turns a GitHub repository into a release log. The releases are
+plain JSON files in the repo — `release-log.json`, `releases/*.json` and a
+`media/` folder — so the source of truth is version-controlled, reviewable and
+yours. The service indexes those files and serves them as a public JSON API,
+plus a web page for readers.
 
-Dieser Stand ist Plan 1: das Dokumentmodell und die öffentliche JSON-Fläche,
-gespeist aus einem Verzeichnis statt aus GitHub.
+Design note: `docs/superpowers/specs/2026-09-08-release-log-hub-design.md`.
+
+Three ways to write a release:
+
+- **Over MCP.** The built-in MCP server exposes `list_logs`, `get_log`,
+  `get_release`, `create_log`, `write_release`, `publish_release`,
+  `unpublish_release` and `add_media`. Point Claude or any MCP client at
+  `/mcp`, let it draft the release from the commits, and it commits to the repo
+  the same way a human would.
+- **In the editor.** A block editor for headline, paragraphs, an image and the
+  list of changes. Saving commits against the blob SHA that was last read, so
+  two writers never silently overwrite each other.
+- **In the repo.** Edit the JSON and push. The service picks the change up.
 
 ```bash
-npm run dev       # Nuxt mit Fake-GitHub aus logs/demo, http://localhost:3000/api/dev/login
-npm test          # node --test, ohne Argument aus dem Wurzelverzeichnis
+npm run dev       # Nuxt with a fake GitHub from logs/demo, http://localhost:3000/api/dev/login
+npm test          # node --test, no arguments, from the repository root
 npm run typecheck
-npm run build     # Nuxt-Build nach web/.output
-npm start         # der gebaute Dienst: Nuxt mit eingebettetem Kern (PORT, Vorgabe 3000)
-npm run start:core  # nur der Kern ohne Oberfläche, für Tests und Maschinen-Clients
+npm run build     # Nuxt build into web/.output
+npm start         # the built service: Nuxt with the core embedded (PORT, default 3000)
+npm run start:core  # the core alone, without the interface, for tests and machine clients
 ```
 
-### Aufbau
+### Layout
 
-Nuxt (`web/`) ist die einzige Oberfläche und bindet den Kern (`server.ts`,
-`lib/`) im selben Prozess ein. Was Menschen sehen, rendert Nuxt; was
-Maschinen sprechen, beantwortet der Kern unverändert
-(`web/server/utils/corePaths.ts`):
+Nuxt (`web/`) is the only interface and embeds the core (`server.ts`, `lib/`)
+in the same process. What humans see is rendered by Nuxt; what machines speak
+is answered by the core, unchanged (`web/server/utils/corePaths.ts`):
 
-| Kern | Nuxt |
+| Core | Nuxt |
 |---|---|
-| `/health`, `/webhook`, `/mcp`, `/me`, `/auth/*`, `/.well-known/*`, `/upload/*` | `/dashboard`, `/dashboard/logs/<id>`, Release-Editor, `/konto` |
-| `/oauth/register`, `/oauth/token`, `POST /oauth/authorize` | `GET /oauth/authorize` (Zustimmung), `/anmeldung` |
+| `/health`, `/webhook`, `/mcp`, `/me`, `/auth/*`, `/.well-known/*`, `/upload/*` | `/dashboard`, `/dashboard/logs/<id>`, release editor, `/konto` |
+| `/oauth/register`, `/oauth/token`, `POST /oauth/authorize` | `GET /oauth/authorize` (consent), `/anmeldung` |
 | `/l/<id>/versions`, `/l/<id>/releases…`, `/l/<id>/media/…` | `/l/<id>`, `/l/<id>/r/<version>` |
-| | `/api/*` — Seiten-API aus `lib/api/` |
-| | `/` — Marketingseite; mit Sitzung führen ihre Knöpfe ins Dashboard |
+| | `/api/*` — the page API from `lib/api/` |
+| | `/` — marketing page; with a session, its buttons lead to the dashboard |
 
-`OPEN_SIGNUP=1` (optional) öffnet die Anmeldung: Jedes GitHub-Konto darf
-sich anmelden, die Zulassungsliste wird nicht mehr gefragt. Ohne die
-Variable gilt sie wie bisher, und ohne Eintrag kommt niemand herein außer
-den Konten aus `ADMIN_LOGINS`.
+`OPEN_SIGNUP=1` (optional) opens signup: every GitHub account may sign in and
+the allowlist is no longer consulted. Without the variable the allowlist
+applies as before, and without an entry nobody gets in except the accounts in
+`ADMIN_LOGINS`.
 
-Die Oberfläche spricht Deutsch und Englisch. Die Sprache steht im Cookie
-`rl_lang`; ohne Cookie entscheidet `Accept-Language`, ohne passende Sprache
-Deutsch. Die Texte liegen in `web/app/i18n/de.ts` und `en.ts` -- `de.ts` ist
-die Quelle der Wahrheit, `en.ts` wird dagegen typgeprüft, und
-`messages.test.ts` hält beide auf derselben Schlüsselmenge. Die Maschinen-
-Fläche bleibt unberührt: die Abschnitts-Labels im JSON (`lib/sections.ts`)
-sind weiter deutsch, die Oberfläche übersetzt sie über den stabilen `key`.
+The interface speaks German and English. The language lives in the `rl_lang`
+cookie; without a cookie `Accept-Language` decides, and without a matching
+language it is German. The strings live in `web/app/i18n/de.ts` and `en.ts` --
+`de.ts` is the source of truth, `en.ts` is type-checked against it, and
+`messages.test.ts` keeps both on the same set of keys. The machine-facing
+surface is untouched: the section labels in the JSON (`lib/sections.ts`) stay
+German, and the interface translates them through the stable `key`.
 
-`MAX_LOGS_PER_OWNER` (optional, Vorgabe 10) begrenzt, wie viele Logs ein
-Konto führen darf. Die Grenze zählt je Repo-Eigentümer und gilt für neu
-angelegte wie für übernommene Repositories. `0` hebt sie auf.
+`MAX_LOGS_PER_OWNER` (optional, default 10) limits how many logs an account may
+keep. The limit counts per repository owner and applies to newly created as
+well as adopted repositories. `0` lifts it.
 
-`RL_SHOWCASE_URL` (optional) bindet das Changelog eines Logs in die
-Startseite ein: die URL seiner öffentlichen Seite, `https://<host>/l/<id>`,
-auch von einer anderen Instanz. Fehlt sie oder antwortet die Quelle nicht,
-erscheint die Startseite ohne diesen Abschnitt. Das Ergebnis wird fünf
-Minuten zwischengespeichert.
+`RL_SHOWCASE_URL` (optional) embeds one log's changelog into the landing page:
+the URL of its public page, `https://<host>/l/<id>`, from another instance too.
+If it is missing or the source does not answer, the landing page appears
+without that section. The result is cached for five minutes.
 
-Nuxt liest die Migrationen aus `MIGRATIONS_DIR` (Vorgabe `./drizzle`,
-relativ zum Arbeitsverzeichnis): im gebündelten Server zeigt
-`import.meta.url` nicht mehr neben `drizzle/`.
+Nuxt reads the migrations from `MIGRATIONS_DIR` (default `./drizzle`, relative
+to the working directory): in the bundled server, `import.meta.url` no longer
+points next to `drizzle/`.
 
-`npm run dev` setzt `RL_DEV_FAKE=1`: der Kern läuft gegen ein Fake-GitHub
-aus `logs/demo`, `/api/dev/login?as=admin` meldet ohne GitHub an. Beides
-existiert im Produktions-Build nicht (`import.meta.dev`).
+`npm run dev` sets `RL_DEV_FAKE=1`: the core runs against a fake GitHub from
+`logs/demo`, and `/api/dev/login?as=admin` signs in without GitHub. Neither
+exists in the production build (`import.meta.dev`).
 
-| Route | Antwort |
+| Route | Response |
 |---|---|
 | `/health` | `{"status":"ok"}` |
-| `/l/<id>/versions` | Alle Versionen mit Datum, Titel und Link |
-| `/l/<id>/releases?page=&per_page=` | Feed mit Anzahl je Abschnitt, höchstens 100 je Seite |
-| `/l/<id>/releases/<version>` | Eine Version mit allen Einträgen |
-| `/l/<id>/media/<pfad>` | Bilder, die eine Version benennt |
+| `/l/<id>/versions` | Every version with date, title and link |
+| `/l/<id>/releases?page=&per_page=` | Feed with per-section counts, 100 per page at most |
+| `/l/<id>/releases/<version>` | One version with all entries |
+| `/l/<id>/media/<path>` | Images a version refers to |
 
-Ein Log ist ein Verzeichnis unter `LOGS_ROOT` mit `release-log.json`,
-`releases/*.json` und `media/`. Die öffentliche Kennung steht als `id` in
-`release-log.json`, nicht im Verzeichnisnamen.
+A log is a directory under `LOGS_ROOT` holding `release-log.json`,
+`releases/*.json` and `media/`. The public identifier is the `id` in
+`release-log.json`, not the directory name.
 
-`covered` erscheint in keiner Antwort: es ist Buchhaltung, kein Inhalt.
+`covered` appears in no response: it is bookkeeping, not content.
 
-## Index aus GitHub aufbauen
+## Building the index from GitHub
 
 ```bash
 npm run reindex -- <owner>/<repo> [...]
 ```
 
-Liest jedes genannte Repository über die installierte GitHub App und
-schreibt seinen Log-Index in die SQLite-Datenbank (`DB_PATH`, Vorgabe
-`./data/release-log.sqlite`). Die Werte kommen aus `.env` — das Skript liest die Datei selbst, wenn es
-sie findet. `readConfig` verlangt vier Umgebungsvariablen:
+Reads each named repository through the installed GitHub App and writes its log
+index into the SQLite database (`DB_PATH`, default
+`./data/release-log.sqlite`). The values come from `.env` — the script reads
+the file itself when it finds one. `readConfig` requires four environment
+variables:
 
-| Variable | Bedeutung |
+| Variable | Meaning |
 |---|---|
-| `GITHUB_APP_ID` | Die App-ID der GitHub App |
-| `GITHUB_APP_PRIVATE_KEY` | Ihr privater Schlüssel, PEM, base64-kodiert |
-| `GITHUB_WEBHOOK_SECRET` | Das Webhook-Secret der App |
-| `BASE_URL` | Die öffentliche Basis-URL des Diensts |
-| `TOKEN_ENCRYPTION_KEY` | 32 Bytes, hex- oder base64-kodiert: verschlüsselt die GitHub-Nutzer-Token (`openssl rand -hex 32`) |
+| `GITHUB_APP_ID` | The app ID of the GitHub App |
+| `GITHUB_APP_PRIVATE_KEY` | Its private key, PEM, base64-encoded |
+| `GITHUB_WEBHOOK_SECRET` | The webhook secret of the app |
+| `BASE_URL` | The public base URL of the service |
+| `TOKEN_ENCRYPTION_KEY` | 32 bytes, hex- or base64-encoded: encrypts the GitHub user tokens (`openssl rand -hex 32`) |
 
-## Betrieb
+## Operating it
 
-Der Dienst gleicht sich selbst ab. Zwei Auslöser stoßen dieselbe Funktion an:
+The service reconciles itself. Two triggers start the same function:
 
-- **Webhook.** `POST /webhook`, signiert mit `GITHUB_WEBHOOK_SECRET`. Eine
-  Zustellung ohne gültige Signatur wird verworfen, bevor ihr Inhalt gelesen
-  wird. Der Dienst antwortet sofort mit 202; der Abgleich läuft danach.
-- **Reconcile.** Alle fünf Minuten der Log mit dem ältesten `indexed_at`,
-  dazu jeder Log, der länger als eine Stunde nicht erfasst wurde.
-  Eingefrorene Logs sind eingeschlossen — nur so taut ein Log wieder auf,
-  dessen Repository zurückkommt.
+- **Webhook.** `POST /webhook`, signed with `GITHUB_WEBHOOK_SECRET`. A delivery
+  without a valid signature is dropped before its body is read. The service
+  answers 202 immediately; the reconcile runs afterwards.
+- **Reconcile.** Every five minutes, the log with the oldest `indexed_at`, plus
+  every log that has not been indexed for more than an hour. Frozen logs are
+  included — that is the only way a log thaws once its repository comes back.
 
-Ein verlorener Webhook kostet damit höchstens eine Reconcile-Runde. Der
-Abgleich vergleicht git-Blob-SHAs, kein Ereignisprotokoll: „Webhook nie
-angekommen" und „Index von Null neu bauen" sind derselbe Fall.
+A lost webhook therefore costs one reconcile round at most. The reconcile
+compares git blob SHAs, not an event log: "the webhook never arrived" and
+"rebuild the index from zero" are the same case.
 
-| Variable | Bedeutung |
+| Variable | Meaning |
 |---|---|
-| `DB_PATH` | Pfad der SQLite-Datei, Vorgabe `./data/release-log.sqlite` |
-| `PORT` | Port des Dienstes, Vorgabe 8787 |
-| `GITHUB_CLIENT_ID` | Client-ID der GitHub App, für die Anmeldung |
-| `GITHUB_CLIENT_SECRET` | Client-Secret der GitHub App, für die Anmeldung |
-| `SIGNING_KEY` | signiert das Session-Cookie |
-| `ADMIN_LOGINS` | GitHub-Logins mit Adminrecht, kommagetrennt — mindestens einer ist Pflicht |
+| `DB_PATH` | Path of the SQLite file, default `./data/release-log.sqlite` |
+| `PORT` | Port of the service, default 8787 |
+| `GITHUB_CLIENT_ID` | Client ID of the GitHub App, for signing in |
+| `GITHUB_CLIENT_SECRET` | Client secret of the GitHub App, for signing in |
+| `SIGNING_KEY` | Signs the session cookie |
+| `ADMIN_LOGINS` | GitHub logins with admin rights, comma-separated — at least one is required |
 
-`GET /health` antwortet 200, ohne den Index anzufassen.
+`GET /health` answers 200 without touching the index.
 
-### Anmeldung
+### Signing in
 
-- `GET /auth/github/login` leitet zu GitHub weiter.
-- `GET /auth/github/callback` (bei GitHub als Callback-URL hinterlegt) nimmt
-  die Antwort entgegen, prüft die Zulassungsliste, setzt bei Erfolg ein
-  Session-Cookie (30 Tage) und leitet aufs Dashboard weiter. Scheitert die
-  Anmeldung, geht es nach `/anmeldung?fehler=state|github|denied`.
-- `POST /auth/logout` löscht das Cookie.
-- `GET /me` antwortet `{login, isAdmin}` für eine gültige Session, sonst 401.
-  Die Kontoseite für Menschen ist `/konto` (Nuxt).
-- `GET /` leitet aufs Dashboard weiter.
+- `GET /auth/github/login` redirects to GitHub.
+- `GET /auth/github/callback` (registered with GitHub as the callback URL)
+  receives the answer, checks the allowlist, sets a session cookie on success
+  (30 days) and redirects to the dashboard. If signing in fails, it goes to
+  `/anmeldung?fehler=state|github|denied`.
+- `POST /auth/logout` deletes the cookie.
+- `GET /me` answers `{login, isAdmin}` for a valid session, otherwise 401. The
+  account page for humans is `/konto` (Nuxt).
+- `GET /` redirects to the dashboard.
 
-Adminrecht kommt ausschließlich aus `ADMIN_LOGINS` — es gibt keine
-Datenbankspalte dafür. Wer sonst zugelassen ist, steht in der
-`allowlist`-Tabelle; Admins verwalten sie unter `/konto`.
+Admin rights come from `ADMIN_LOGINS` and nowhere else — there is no database
+column for them. Everyone else who is allowed in sits in the `allowlist` table;
+admins manage it under `/konto`.
 
-### Repo-Rechte
+### Repository rights
 
-Ob ein Konto Schreibzugriff auf das Repository hinter einem Log hat, wird
-gegen GitHub geprüft und fünf Minuten je (Konto, Log) im Cache gehalten.
-Der Cache wird früher invalidiert, wenn `member`, `installation_repositories`
-oder `installation` eintrifft — eine Mitgliedschafts- oder
-Installationsänderung kann genau dieses Recht betreffen. Eine Übertragung
-oder Löschung des Repositories (über das `repository`-Ereignis, das nur
-den Inhalts-Abgleich anstößt) tut das nicht: ein gecachtes „ja" kann bis zu
-fünf Minuten über ein solches Ereignis hinaus bestehen bleiben, dieselbe
-Fünf-Minuten-Obergrenze wie sonst auch.
+Whether an account has write access to the repository behind a log is checked
+against GitHub and cached for five minutes per (account, log). The cache is
+invalidated earlier when `member`, `installation_repositories` or
+`installation` arrives — a membership or installation change can affect exactly
+that right. A transfer or deletion of the repository (through the `repository`
+event, which only triggers the content reconcile) does not: a cached "yes" can
+survive such an event by up to five minutes, the same five-minute ceiling as
+everywhere else.
 
 ### Dashboard
 
-Nuxt-Seiten über der Seiten-API (`/api/*`, Sitzungs-Cookie, JSON). Die
-Regeln stehen in `lib/api/`:
+Nuxt pages over the page API (`/api/*`, session cookie, JSON). The rules live
+in `lib/api/`:
 
-- `/dashboard` — die Logs, auf die das angemeldete Konto Schreibrechte hat
-  (eingefrorene zusätzlich für Admins). „Neues Log" legt über denselben
-  Ablauf wie `create_log` ein Repository an.
-- `/dashboard/logs/<id>` — Status, Abgleichfehler, Releases, Einstellungen
-  (`view`, `visibility`, `curation_notes` als Commit auf
-  `release-log.json`, nie als Datenbankschreibvorgang), Medien-Upload
-  (`.png`, `.jpg`, `.webp`, höchstens 10 MB, legt an, ersetzt nie) und
-  endgültiges Löschen mit Eingabe des Produktnamens.
-- `/dashboard/logs/<id>/releases/new`, `…/releases/<version>` — der
-  Release-Editor (Editor.js): Überschrift, Absätze, ein Bild und Änderungen
-  als Blöcke. Speichern committet über denselben Weg wie `write_release`
-  gegen die zuletzt gelesene Blob-SHA; hat sich das Release inzwischen
-  geändert, wird nichts überschrieben. Veröffentlichen und Zurückziehen
-  daneben. `covered` und `commits` fasst der Editor nie an.
-- `/konto` — Profil, verbundene MCP-Clients trennen, Zulassungsliste
-  (Admins).
+- `/dashboard` — the logs the signed-in account may write to (frozen ones
+  additionally for admins). "New log" creates a repository through the same
+  path as `create_log`.
+- `/dashboard/logs/<id>` — status, reconcile errors, releases, settings
+  (`view`, `visibility`, `curation_notes` as a commit on `release-log.json`,
+  never as a database write), media upload (`.png`, `.jpg`, `.webp`, 10 MB at
+  most, creates, never replaces) and permanent deletion by typing the product
+  name.
+- `/dashboard/logs/<id>/releases/new`, `…/releases/<version>` — the release
+  editor (Editor.js): headline, paragraphs, one image and the changes as
+  blocks. Saving commits through the same path as `write_release`, against the
+  blob SHA that was last read; if the release has changed since, nothing is
+  overwritten. Publish and unpublish sit next to it. The editor never touches
+  `covered` and `commits`.
+- `/konto` — profile, disconnecting connected MCP clients, the allowlist
+  (admins).
 
-Mutierende `/api`-Aufrufe verlangen `content-type: application/json`
-(Upload: `x-filename`); mit `SameSite=Lax` kann keine fremde Seite sie
-auslösen.
+Mutating `/api` calls require `content-type: application/json` (upload:
+`x-filename`); with `SameSite=Lax` no foreign page can trigger them.
 
-### MCP und OAuth
+### MCP and OAuth
 
-Ein eigener OAuth-2.0-Autorisierungsserver (spec §5, "Rolle 2") schützt `/mcp`:
+A dedicated OAuth 2.0 authorization server (spec §5, "role 2") protects `/mcp`:
 
-- `POST /oauth/register` — Dynamic Client Registration (RFC 7591), nur
-  öffentliche Clients (kein Secret, PKCE `S256` ist Pflicht).
-- `GET /oauth/authorize` — Zustimmungsbildschirm (Nuxt), `POST` löst die
-  Entscheidung im Kern ein. Beide prüfen über `lib/oauthRequest.ts`.
-- `POST /oauth/token` — `authorization_code`- und `refresh_token`-Grant.
+- `POST /oauth/register` — Dynamic Client Registration (RFC 7591), public
+  clients only (no secret, PKCE `S256` is mandatory).
+- `GET /oauth/authorize` — consent screen (Nuxt), `POST` redeems the decision
+  in the core. Both check through `lib/oauthRequest.ts`.
+- `POST /oauth/token` — `authorization_code` and `refresh_token` grant.
 - `GET /.well-known/oauth-protected-resource/mcp`,
-  `GET /.well-known/oauth-authorization-server` — Metadaten (RFC 9728/8414).
-- Verbundene Clients ansehen und trennen: `/konto`.
-- `POST /mcp` — die eigentliche MCP-Fläche, Streamable HTTP, Bearer-Token
-  Pflicht: `list_logs`, `get_log`, `get_release` (Scope `logs:read`),
-  `create_log`, `write_release`, `publish_release`, `unpublish_release`,
-  `add_media` (Scope `logs:write`).
-- `PUT /upload/<token>` — der Bildweg von `add_media`. Das Token in der URL
-  ist der ganze Ausweis: einmalig, zehn Minuten gültig, an Log, Zielpfad und
-  Konto gebunden. Die Route prüft beim Hochladen erneut, ob dieses Konto
-  noch schreiben darf, begrenzt auf 10 MB und legt die Datei an, statt eine
-  bestehende zu ersetzen (`path_exists`, sonst änderte ein neues Bild
-  stillschweigend jedes veröffentlichte Release, das darauf zeigt).
+  `GET /.well-known/oauth-authorization-server` — metadata (RFC 9728/8414).
+- Viewing and disconnecting connected clients: `/konto`.
+- `POST /mcp` — the MCP surface itself, Streamable HTTP, bearer token required:
+  `list_logs`, `get_log`, `get_release` (scope `logs:read`), `create_log`,
+  `write_release`, `publish_release`, `unpublish_release`, `add_media` (scope
+  `logs:write`).
+- `PUT /upload/<token>` — the image path of `add_media`. The token in the URL
+  is the entire credential: single-use, valid for ten minutes, bound to log,
+  target path and account. On upload the route checks again whether that
+  account may still write, limits to 10 MB and creates the file instead of
+  replacing an existing one (`path_exists`, since otherwise a new image would
+  silently change every published release pointing at it).
 
-So berühren Bilddaten den Kontext des Agenten nie — 5 MB ergäben als Base64
-rund 6,7 MB Text.
+This way image data never touches the agent's context — 5 MB would come to
+roughly 6.7 MB of text as base64.
 
-### Repos anlegen und das GitHub-Nutzer-Token
+### Creating repositories and the GitHub user token
 
-`create_log` ist der einzige Weg dieses Diensts, der nicht über das
-Installations-Token läuft: `POST /user/repos` gibt es nur für Nutzer-Token.
-Der Dienst hält deshalb je Konto das Nutzer-Token aus der Anmeldung
-vor — **verschlüsselt** mit `TOKEN_ENCRYPTION_KEY`, nicht gehasht, weil es
-benutzt und nicht nur geprüft wird. Es ist damit das einzige Geheimnis im
-System, das ein Datenbankdiebstahl brauchbar erbeutet.
+`create_log` is the one path in this service that does not run on the
+installation token: `POST /user/repos` exists only for user tokens. The service
+therefore keeps the user token from signing in, per account — **encrypted**
+with `TOKEN_ENCRYPTION_KEY`, not hashed, because it is used and not merely
+checked. That makes it the only secret in the system a database theft captures
+in usable form.
 
-- Ein Refresh widerruft das alte Access-Token sofort, also ersetzt sein
-  Ergebnis beide Token in einem Schreibvorgang.
-- Refreshes laufen je Konto serialisiert: zwei gleichzeitige widerrufen
-  einander.
-- Scheitert der Refresh, antwortet `create_log` mit `reauth_required` und
-  nennt die Anmelde-URL. Der Mensch meldet sich einmal neu an.
+- A refresh revokes the old access token immediately, so its result replaces
+  both tokens in one write.
+- Refreshes are serialized per account: two concurrent ones revoke each other.
+- If the refresh fails, `create_log` answers `reauth_required` and names the
+  sign-in URL. The human signs in once more.
 
-Angelegt wird mit dem Nutzer-Token, geschrieben wird mit dem
-Installations-Token: erst das Repo, dann die Erreichbarkeitsprüfung
-(`repo_not_installed`, wenn die App das frische Repo nicht sieht), dann
-`release-log.json` und `README.md`, dann der Abgleich. Die Antwort kommt
-erst, wenn der Log im Index steht.
+Creating runs on the user token, writing on the installation token: first the
+repository, then the reachability check (`repo_not_installed` if the app cannot
+see the fresh repository), then `release-log.json` and `README.md`, then the
+reconcile. The answer comes only once the log is in the index.
 
-### Gehostete Seite
+### The hosted page
 
-- `/l/<id>` — Nuxt, serverseitig gerendert als Zeitstrahl: Version und
-  Datum links, Abschnitte (Wichtig, Neu, Änderungen, Behoben) zum
-  Aufklappen. `timeline` öffnet je Release den ersten Abschnitt, `full`
-  alle. Entwürfe nur für Angemeldete mit Schreibrecht; private Logs tragen
-  `noindex` und antworten allen anderen wie ein fehlender Log mit 404.
-- `/l/<id>/r/<version>` — Permalink auf eine einzelne Version.
+- `/l/<id>` — Nuxt, server-rendered as a timeline: version and date on the
+  left, sections (Wichtig, Neu, Änderungen, Behoben) to expand. `timeline`
+  opens the first section per release, `full` opens all of them. Drafts only
+  for signed-in accounts with write access; private logs carry `noindex` and
+  answer everyone else with a 404, like a missing log.
+- `/l/<id>/r/<version>` — permalink to a single version.
 
-Der öffentliche JSON-Feed (`/l/<id>/versions`, `/l/<id>/releases`, ...) und
-der Medien-Download bleiben im Kern.
+The public JSON feed (`/l/<id>/versions`, `/l/<id>/releases`, …) and the media
+download stay in the core.
