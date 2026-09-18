@@ -52,7 +52,7 @@ export async function withCtx(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
     adminLogins: ['admin'], openSignup: false, maxLogsPerOwner: 10, baseUrl: 'https://example.test', http, gh, perms: permissions(db, gh),
     users: userTokens({ db, http, cipher: cipher(Buffer.alloc(32, 3)), clientId: 'client-id', clientSecret: 'client-secret' }),
     createRepo: async () => ({ kind: 'unavailable', status: 503 }),
-    listRepos: async () => ({ kind: 'ok', repos: [] }),
+    listRepos: async () => ({ kind: 'ok', selection: 'all', repos: [] }),
     installUrl: async () => 'https://github.com/apps/test-app/installations/new',
     onRepoWrite: (ref) => { ctx.repoWrites.push(ref); },
     syncNow: async () => {},

@@ -242,7 +242,7 @@ test('listRepoCandidates lists the app-visible repositories of the own account a
       ...ctx.auth,
       listRepos: async (token: string, owner: string) => {
         seen.push([token, owner]);
-        return { kind: 'ok' as const, repos: [{ name: 'shop', private: true }, { name: 'has-log', private: false }] };
+        return { kind: 'ok' as const, selection: 'all' as const, repos: [{ name: 'shop', private: true }, { name: 'has-log', private: false }] };
       },
     };
     const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);
@@ -286,6 +286,25 @@ test('listRepoCandidates carries no install link when GitHub would not name one'
   });
 });
 
+// Ein neues Repo kann in einer Auswahl-Installation nicht enthalten sein --
+// create_log legte es an und scheiterte danach. Die Oberfläche muss das
+// vorher wissen.
+test('listRepoCandidates says when a newly created repository would fall outside the installation', async () => {
+  await withCtx(async (ctx) => {
+    const { who } = signIn(ctx, 'dev');
+    ctx.auth.users.store(who.accountId, USER_TOKEN);
+    const auth = {
+      ...ctx.auth,
+      listRepos: async () => ({ kind: 'ok' as const, selection: 'selected' as const, repos: [{ name: 'shop', private: false }] }),
+    };
+    const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);
+    assert.equal(reply.status, 200);
+    assert.equal(body(reply).installed, true);
+    assert.equal(body(reply).coversNewRepos, false);
+    assert.equal(body(reply).installUrl, 'https://github.com/apps/test-app/installations/new');
+  });
+});
+
 // Der Aufruf kostet eine GitHub-Runde; wer installiert ist, braucht ihn nie.
 test('listRepoCandidates never asks for the install page once the app is installed', async () => {
   await withCtx(async (ctx) => {
@@ -294,7 +313,7 @@ test('listRepoCandidates never asks for the install page once the app is install
     let asked = 0;
     const auth = {
       ...ctx.auth,
-      listRepos: async () => ({ kind: 'ok' as const, repos: [{ name: 'shop', private: false }] }),
+      listRepos: async () => ({ kind: 'ok' as const, selection: 'all' as const, repos: [{ name: 'shop', private: false }] }),
       installUrl: async () => { asked += 1; return null; },
     };
     const reply = await listRepoCandidates({ auth, reader: ctx.reader }, who);

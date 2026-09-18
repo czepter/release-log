@@ -72,7 +72,14 @@ export async function listRepoCandidates({ auth }: Core, who: LoggedIn): Promise
   const repos = listed.repos
     .map((r) => ({ name: r.name, private: r.private, hasLog: withLog.has(r.name) }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  return ok({ repos, installed: true });
+  // Bei einer Auswahl-Installation ist ein NEU angelegtes Repo nie dabei --
+  // ein bestehendes aus dieser Liste dagegen immer, sonst stünde es nicht
+  // darin. Anlegen scheitert also, Übernehmen nicht.
+  const coversNewRepos = listed.selection === 'all';
+  return ok({
+    repos, installed: true, coversNewRepos,
+    ...(coversNewRepos ? {} : { installUrl: await auth.installUrl() }),
+  });
 }
 
 export async function logDetail({ auth }: Core, who: LoggedIn, logId: string): Promise<Reply> {

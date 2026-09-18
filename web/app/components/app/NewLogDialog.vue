@@ -23,14 +23,20 @@ const candidatesError = ref<{ message: string; reauth: boolean } | null>(null)
 // Wer hier drückt, behielte also ein leeres Repo auf dem Konto und hätte
 // trotzdem kein Log.
 const installed = ref<boolean | null>(null)
+// false heißt: die Installation trägt eine Auswahl einzelner Repos. Ein neu
+// angelegtes steht nie darauf, ein bestehendes aus der Vorschlagsliste immer.
+const coversNewRepos = ref<boolean | null>(null)
 const installUrl = ref<string | null>(null)
 watch(open, async (isOpen) => {
   if (!isOpen) return
   candidatesError.value = null
   try {
-    const listed = await $fetch<{ repos: Candidate[]; installed: boolean; installUrl?: string | null }>('/api/github/repos')
+    const listed = await $fetch<{
+      repos: Candidate[]; installed: boolean; coversNewRepos?: boolean; installUrl?: string | null
+    }>('/api/github/repos')
     candidates.value = listed.repos
     installed.value = listed.installed
+    coversNewRepos.value = listed.coversNewRepos ?? null
     installUrl.value = listed.installUrl ?? null
   } catch (err) {
     candidatesError.value = { message: apiText(err), reauth: apiError(err) === 'reauth_required' }
@@ -39,6 +45,15 @@ watch(open, async (isOpen) => {
 const match = computed(() => candidates.value.find((c) => c.name.toLowerCase() === form.repo_name.trim().toLowerCase()))
 const existing = computed(() => match.value !== undefined && !match.value.hasLog)
 const taken = computed(() => match.value?.hasLog === true)
+
+// Was create_log hier tun würde, und ob GitHub es zu Ende bringen kann:
+// ohne Installation gar nichts, mit einer Auswahl-Installation nur das
+// Übernehmen eines Repos, das schon in der Auswahl steht.
+const blocked = computed(() => {
+  if (installed.value === false) return 'no_installation'
+  if (coversNewRepos.value === false && !existing.value) return 'selected_only'
+  return null
+})
 
 // Eigene Vorschlagsliste statt <datalist>: Safari zeigt dort nur das Label
 // der Option statt des Repo-Namens, in einem schmalen Menü.
@@ -153,9 +168,11 @@ async function submit() {
               <a v-if="candidatesError.reauth" href="/auth/github/login" class="font-medium underline">{{ m.newLog.reauthShort }}</a>
             </template>
           </p>
-          <p v-if="installed === false" class="rounded-lg border bg-muted/40 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
-            {{ m.newLog.notInstalled }}
-            <a v-if="installUrl" :href="installUrl" class="font-medium text-foreground underline">{{ m.newLog.installApp }}</a>
+          <p v-if="blocked" class="rounded-lg border bg-muted/40 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
+            {{ blocked === 'no_installation' ? m.newLog.notInstalled : m.newLog.notSelected }}
+            <a v-if="installUrl" :href="installUrl" class="font-medium text-foreground underline">
+              {{ blocked === 'no_installation' ? m.newLog.installApp : m.newLog.pickRepos }}
+            </a>
           </p>
         </div>
 
@@ -173,7 +190,7 @@ async function submit() {
           <DialogClose as-child>
             <Button type="button" variant="outline" size="lg">{{ m.common.cancel }}</Button>
           </DialogClose>
-          <Button type="submit" size="lg" :disabled="pending || taken || installed === false">
+          <Button type="submit" size="lg" :disabled="pending || taken || blocked !== null">
             {{ pending ? (existing ? m.newLog.submitAdopting : m.newLog.submitCreating) : (existing ? m.newLog.submitAdopt : m.newLog.submitCreate) }}
           </Button>
         </DialogFooter>

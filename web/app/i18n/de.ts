@@ -196,6 +196,8 @@ export default {
     charsHint: 'Buchstaben, Ziffern,',
     listFailed: 'Liste nicht geladen: {message}',
     notInstalled: 'Die GitHub App fehlt auf deinem Konto. Ohne sie bliebe am Ende ein leeres Repository und kein Log, deshalb ist der Knopf gesperrt.',
+    notSelected: 'Die App sieht nur ausgewählte Repositories deines Kontos. Ein neues wäre nicht dabei. Wähl eins aus der Liste oben, oder nimm das neue vorher in die Auswahl auf.',
+    pickRepos: 'Auswahl auf GitHub ändern',
     installApp: 'App installieren',
     view: 'Ansicht',
     visibility: 'Sichtbarkeit',

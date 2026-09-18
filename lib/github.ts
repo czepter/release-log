@@ -162,8 +162,13 @@ export function userRepoCreator(http: Http): CreateUserRepo {
 // „App freigegeben" und „meins". Nur das eigene Konto, wie bei createLog.
 export type InstalledRepo = { name: string; private: boolean };
 
+// "selected" heißt: die Installation trägt eine Liste einzelner Repos. Ein
+// eben erst angelegtes Repo steht nie darauf, also wäre es für die App
+// unsichtbar -- create_log legte es an und scheiterte danach am Probe.
+export type RepoSelection = 'all' | 'selected';
+
 export type ListInstalledRepos = (token: string, owner: string) => Promise<
-  | { kind: 'ok'; repos: InstalledRepo[] }
+  | { kind: 'ok'; selection: RepoSelection; repos: InstalledRepo[] }
   // Die App ist auf dem eigenen Konto gar nicht installiert. Das ist kein
   // Fehler, aber auch kein leeres Konto -- wer das nicht unterscheidet,
   // zeigt eine leere Vorschlagsliste und verschweigt den Grund.
@@ -180,9 +185,14 @@ export function userInstalledRepos(http: Http): ListInstalledRepos {
     const found = await http(`${API}/user/installations?per_page=100`, { headers: headers(token) });
     if (found.status === 401 || found.status === 403) return { kind: 'unauthorized' };
     if (!found.ok) return { kind: 'unavailable', status: found.status };
-    const { installations } = (await found.json()) as { installations: { id: number; account: { login: string } }[] };
+    const { installations } = (await found.json()) as {
+      installations: { id: number; account: { login: string }; repository_selection?: string }[];
+    };
     const own = installations.find((i) => i.account.login.toLowerCase() === owner.toLowerCase());
     if (!own) return { kind: 'no_installation' };
+    // Nur das ausdrückliche "selected" schränkt ein. Fehlt das Feld, wird
+    // nicht geraten und nichts gesperrt.
+    const selection: RepoSelection = own.repository_selection === 'selected' ? 'selected' : 'all';
 
     const repos: InstalledRepo[] = [];
     for (let page = 1; page <= MAX_REPO_PAGES; page++) {
@@ -193,7 +203,7 @@ export function userInstalledRepos(http: Http): ListInstalledRepos {
       repos.push(...body.repositories.map((r) => ({ name: r.name, private: r.private })));
       if (body.repositories.length < 100) break;
     }
-    return { kind: 'ok', repos };
+    return { kind: 'ok', selection, repos };
   };
 }
 

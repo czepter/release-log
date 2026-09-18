@@ -536,6 +536,28 @@ test('userInstalledRepos answers no_installation when the app is not installed o
   assert.deepEqual(await userInstalledRepos(http)('t', 'octocat'), { kind: 'no_installation' });
 });
 
+// repository_selection entscheidet, ob ein NEU angelegtes Repo von der
+// Installation abgedeckt wäre: bei "selected" ist es das nie, weil es die
+// Auswahl beim Anlegen noch gar nicht kennt.
+test('userInstalledRepos reports whether the installation covers all repositories', async () => {
+  const all = fakeHttp({
+    'GET /user/installations?per_page=100': { body: { installations: [
+      { id: 9, account: { login: 'octocat' }, repository_selection: 'all' },
+    ] } },
+    'GET /user/installations/9/repositories?per_page=100&page=1': { body: { repositories: [] } },
+  });
+  assert.deepEqual(await userInstalledRepos(all)('t', 'octocat'), { kind: 'ok', selection: 'all', repos: [] });
+
+  const some = fakeHttp({
+    'GET /user/installations?per_page=100': { body: { installations: [
+      { id: 9, account: { login: 'octocat' }, repository_selection: 'selected' },
+    ] } },
+    'GET /user/installations/9/repositories?per_page=100&page=1': { body: { repositories: [{ name: 'shop', private: false }] } },
+  });
+  const picked = await userInstalledRepos(some)('t', 'octocat');
+  assert.equal(picked.kind === 'ok' && picked.selection, 'selected');
+});
+
 // Die Adresse der eigenen Installationsseite braucht den Slug der App, und
 // den kennt die Konfiguration nicht -- GET /app nennt ihn.
 test('appInstallUrl derives the install page from the app itself and asks GitHub once', async () => {

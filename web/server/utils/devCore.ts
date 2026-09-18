@@ -55,6 +55,7 @@ export async function devBoot(migrationsFolder: string) {
   booted.auth.users.tokenFor = async () => ({ ok: true, token: 'dev' })
   booted.auth.listRepos = async (_token, owner) => ({
     kind: 'ok',
+    selection: 'all',
     repos: Object.keys(repos).filter((k) => k.startsWith(`${owner}/`)).map((k) => ({ name: k.slice(owner.length + 1), private: false })),
   })
   await syncLog(booted.db, gh, { owner: 'dev', repo: 'demo' })

@@ -197,6 +197,8 @@ export default {
     charsHint: 'Letters, digits,',
     listFailed: 'List not loaded: {message}',
     notInstalled: 'The GitHub App is missing on your account. Without it you would end up with an empty repository and no log, so the button stays disabled.',
+    notSelected: 'The app only sees selected repositories on your account, and a new one would not be among them. Pick one from the list above, or add the new name to the selection first.',
+    pickRepos: 'Change the selection on GitHub',
     installApp: 'Install the app',
     view: 'View',
     visibility: 'Visibility',
