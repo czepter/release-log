@@ -141,7 +141,8 @@ Three ways around it, in the order of how little work they are:
 
 1. **Pull the image instead of building it.** The `image` workflow in
    `.github/workflows/docker.yml` builds `linux/amd64` and `linux/arm64` on a
-   runner and pushes to GHCR on every `v*` tag. Then drop the `build:` key and
+   runner of each architecture and pushes a manifest list to GHCR on every
+   `v*` tag. Then drop the `build:` key and
    name the image:
 
    ```yaml
