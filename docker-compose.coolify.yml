@@ -1,0 +1,43 @@
+# Coolify: New Resource -> Docker Compose, point it at this file.
+#
+# SERVICE_FQDN_RELEASELOG_3000 is Coolify's magic variable: it generates the
+# domain, routes port 3000 through the built-in proxy and terminates TLS.
+# Coolify then fills SERVICE_FQDN_RELEASELOG with that URL, which is exactly
+# what BASE_URL needs -- so the public URL is configured in one place.
+#
+# The GitHub App secrets go into Coolify's own environment editor, not here.
+# The webhook URL and the OAuth callback have to match the generated domain:
+#   webhook   https://<domain>/webhook
+#   callback  https://<domain>/auth/github/callback
+
+services:
+  release-log:
+    build: .
+    restart: unless-stopped
+    environment:
+      - SERVICE_FQDN_RELEASELOG_3000
+      - BASE_URL=$SERVICE_FQDN_RELEASELOG
+      - PORT=3000
+      - DB_PATH=/data/release-log.sqlite
+      - GITHUB_APP_ID=${GITHUB_APP_ID:?}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:?}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:?}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:?}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:?}
+      - SIGNING_KEY=${SIGNING_KEY:?}
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:?}
+      - ADMIN_LOGINS=${ADMIN_LOGINS:?}
+      - OPEN_SIGNUP=${OPEN_SIGNUP:-}
+      - MAX_LOGS_PER_OWNER=${MAX_LOGS_PER_OWNER:-}
+      - RL_SHOWCASE_URL=${RL_SHOWCASE_URL:-}
+    volumes:
+      - release-log-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  release-log-data:

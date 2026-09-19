@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "node",
+  "packages": { "node": "24" },
+  "deploy": {
+    "startCommand": "node web/.output/server/index.mjs"
+  }
+}

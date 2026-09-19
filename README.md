@@ -27,6 +27,18 @@ npm start         # the built service: Nuxt with the core embedded (PORT, defaul
 npm run start:core  # the core alone, without the interface, for tests and machine clients
 ```
 
+### Running your own instance
+
+[SELFHOSTING.md](SELFHOSTING.md) covers it end to end: the GitHub App and its
+permissions, the secrets, and one section per deployment method — Docker
+Compose, Coolify, Railpack, Dokku and CapRover, plain Node under systemd —
+plus the reverse proxy, backups and what each startup error means.
+
+```bash
+cp .env.example .env         # fill it in
+docker compose up -d --build
+```
+
 ### Layout
 
 Nuxt (`web/`) is the only interface and embeds the core (`server.ts`, `lib/`)
@@ -73,7 +85,7 @@ exists in the production build (`import.meta.dev`).
 
 | Route | Response |
 |---|---|
-| `/health` | `{"status":"ok"}` |
+| `/health` | `{"ok":true}` |
 | `/l/<id>/versions` | Every version with date, title and link |
 | `/l/<id>/releases?page=&per_page=` | Feed with per-section counts, 100 per page at most |
 | `/l/<id>/releases/<version>` | One version with all entries |
