@@ -252,3 +252,10 @@ reconcile. The answer comes only once the log is in the index.
 
 The public JSON feed (`/l/<id>/versions`, `/l/<id>/releases`, …) and the media
 download stay in the core.
+
+## License
+
+[GNU AGPL 3.0](LICENSE). You may run, change and share release-log-hub, also
+for money. If you run a changed version for others, offer them its source code
+under the same license. For terms without that duty, ask the author for a
+commercial license.
